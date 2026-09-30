@@ -1,0 +1,19 @@
+[package]
+name = "rust-fps"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A wave-based arena FPS. Builds natively for Windows and Linux."
+
+[features]
+default = ["sound"]
+sound = ["macroquad/audio"]
+
+[dependencies]
+macroquad = { version = "0.4.16", default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

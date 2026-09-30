@@ -1,0 +1,8 @@
+/target
+
+# 61 MB of downloaded asset archives; the curated subset lives in
+# assets/models, assets/sounds and assets/textures and IS committed.
+/assets/_downloads/
+
+# Font download cache (the built font itself is committed).
+/tools/font/.cache/

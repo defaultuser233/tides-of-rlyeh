@@ -1,0 +1,30 @@
+# Line endings are pinned here rather than left to core.autocrlf, because this
+# project is built on Windows and run on both. Without this, a clone on Windows
+# checks `build.sh` out with CRLF, and a CRLF shebang fails on Linux with
+# "bad interpreter: /bin/bash^M" — which is exactly the "clone it, build it on
+# Linux" path the README documents.
+
+* text=auto
+
+# Shell scripts are executed, so they are always LF.
+*.sh    text eol=lf
+.gitattributes text eol=lf
+
+# PowerShell only ever runs on Windows.
+*.ps1   text eol=crlf
+
+# Normalised text.
+*.rs    text
+*.toml  text
+*.md    text
+*.py    text
+*.obj   text
+*.mtl   text
+
+# Never touched: normalising these would corrupt them.
+*.png   binary
+*.ogg   binary
+*.wav   binary
+*.ttf   binary
+*.otf   binary
+*.zip   binary
