@@ -12,15 +12,93 @@ const AIM_SPEED: f32 = 3.6;
 const JUMP_VELOCITY: f32 = 7.5;
 const GRAVITY: f32 = 23.0;
 const MAX_FALL: f32 = 60.0;
-const GROUND_ACCEL: f32 = 95.0;
-const AIR_ACCEL: f32 = 17.0;
-const BRAKE_ACCEL: f32 = 58.0;
+
+/// Physics integration step, in seconds. This is not the game's tick rate:
+/// `update` slices whatever the frame handed it into steps this long. The
+/// model's constants stop meaning the same thing at a different step, and the
+/// same Quake engine was measurably faster at 77 Hz than at 72 Hz for exactly
+/// that reason.
+const TARGET_STEP: f32 = 1.0 / 120.0;
+/// Most substeps one frame may cost. A frame that stalls — a load, an alt-tab,
+/// a breakpoint — must not be paid back with an unbounded number of steps:
+/// past this the step grows and the model degrades instead of the frame
+/// spiralling.
+const MAX_STEPS: f32 = 8.0;
+/// Acceleration as a rate rather than in m/s², the way Quake's `sv_accelerate`
+/// is written: one second of held input may add `rate * max_speed` to the
+/// velocity's projection on the wish direction. Full speed takes `1 / rate`
+/// seconds from a standstill whatever the stance, and the rate is what the old
+/// m/s² cap worked out to across the stances — 95 m/s² against 6.6 to 9.2 m/s
+/// of target is 10 to 14 per second.
+const GROUND_ACCEL_RATE: f32 = 12.0;
+/// Air control, deliberately weak: the old 17 m/s² at standing speed. Keeping
+/// it small is what gives the projection rule its character, because the
+/// largest gain comes where the wish direction is perpendicular to the
+/// velocity — the whole mathematics of a strafe jump.
+const AIR_ACCEL_RATE: f32 = 2.6;
+/// Ground friction: speed falls by `1 - FRICTION * dt` per step, so a released
+/// player slides roughly `speed / FRICTION` metres. 12 puts the slide at
+/// sprint speed (0.77 m) where the old 58 m/s² braking accel had it (0.73 m);
+/// Quake's own 4 would be an ice rink at this game's speeds. It runs whenever
+/// the ground speed is over the cap for the moment — which is the released-key
+/// case, and also what brings a player down to the cap after a sprint, a
+/// crouch, a prone drop or the sights coming up.
+const FRICTION: f32 = 12.0;
+/// Physics ticks after touchdown that are exempt from friction. One keeps the
+/// classic window open — the tick a body lands on cannot scrub the speed it
+/// arrived with, which is what a bunny hop needs to survive a landing. Set it
+/// to 0 to make landings bite immediately.
+const LANDING_FRICTION_GRACE_TICKS: u32 = 1;
 
 /// How far the head swings sideways when leaning around cover.
 const LEAN_DISTANCE: f32 = 0.42;
 /// Seconds of held breath available, and how fast it drains / recovers.
 const BREATH_DRAIN: f32 = 0.34;
 const BREATH_RECOVER: f32 = 0.26;
+
+/// Recoil pattern, by shot number within one burst:
+///
+/// - `1..=3`: an even climb, the muzzle barely walks;
+/// - `4..=7`: the climb grows with every shot;
+/// - `8..=10`: the muzzle walks up and to the left;
+/// - `11..=17`: the horizontal walk takes over and reaches its cap.
+///
+/// A scripted pattern exists because random recoil cannot be learned — a
+/// player can only get lucky with it. `WeaponStats::recoil_pitch` and
+/// `recoil_yaw` stay the per-shot base values; this only scales them.
+const RECOIL_UNIFORM_SHOTS: u32 = 3;
+const RECOIL_CLIMB_END: u32 = 7;
+const RECOIL_LEFT_END: u32 = 10;
+const RECOIL_HORIZONTAL_END: u32 = 17;
+/// Pitch multiplier for the first shot of the growing-climb segment and for
+/// its last, interpolated between.
+const RECOIL_CLIMB_RISE: f32 = 1.15;
+const RECOIL_CLIMB_PEAK: f32 = 1.60;
+/// Pitch and yaw multipliers while the pattern walks left.
+const RECOIL_LEFT_PITCH: f32 = 1.40;
+const RECOIL_LEFT_YAW: f32 = 0.90;
+/// Where the horizontal walk plateaus. The climb keeps some authority, but the
+/// sideways kick dominates and stops growing — a longer spray than the pattern
+/// was designed for must not walk off the screen.
+const RECOIL_HORIZONTAL_PITCH: f32 = 0.85;
+const RECOIL_HORIZONTAL_YAW_MAX: f32 = 2.40;
+/// Fraction of a shot's pitch kick the horizontal walk uses when the weapon
+/// itself has no yaw recoil, so that no burst ever walks straight up.
+const RECOIL_YAW_FLOOR_RATIO: f32 = 0.35;
+/// Seconds after the last shot before the muzzle starts falling back. A burst
+/// has to be able to climb: decaying between shots flattens the pattern down
+/// to the first shot's kick, which is what happened when the fallback ran
+/// every frame regardless.
+const RECOIL_FALLBACK_DELAY: f32 = 0.05;
+/// A gap longer than this starts a new burst, and the pattern goes back to
+/// shot one. Trigger discipline has to be able to reset it.
+const RECOIL_BURST_GAP: f32 = 0.25;
+/// Fallback speed once the delay has passed. This was inlined as
+/// `(-11.0 * dt).exp()` on the recoil lines.
+const RECOIL_FALLBACK_RATE: f32 = 11.0;
+
+/// Seconds for a hit indicator to fade from full strength to nothing.
+const HURT_DIR_DECAY: f32 = 1.5;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Stance {
@@ -145,14 +223,25 @@ pub struct Player {
     bob_amount: f32,
     pub recoil_pitch: f32,
     pub recoil_yaw: f32,
+    /// Shot count within the current burst, and seconds since the last shot.
+    /// The pattern is indexed by the first and restarted by the second.
+    burst_shot: u32,
+    since_shot: f32,
     pub hurt_flash: f32,
     pub since_damage: f32,
     pub shake: f32,
     /// Distance fallen this frame, non-zero only on the frame of landing.
     pub landing: f32,
+    /// Grounded physics ticks since touchdown; the friction grace in `update`
+    /// reads it. Counts up on the floor, resets in the air.
+    ground_ticks: u32,
     /// 0..100. Drains while something cosmic is in view; recovers when it is
     /// not. Governs aim instability and how much the view writhes.
     pub sanity: f32,
+    /// Bearing of the most recent hit, flattened, and how strongly to draw it.
+    /// Read through `hurt_dir`.
+    threat_dir: Vec3,
+    threat_t: f32,
 }
 
 impl Player {
@@ -181,11 +270,17 @@ impl Player {
             bob_amount: 0.0,
             recoil_pitch: 0.0,
             recoil_yaw: 0.0,
+            burst_shot: 0,
+            // Long enough that the first shot counts as shot one of a burst.
+            since_shot: 99.0,
             hurt_flash: 0.0,
             since_damage: 99.0,
             shake: 0.0,
             landing: 0.0,
+            ground_ticks: LANDING_FRICTION_GRACE_TICKS,
             sanity: 100.0,
+            threat_dir: Vec3::ZERO,
+            threat_t: 0.0,
         }
     }
 
@@ -317,9 +412,76 @@ impl Player {
         base + (aimed - base) * self.ads
     }
 
+    /// Kicks the muzzle by one shot's worth of recoil, shaped by where the
+    /// shot falls in the burst. `pitch` and `yaw` are the weapon's per-shot
+    /// base values — the pattern scales them, it does not replace them.
     pub fn add_recoil(&mut self, pitch: f32, yaw: f32) {
-        self.recoil_pitch += pitch;
-        self.recoil_yaw += yaw;
+        // A burst that stopped for longer than the gap is a new burst: the
+        // pattern starts over from shot one.
+        if self.since_shot > RECOIL_BURST_GAP {
+            self.burst_shot = 0;
+        }
+        self.burst_shot = self.burst_shot.saturating_add(1);
+        self.since_shot = 0.0;
+
+        let (pitch_scale, yaw_scale, leftward) = recoil_shape(self.burst_shot);
+        let yaw_kick = if leftward {
+            // Once the pattern walks left it walks left every burst, whatever
+            // sign the caller's random yaw jitter produced — a direction the
+            // player cannot predict is a direction they cannot learn to pull
+            // against. The magnitude takes a floor too, so a weapon with no yaw
+            // recoil of its own still moves sideways.
+            yaw.abs().max(pitch.abs() * RECOIL_YAW_FLOOR_RATIO) * yaw_scale
+        } else {
+            yaw * yaw_scale
+        };
+        self.recoil_yaw += yaw_kick;
+        self.recoil_pitch += pitch * pitch_scale;
+    }
+
+    /// The player pulling back against the climb. `pitch_delta` and `yaw_delta`
+    /// are view deltas in the same convention as `pitch` and `yaw` — the caller
+    /// passes the mouse movement it is about to apply to them.
+    ///
+    /// Recoil is a view offset, not a change to where the player is looking:
+    /// the muzzle falls back on its own once the burst ends, so a player who
+    /// fought the climb with the mouse would end up aiming below where they
+    /// started. Eating the accumulated recoil by the amount they pulled
+    /// removes that double correction. The compensation is capped by what has
+    /// actually accumulated: it can cancel the climb, never invert it.
+    pub fn compensate_recoil(&mut self, pitch_delta: f32, yaw_delta: f32) {
+        self.recoil_pitch = compensate_axis(self.recoil_pitch, pitch_delta);
+        self.recoil_yaw = compensate_axis(self.recoil_yaw, yaw_delta);
+    }
+
+    /// Records that damage just came in from `dir`, a world-space direction
+    /// pointing from the player at whatever hit them. The HUD turns it into the
+    /// arc that tells the player which way to turn.
+    ///
+    /// The newest hit wins: in a firefight the last thing to shoot is the thing
+    /// that matters, and blending two bearings would point at neither.
+    pub fn hurt_from(&mut self, dir: Vec3) {
+        // Flat, because the arc is drawn in the horizontal plane: a hit from a
+        // floor trap or from straight above has no bearing to show.
+        let flat = vec3(dir.x, 0.0, dir.z);
+        if flat.length_squared() < 1e-6 {
+            // Nothing to point at. Keep the last bearing rather than blanking
+            // an indicator that is still counting down.
+            return;
+        }
+        self.threat_dir = flat.normalize();
+        self.threat_t = 1.0;
+    }
+
+    /// Bearing of the most recent damage and how strongly to show it: 1.0 at
+    /// the moment of the hit, fading on a linear ramp to 0 over
+    /// `HURT_DIR_DECAY` seconds, after which this is `None`.
+    pub fn hurt_dir(&self) -> Option<(Vec3, f32)> {
+        if self.threat_t <= 0.0 {
+            None
+        } else {
+            Some((self.threat_dir, self.threat_t))
+        }
     }
 
     pub fn damage(&mut self, amount: f32) {
@@ -347,8 +509,10 @@ impl Player {
         level.point_free(self.pos, PLAYER_RADIUS, stance.height())
     }
 
+    /// One frame of player simulation. The frame-level bookkeeping — stance,
+    /// breath, aim, camera smoothing, bob, recoil fallback, healing — happens
+    /// once, and only the physics integration is substepped at `TARGET_STEP`.
     pub fn update(&mut self, level: &Level, dt: f32, input: &MoveInput) {
-        self.landing = 0.0;
         self.walk = input.walk;
         self.holding_breath = input.hold_breath;
         self.free_looking = input.free_look;
@@ -380,7 +544,13 @@ impl Player {
 
         self.ads = approach(self.ads, if input.aim { 1.0 } else { 0.0 }, dt * 7.0);
 
-        // --- movement -------------------------------------------------------
+        // --- movement intent -------------------------------------------------
+        // Resolved once, outside the substep loop: the facing, the stance and
+        // the weapon in hand cannot change between substeps, so the direction
+        // the player is pushing is a frame-level fact. Everything below it —
+        // friction, acceleration, jumping, gravity, collisions — is integrated
+        // at a fixed step instead, because the model's output depends on the
+        // step it is given.
         let fwd = vec3(-self.yaw.sin(), 0.0, -self.yaw.cos());
         let right = vec3(self.yaw.cos(), 0.0, -self.yaw.sin());
         let mut wish = fwd * input.forward + right * input.right;
@@ -407,67 +577,118 @@ impl Player {
         // The weapon in hand has the final say on foot speed.
         let speed = base_speed * input.speed_scale;
 
-        let target = vec2(wish.x, wish.z) * speed;
-        let current = vec2(self.vel.x, self.vel.z);
-        let delta = target - current;
-        let accel = if !self.on_ground {
-            AIR_ACCEL
-        } else if wish == Vec3::ZERO {
-            BRAKE_ACCEL
-        } else {
-            GROUND_ACCEL * if stance == Stance::Prone { 0.5 } else { 1.0 }
-        };
-        let max_delta = accel * dt;
-        let new_h = if delta.length() > max_delta {
-            current + delta.normalize() * max_delta
-        } else {
-            target
-        };
-        self.vel.x = new_h.x;
-        self.vel.z = new_h.y;
+        // Direction and cap stay apart the way Quake keeps `wishdir` and
+        // `wishspeed` apart: pushing two keys at once is a direction, not extra
+        // speed.
+        let wish_h = vec2(wish.x, wish.z);
+        let wishdir = wish_h.normalize_or_zero();
+        let max_speed = speed * wish_h.length();
 
-        if input.jump && self.on_ground && stance == Stance::Stand {
-            self.vel.y = JUMP_VELOCITY;
-            self.on_ground = false;
-        }
+        // --- physics ----------------------------------------------------------
+        // Fixed-step integration. `round` rather than a leftover-time
+        // accumulator: rounding always advances the body by the frame's whole
+        // `dt` of travel, so the camera never has to stutter to stay in phase
+        // with a step boundary, while the step itself lands within about ±20%
+        // of `TARGET_STEP` at 60, 120 and 144 Hz — against the 140% spread a
+        // raw `dt` leaves the model with between 60 and 144 Hz.
+        let steps = (dt / TARGET_STEP).round().clamp(1.0, MAX_STEPS);
+        let h = dt / steps;
+        let mut landing = 0.0f32;
 
-        self.vel.y = (self.vel.y - GRAVITY * dt).max(-MAX_FALL);
+        for _ in 0..steps as u32 {
+            // Ticks since touchdown, for the friction grace.
+            if self.on_ground {
+                self.ground_ticks = self.ground_ticks.saturating_add(1);
+            } else {
+                self.ground_ticks = 0;
+            }
+            // A step acts on the ground state the previous step ended with,
+            // which is how the engine this model comes from reads it too.
+            let grounded = self.on_ground;
 
-        // Deliberately unclamped: `move_and_collide` substeps internally, so a
-        // fast body cannot tunnel and the caller does not need to know a safe
-        // step size. The clamp that used to live here also capped the effective
-        // fall speed at 0.85 / dt, which made the same drop take different
-        // times at 30 fps and at 144 fps.
-        let step = self.vel * dt;
+            // Friction bites whenever the body is over the cap it is allowed on
+            // the ground. With no wish input that cap is zero, so this is the
+            // released-key case the model is specified around; with input it is
+            // the balance: a player who sprinted, crouched, dropped prone or
+            // raised their sights is brought back down to the new cap, where
+            // holding a key without it would leave them at the speed they
+            // happened to have and make every one of those values meaningless.
+            // Pushing below the cap is untouched, so speed still settles
+            // exactly on the cap rather than on a fraction of it.
+            let h_speed = vec2(self.vel.x, self.vel.z).length();
+            if grounded && self.ground_ticks > LANDING_FRICTION_GRACE_TICKS && h_speed > max_speed {
+                let v = apply_friction(vec2(self.vel.x, self.vel.z), FRICTION, h);
+                self.vel.x = v.x;
+                self.vel.z = v.y;
+            }
 
-        let (pos, col) = move_and_collide(
-            level,
-            self.pos,
-            PLAYER_RADIUS,
-            stance.height(),
-            step,
-            STEP_HEIGHT,
-        );
-        self.pos = pos;
+            if wishdir != Vec2::ZERO {
+                let rate = if !grounded {
+                    AIR_ACCEL_RATE
+                } else if stance == Stance::Prone {
+                    GROUND_ACCEL_RATE * 0.5
+                } else {
+                    GROUND_ACCEL_RATE
+                };
+                let v = accelerate(vec2(self.vel.x, self.vel.z), wishdir, max_speed, rate, h);
+                self.vel.x = v.x;
+                self.vel.z = v.y;
+            }
 
-        if col.x {
-            self.vel.x = 0.0;
-        }
-        if col.z {
-            self.vel.z = 0.0;
-        }
-        if col.ground {
-            if self.vel.y < 0.0 {
-                self.landing = -self.vel.y;
+            // A held jump relaunches the body on the tick it touches down,
+            // which is the other half of the friction grace above.
+            if input.jump && grounded && stance == Stance::Stand {
+                self.vel.y = JUMP_VELOCITY;
+                self.on_ground = false;
+            }
+
+            self.vel.y = (self.vel.y - GRAVITY * h).max(-MAX_FALL);
+
+            // Deliberately unclamped: `move_and_collide` substeps internally, so
+            // a fast body cannot tunnel and the caller does not need to know a
+            // safe step size. The clamp that used to live here also capped the
+            // effective fall speed at 0.85 / dt, which made the same drop take
+            // different times at 30 fps and at 144 fps.
+            let step = self.vel * h;
+
+            let (pos, col) = move_and_collide(
+                level,
+                self.pos,
+                PLAYER_RADIUS,
+                stance.height(),
+                step,
+                STEP_HEIGHT,
+            );
+            self.pos = pos;
+
+            if col.x {
+                self.vel.x = 0.0;
+            }
+            if col.z {
+                self.vel.z = 0.0;
+            }
+            if col.ground {
+                if self.vel.y < 0.0 {
+                    // Several substeps can touch down in one frame, and a body
+                    // resting on the floor reports a ground contact on every one
+                    // of them. The frame keeps the hardest: assigning instead
+                    // would let a later resting step overwrite a hard landing
+                    // with its own 0.4 m/s.
+                    landing = landing.max(-self.vel.y);
+                    self.vel.y = 0.0;
+                }
+                self.on_ground = true;
+            } else {
+                self.on_ground = false;
+            }
+            if col.ceiling && self.vel.y > 0.0 {
                 self.vel.y = 0.0;
             }
-            self.on_ground = true;
-        } else {
-            self.on_ground = false;
         }
-        if col.ceiling && self.vel.y > 0.0 {
-            self.vel.y = 0.0;
-        }
+
+        // Non-zero only on the frame that touched down, and then it is the
+        // hardest of the substeps that did.
+        self.landing = landing;
 
         // --- camera smoothing ------------------------------------------------
         let target_eye = stance.eye();
@@ -496,11 +717,23 @@ impl Player {
         self.bob_amount = approach(self.bob_amount, target_bob, dt * 4.0);
         self.bob_phase = (self.bob_phase + dt * self.horizontal_speed() * 1.15) % TAU;
 
-        let decay = (-11.0 * dt).exp();
-        self.recoil_pitch *= decay;
-        self.recoil_yaw *= decay;
+        // The muzzle falls back only once the burst has stopped. A fallback
+        // that ran between shots flattened every burst to the first shot's
+        // kick, so the pattern had nothing to climb and the player had nothing
+        // to learn.
+        self.since_shot += dt;
+        if self.since_shot > RECOIL_FALLBACK_DELAY {
+            let decay = (-RECOIL_FALLBACK_RATE * dt).exp();
+            self.recoil_pitch *= decay;
+            self.recoil_yaw *= decay;
+        }
         self.hurt_flash = approach(self.hurt_flash, 0.0, dt * 2.2);
         self.shake = approach(self.shake, 0.0, dt * 2.0);
+
+        // The hit indicator fades on a schedule rather than an asymptote, so
+        // that "gone" is an exact state for the HUD to test instead of a value
+        // that halves forever.
+        self.threat_t = (self.threat_t - dt / HURT_DIR_DECAY).max(0.0);
 
         self.since_damage += dt;
         if self.alive && self.since_damage > 4.5 && self.health < self.max_health {
@@ -515,5 +748,601 @@ impl Player {
         }
         let t = get_time() as f32 * 47.0;
         vec2(t.sin(), (t * 1.37).cos()) * self.shake * 13.0
+    }
+}
+
+/// Quake's acceleration rule: the horizontal velocity is limited only along the
+/// direction the player is pushing.
+///
+/// `add` is clamped so the *projection* on `wishdir` never passes `max_speed`.
+/// That is why a body already faster than the cap keeps the extra speed instead
+/// of being dragged back to it, and why a body moving across the wish direction
+/// gains rather than being rotated into it. The old rule — step the whole
+/// velocity vector toward a target velocity, by at most `accel * dt` — removed
+/// exactly the perpendicular component a strafe builds, which made air-strafing
+/// impossible by construction.
+fn accelerate(vel_h: Vec2, wishdir: Vec2, max_speed: f32, accel_rate: f32, dt: f32) -> Vec2 {
+    let proj = vel_h.dot(wishdir);
+    let mut add = accel_rate * max_speed * dt;
+    if proj + add > max_speed {
+        add = max_speed - proj;
+    }
+    if add <= 0.0 {
+        // Already at or past the cap in this direction. Holding the key must
+        // not brake the player, so nothing is added.
+        return vel_h;
+    }
+    vel_h + wishdir * add
+}
+
+/// Ground friction. The velocity keeps its direction and loses `FRICTION` of
+/// its speed per second, so a stop happens along the line the body was already
+/// travelling.
+fn apply_friction(vel_h: Vec2, friction: f32, dt: f32) -> Vec2 {
+    let speed = vel_h.length();
+    if speed <= 0.0 {
+        // A body at rest. Scaling by `0 / 0` here would write a NaN into the
+        // velocity that no later frame could clear.
+        return Vec2::ZERO;
+    }
+    let drop = speed * friction * dt;
+    // A step long enough to eat the whole speed stops the body rather than
+    // turning it around: frames hitch.
+    vel_h * ((speed - drop).max(0.0) / speed)
+}
+
+/// Moves `recoil` toward zero by the part of `delta` that opposes it. Movement
+/// in the same direction as the climb is not compensation — the caller has
+/// already applied that to the view — and the result never crosses zero, so a
+/// pull can cancel the climb but never invert it.
+fn compensate_axis(recoil: f32, delta: f32) -> f32 {
+    if recoil > 0.0 {
+        (recoil + delta.min(0.0)).max(0.0)
+    } else if recoil < 0.0 {
+        (recoil + delta.max(0.0)).min(0.0)
+    } else {
+        0.0
+    }
+}
+
+/// Recoil multipliers for shot `shot` of a burst, 1-based: pitch scale, yaw
+/// scale, and whether the yaw kick is forced left. The segment boundaries and
+/// the values they interpolate between are the `RECOIL_*` constants above.
+fn recoil_shape(shot: u32) -> (f32, f32, bool) {
+    match shot {
+        // Only reachable before the first shot of a burst.
+        0 => (1.0, 1.0, false),
+        // 1..=3: an even climb, the sides left to the weapon's own jitter.
+        1..=RECOIL_UNIFORM_SHOTS => (1.0, 0.55, false),
+        // 4..=7: the climb grows shot by shot.
+        n if n <= RECOIL_CLIMB_END => {
+            let t = (n - RECOIL_UNIFORM_SHOTS) as f32
+                / (RECOIL_CLIMB_END - RECOIL_UNIFORM_SHOTS) as f32;
+            (
+                RECOIL_CLIMB_RISE + (RECOIL_CLIMB_PEAK - RECOIL_CLIMB_RISE) * t,
+                0.70,
+                false,
+            )
+        }
+        // 8..=10: the muzzle starts walking up and to the left.
+        n if n <= RECOIL_LEFT_END => (RECOIL_LEFT_PITCH, RECOIL_LEFT_YAW, true),
+        // 11..=17: the horizontal walk takes over while the climb eases off.
+        n if n <= RECOIL_HORIZONTAL_END => {
+            let t = (n - RECOIL_LEFT_END) as f32 / (RECOIL_HORIZONTAL_END - RECOIL_LEFT_END) as f32;
+            (
+                RECOIL_LEFT_PITCH + (RECOIL_HORIZONTAL_PITCH - RECOIL_LEFT_PITCH) * t,
+                RECOIL_LEFT_YAW + (RECOIL_HORIZONTAL_YAW_MAX - RECOIL_LEFT_YAW) * t,
+                true,
+            )
+        }
+        // Past the cap the pattern holds.
+        _ => (RECOIL_HORIZONTAL_PITCH, RECOIL_HORIZONTAL_YAW_MAX, true),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::maps;
+
+    /// The physics tests want a floor and real geometry under them, so they use
+    /// the layout the campaign starts on.
+    fn test_level() -> Level {
+        Level::from_layout(&maps::arena())
+    }
+
+    /// A body standing in the arena's clear lane: x = 20, running from z = 8
+    /// towards -z, with nothing in the way for over 14 m. It starts half a
+    /// metre up, where `Layout::player_start` starts, and settles.
+    fn spawn() -> Player {
+        Player::new(vec3(20.0, 0.5, 8.0))
+    }
+
+    /// Drives `frames` updates at a fixed frame time.
+    fn run(player: &mut Player, level: &Level, input: &MoveInput, dt: f32, frames: u32) {
+        for _ in 0..frames {
+            player.update(level, dt, input);
+        }
+    }
+
+    fn flat(pos: Vec3) -> Vec2 {
+        vec2(pos.x, pos.z)
+    }
+
+    /// The rule the model is built on: pushing at a right angle to the velocity
+    /// adds to it instead of rotating it back toward the push.
+    #[test]
+    fn acceleration_spares_speed_perpendicular_to_the_wish() {
+        let wishdir = vec2(0.0, 1.0);
+        let before = vec2(8.0, 0.0);
+        let after = accelerate(before, wishdir, 6.6, GROUND_ACCEL_RATE, 1.0 / 120.0);
+        assert_eq!(
+            after.x, 8.0,
+            "the speed across the wish was eaten: {after:?}"
+        );
+        let gained = GROUND_ACCEL_RATE * 6.6 / 120.0;
+        assert!((after.y - gained).abs() < 1e-5, "{after:?}");
+        assert!(after.length() > before.length());
+
+        // The cap binds on the projection, so a body that keeps pushing
+        // sideways keeps every bit of the speed it already had. That is the
+        // whole reason a strafe jump can build speed at all.
+        let mut v = before;
+        for _ in 0..600 {
+            v = accelerate(v, wishdir, 6.6, GROUND_ACCEL_RATE, 1.0 / 120.0);
+        }
+        assert!(
+            (v.y - 6.6).abs() < 1e-4,
+            "the wish direction is not capped: {v:?}"
+        );
+        assert_eq!(v.x, 8.0, "the perpendicular speed was eaten: {v:?}");
+
+        // At the cap, holding the key adds nothing rather than braking, and a
+        // body over the cap along the wish direction keeps its speed — that is
+        // what lets a bunny hop carry into the next jump.
+        assert_eq!(
+            accelerate(v, wishdir, 6.6, GROUND_ACCEL_RATE, 1.0 / 120.0),
+            v
+        );
+        let fast = vec2(0.0, 12.0);
+        assert_eq!(
+            accelerate(fast, wishdir, 6.6, GROUND_ACCEL_RATE, 1.0 / 120.0),
+            fast
+        );
+    }
+
+    /// Friction has to be a one-way street, and it has to survive being handed
+    /// a body that is already stopped.
+    #[test]
+    fn friction_only_ever_takes_speed_away() {
+        let mut v = vec2(6.6, -3.3);
+        let mut last = v.length();
+        let mut stopped_at = None;
+        for step in 0..1200 {
+            v = apply_friction(v, FRICTION, 1.0 / 120.0);
+            let speed = v.length();
+            assert!(speed.is_finite(), "step {step} produced {v:?}");
+            assert!(
+                speed <= last + 1e-6,
+                "step {step} sped up: {last} -> {speed}"
+            );
+            if speed == 0.0 && stopped_at.is_none() {
+                stopped_at = Some(step);
+            }
+            last = speed;
+        }
+        assert!(
+            stopped_at.is_some(),
+            "ten seconds of friction never stopped it"
+        );
+        assert_eq!(last, 0.0, "ten seconds of friction left {last} m/s");
+
+        // A body at rest stays at rest: the `0 / 0` in the scaling factor would
+        // have written a NaN into the velocity that nothing could clear.
+        let rest = apply_friction(Vec2::ZERO, FRICTION, 1.0 / 120.0);
+        assert_eq!(rest, Vec2::ZERO);
+        assert!(rest.x.is_finite() && rest.y.is_finite());
+
+        // A step long enough to eat the whole speed stops the body instead of
+        // turning it around — frames hitch.
+        assert_eq!(apply_friction(vec2(0.5, 0.0), FRICTION, 1.0), Vec2::ZERO);
+    }
+
+    /// The fixed step is a guard rail, not a nicety: the same second of input
+    /// has to arrive in nearly the same place at 60 Hz and at 144 Hz. Friction
+    /// is an Euler step and the acceleration cap binds a step at a time, so
+    /// both read `dt`, and without substepping the feel drifts with the
+    /// refresh rate.
+    #[test]
+    fn sixty_and_one_forty_four_hz_agree() {
+        let level = test_level();
+        let forward = MoveInput {
+            forward: 1.0,
+            ..Default::default()
+        };
+        let idle = MoveInput::default();
+        let (dt_slow, dt_fast) = (1.0 / 60.0, 1.0 / 144.0);
+
+        // Settle both bodies onto the floor first, so the measured run starts
+        // from one place and one ground state at either rate.
+        let mut slow = spawn();
+        let mut fast = spawn();
+        run(&mut slow, &level, &idle, dt_slow, 20);
+        run(&mut fast, &level, &idle, dt_fast, 48);
+        assert!(
+            slow.on_ground && fast.on_ground,
+            "the bodies did not settle"
+        );
+        let start = slow.pos;
+        assert!(
+            (fast.pos - start).length() < 1e-3,
+            "settled apart: {start:?} vs {:?}",
+            fast.pos
+        );
+
+        // One second of held forward.
+        run(&mut slow, &level, &forward, dt_slow, 60);
+        run(&mut fast, &level, &forward, dt_fast, 144);
+        let (v_slow, v_fast) = (slow.horizontal_speed(), fast.horizontal_speed());
+        let travel_slow = (flat(slow.pos) - flat(start)).length();
+        let travel_fast = (flat(fast.pos) - flat(start)).length();
+        assert!(
+            (travel_slow - travel_fast).abs() / travel_slow < 0.02,
+            "travel: {travel_slow} vs {travel_fast}"
+        );
+        assert!(
+            (v_slow - v_fast).abs() / v_slow < 0.01,
+            "speed: {v_slow} vs {v_fast}"
+        );
+        // Both against the closed form the fixed step is meant to reproduce: a
+        // ramp of `1 / rate` seconds and then the cap. The discrete ramp lands
+        // a hair long, because its last step is a whole step and not a partial
+        // one.
+        let ideal = Stance::Stand.speed() * (1.0 - 1.0 / (2.0 * GROUND_ACCEL_RATE));
+        assert!(
+            (travel_slow - ideal).abs() < 0.15,
+            "travel {travel_slow} against the closed form {ideal}"
+        );
+
+        // Then let go and slide: friction is the part of the model most
+        // sensitive to the step size, so it is where a variable frame time
+        // would show up first.
+        let (before_slow, before_fast) = (flat(slow.pos), flat(fast.pos));
+        run(&mut slow, &level, &idle, dt_slow, 36);
+        run(&mut fast, &level, &idle, dt_fast, 86);
+        let slide_slow = (flat(slow.pos) - before_slow).length();
+        let slide_fast = (flat(fast.pos) - before_fast).length();
+        assert!(slide_slow > 0.3, "the slide was nothing: {slide_slow}");
+        assert!(
+            (slide_slow - slide_fast).abs() / slide_slow < 0.05,
+            "slide: {slide_slow} vs {slide_fast}"
+        );
+    }
+
+    /// Random recoil cannot be learned, so a burst has to walk the same path
+    /// every time — and it has to move sideways, or "pattern" means nothing.
+    #[test]
+    fn burst_recoil_is_a_repeatable_pattern() {
+        let (pitch, yaw) = (0.02, 0.004);
+        let mut a = Player::new(Vec3::ZERO);
+        let mut b = Player::new(Vec3::ZERO);
+        let mut climbed = 0.0;
+        for shot in 1..=10 {
+            a.add_recoil(pitch, yaw);
+            b.add_recoil(pitch, yaw);
+            assert_eq!(a.recoil_pitch, b.recoil_pitch, "shot {shot} differs");
+            assert_eq!(a.recoil_yaw, b.recoil_yaw, "shot {shot} differs");
+            assert!(a.recoil_pitch > climbed, "shot {shot} did not climb");
+            climbed = a.recoil_pitch;
+        }
+        assert!(a.recoil_yaw.abs() > 1e-3, "the pattern never went sideways");
+
+        // The leftward walk cannot be undone by whichever sign the caller's
+        // random yaw jitter happened to have: cam yaw grows to the left in this
+        // engine, and shots 8..=10 walk left no matter what they are handed.
+        let mut c = Player::new(Vec3::ZERO);
+        for _ in 0..RECOIL_CLIMB_END {
+            c.add_recoil(pitch, -yaw);
+        }
+        let before_left = c.recoil_yaw;
+        for _ in 0..(RECOIL_LEFT_END - RECOIL_CLIMB_END) {
+            c.add_recoil(pitch, -yaw);
+        }
+        assert!(
+            c.recoil_yaw - before_left > 0.0,
+            "shots {}..={} did not walk left: {before_left} -> {}",
+            RECOIL_CLIMB_END + 1,
+            RECOIL_LEFT_END,
+            c.recoil_yaw
+        );
+    }
+
+    /// A burst that pauses longer than the group gap starts over: the pattern
+    /// follows trigger discipline, not the magazine.
+    #[test]
+    fn a_pause_starts_a_new_burst() {
+        let level = test_level();
+        let idle = MoveInput::default();
+        let mut p = spawn();
+
+        // Four shots. The first is the bare base value; the fourth opens the
+        // climbing segment and is worth more.
+        p.add_recoil(0.02, 0.0);
+        let shot_one = p.recoil_pitch;
+        for _ in 0..2 {
+            p.add_recoil(0.02, 0.0);
+        }
+        let before = p.recoil_pitch;
+        p.add_recoil(0.02, 0.0);
+        let shot_four = p.recoil_pitch - before;
+        assert!(
+            shot_four > shot_one,
+            "shot four should out-climb shot one: {shot_four} vs {shot_one}"
+        );
+
+        // Wait out the group gap, fire again, and the pattern is back at shot
+        // one.
+        run(&mut p, &level, &idle, 1.0 / 60.0, 30);
+        let before = p.recoil_pitch;
+        p.add_recoil(0.02, 0.0);
+        let after_pause = p.recoil_pitch - before;
+        assert!(
+            (after_pause - shot_one).abs() < 1e-6,
+            "the burst did not reset: {after_pause} vs {shot_one}"
+        );
+    }
+
+    /// The climb has to survive the burst. A fallback that ran regardless of
+    /// how recently the weapon fired left the muzzle at the first shot's kick
+    /// for the whole magazine.
+    #[test]
+    fn recoil_holds_during_the_burst_and_falls_back_after_it() {
+        let level = test_level();
+        let idle = MoveInput::default();
+        let mut p = spawn();
+
+        p.add_recoil(0.05, 0.0);
+        let peak = p.recoil_pitch;
+        assert!(peak > 0.0);
+        // Constant, so the delay is checked when the test binary is built
+        // rather than after the first shot — and it cannot be tuned to zero.
+        const _: () = assert!(RECOIL_FALLBACK_DELAY > 0.0);
+
+        // A frame inside the fallback delay leaves the muzzle where it is.
+        p.update(&level, 0.01, &idle);
+        assert_eq!(p.recoil_pitch, peak, "it fell back inside the delay");
+
+        // Sustained fire holds it up: sixty shots fired faster than the delay,
+        // and the muzzle never comes down.
+        let mut held = peak;
+        for shot in 2..=60 {
+            p.add_recoil(0.05, 0.0);
+            p.update(&level, 1.0 / 60.0, &idle);
+            assert!(p.recoil_pitch > held, "the climb stalled on shot {shot}");
+            held = p.recoil_pitch;
+        }
+
+        // Stop firing and it comes back down on its own.
+        let top = p.recoil_pitch;
+        run(&mut p, &level, &idle, 1.0 / 60.0, 30);
+        assert!(
+            p.recoil_pitch < top * 0.5,
+            "the muzzle did not fall back: {top} -> {}",
+            p.recoil_pitch
+        );
+    }
+
+    /// The HUD needs to know which way to draw the arc and when to stop drawing
+    /// it, and "stopped" has to be an exact state rather than a value that
+    /// halves forever.
+    #[test]
+    fn hurt_direction_fades_to_nothing() {
+        let level = test_level();
+        let idle = MoveInput::default();
+        let mut p = spawn();
+        assert!(p.hurt_dir().is_none(), "a fresh body has not been hit");
+
+        p.hurt_from(vec3(3.0, 9.0, 4.0));
+        let (dir, fresh) = p.hurt_dir().expect("just hit");
+        assert!((fresh - 1.0).abs() < 1e-6, "strength {fresh}");
+        assert!((dir.length() - 1.0).abs() < 1e-6, "not a bearing: {dir:?}");
+        assert_eq!(dir.y, 0.0, "the arc is horizontal: {dir:?}");
+        assert!(dir.x > 0.0 && dir.z > 0.0, "{dir:?}");
+
+        // Half of the window in, half the strength.
+        run(&mut p, &level, &idle, 1.0 / 60.0, 45);
+        let (_, half) = p.hurt_dir().expect("still inside the window");
+        assert!((half - 0.5).abs() < 0.05, "half of 1.5 s: {half}");
+
+        // A hit from straight above carries no bearing, and that must not blank
+        // an arc that is still counting down.
+        p.hurt_from(vec3(0.0, 5.0, 0.0));
+        assert!(p.hurt_dir().is_some(), "the arc was blanked");
+
+        // A fresh hit resets the strength and takes over the bearing...
+        p.hurt_from(vec3(-1.0, 0.0, 0.0));
+        let (dir, again) = p.hurt_dir().expect("hit again");
+        assert!((again - 1.0).abs() < 1e-6, "strength {again}");
+        assert!(dir.x < 0.0, "{dir:?}");
+
+        // ...and then it runs out exactly.
+        run(&mut p, &level, &idle, 1.0 / 60.0, 100);
+        assert!(p.hurt_dir().is_none(), "still showing {:?}", p.hurt_dir());
+    }
+
+    /// The caps are the balance, and the model is not allowed to move them:
+    /// every stance, the sprint, the walk, the sights and the weapon's own
+    /// move scale still arrive at the speed they always did.
+    #[test]
+    fn every_speed_cap_still_arrives() {
+        let level = test_level();
+        let stand = Stance::Stand.speed();
+        let cases = [
+            (
+                MoveInput {
+                    forward: 1.0,
+                    ..Default::default()
+                },
+                stand,
+                "stand",
+            ),
+            (
+                MoveInput {
+                    forward: 1.0,
+                    sprint: true,
+                    ..Default::default()
+                },
+                SPRINT_SPEED,
+                "sprint",
+            ),
+            (
+                MoveInput {
+                    forward: 1.0,
+                    stance: Stance::Crouch,
+                    ..Default::default()
+                },
+                Stance::Crouch.speed(),
+                "crouch",
+            ),
+            (
+                MoveInput {
+                    forward: 1.0,
+                    stance: Stance::Prone,
+                    ..Default::default()
+                },
+                Stance::Prone.speed(),
+                "prone",
+            ),
+            (
+                MoveInput {
+                    forward: 1.0,
+                    walk: true,
+                    ..Default::default()
+                },
+                stand * 0.52,
+                "walk",
+            ),
+            // Raising the sights drops the cap mid-stride, which is the case
+            // the friction rule exists for.
+            (
+                MoveInput {
+                    forward: 1.0,
+                    aim: true,
+                    ..Default::default()
+                },
+                AIM_SPEED,
+                "aiming down sights",
+            ),
+            (
+                MoveInput {
+                    forward: 1.0,
+                    speed_scale: 0.72,
+                    ..Default::default()
+                },
+                stand * 0.72,
+                "a heavy weapon",
+            ),
+        ];
+
+        for (input, want, what) in cases {
+            let mut p = spawn();
+            run(&mut p, &level, &input, TARGET_STEP, 120);
+            let got = p.horizontal_speed();
+            assert!((got - want).abs() < 0.01, "{what}: {got} m/s, want {want}");
+        }
+    }
+
+    /// The grace tick is the bunny hop's window, and the cap still has teeth:
+    /// a body landing over the cap keeps its landing speed for exactly one
+    /// physics tick, and the tick after that friction takes it away.
+    #[test]
+    fn a_landing_keeps_its_speed_for_one_tick() {
+        let level = test_level();
+        let forward = MoveInput {
+            forward: 1.0,
+            ..Default::default()
+        };
+        let cap = Stance::Stand.speed();
+        let mut p = spawn();
+        // Drop in from three metres up, already at sprint speed and pushing
+        // forward with it.
+        p.pos.y = 3.0;
+        p.vel = vec3(0.0, -2.0, -SPRINT_SPEED);
+
+        let mut landed = None;
+        for frame in 0..600 {
+            // One physics tick per frame: the grace is counted in substeps, so
+            // it needs a frame that is exactly one of them.
+            p.update(&level, TARGET_STEP, &forward);
+            if p.on_ground {
+                landed = Some(frame);
+                break;
+            }
+        }
+        assert!(landed.is_some(), "the body never landed");
+        let speed = p.horizontal_speed();
+        assert!(
+            (speed - SPRINT_SPEED).abs() < 1e-3,
+            "the landing scrubbed speed: {speed}"
+        );
+        assert!(speed > cap);
+
+        // The next tick is the grace: it survives, which is the whole hop.
+        p.update(&level, TARGET_STEP, &forward);
+        assert_eq!(p.horizontal_speed(), speed, "the grace tick took speed");
+
+        // And on the tick after that the cap is back in charge.
+        p.update(&level, TARGET_STEP, &forward);
+        assert!(
+            p.horizontal_speed() < speed - 0.5,
+            "friction never bit: {}",
+            p.horizontal_speed()
+        );
+    }
+
+    /// What the projection rule is for: a hop with the view turning against a
+    /// strafe builds speed past the cap the ground holds. The old model could
+    /// not do this — it dragged the whole velocity vector toward the target, so
+    /// the sideways speed a strafe built was exactly what it deleted.
+    #[test]
+    fn a_turning_strafe_gains_speed_in_the_air() {
+        let level = test_level();
+        let forward = MoveInput {
+            forward: 1.0,
+            ..Default::default()
+        };
+        let idle = MoveInput::default();
+        let mut p = spawn();
+        run(&mut p, &level, &idle, TARGET_STEP, 60);
+        run(&mut p, &level, &forward, TARGET_STEP, 120);
+        let grounded = p.horizontal_speed();
+        assert!(
+            (grounded - Stance::Stand.speed()).abs() < 0.01,
+            "the run-up did not reach the cap: {grounded}"
+        );
+
+        // Jump, and hold forward and right while the view turns: the classic
+        // strafe jump.
+        let input = MoveInput {
+            forward: 1.0,
+            right: 1.0,
+            jump: true,
+            ..Default::default()
+        };
+        let turn = 90.0f32.to_radians() / 240.0;
+        let mut best = grounded;
+        for _ in 0..240 {
+            p.yaw += turn;
+            p.update(&level, TARGET_STEP, &input);
+            best = best.max(p.horizontal_speed());
+            if p.on_ground {
+                // Back on the floor: one hop is over.
+                break;
+            }
+        }
+        assert!(
+            best > grounded + 0.5,
+            "the strafe gained nothing: {grounded} -> {best}"
+        );
     }
 }

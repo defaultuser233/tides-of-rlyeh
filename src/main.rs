@@ -1,20 +1,27 @@
+mod assets;
 mod audio;
 mod campaign;
 mod combat;
 mod effects;
 mod enemy;
+mod fog;
 mod grenade;
 mod hud;
 mod i18n;
 mod level;
 mod maps;
 mod mesh;
+#[cfg(test)]
+mod mesh_tests;
 mod pickup;
 mod player;
 mod pointer;
+mod surface;
 mod util;
 mod viewmodel;
 mod weapon;
+#[cfg(windows)]
+mod win32;
 
 use audio::Sfx;
 use campaign::{Mission, Objective};
@@ -108,6 +115,21 @@ struct Game {
     enemies: Vec<Enemy>,
     pickups: Vec<Pickup>,
     effects: effects::Effects,
+    /// The fog material, or `None` if the driver refused the shader.
+    fog: Option<fog::Fog>,
+    /// The six world textures. Held here rather than in `Level` because they
+    /// outlive any one level — a mission switch rebuilds the level, not the
+    /// GPU uploads.
+    textures: surface::Textures,
+    /// Reused by `render_world` for every per-frame mesh. `draw_mesh` copies
+    /// the vertices into macroquad's own batch the moment it is called, so one
+    /// buffer serves the whole frame — and, kept here rather than built per
+    /// frame, it holds on to the capacity it last needed.
+    scratch: Mesh,
+    /// The same idea for the damage readouts: rebuilt every frame from the
+    /// effects list, so a firefight does not allocate a vector per frame for
+    /// labels that expire in three quarters of a second.
+    damage_labels: Vec<(Vec2, f32, bool)>,
     mission: &'static Mission,
     mission_index: usize,
     rng: Rng,
@@ -125,6 +147,8 @@ struct Game {
     trigger_armed: bool,
     /// Latched state for toggle-style aiming.
     aim_on: bool,
+    /// Sprint, as a mode rather than a held key. See `sprint_state`.
+    sprint: bool,
     /// Commanded lean, -1 left .. +1 right. In toggle mode this is latched.
     lean_cmd: f32,
     heal_t: f32,
@@ -142,6 +166,11 @@ struct Game {
     objective_done: bool,
     extraction_open: bool,
     dead_timer: f32,
+    /// Seconds of hit-stop left after a kill. While this is positive the world
+    /// is advanced at `HITSTOP_SCALE`, and the timers that belong to the
+    /// simulation (this one included) keep the real clock so the pause cannot
+    /// extend itself.
+    hitstop: f32,
 
     banner: Option<(String, f32)>,
     toast: Option<(String, f32)>,
@@ -155,7 +184,11 @@ struct Game {
 impl Game {
     fn new() -> Self {
         let mission = campaign::get(0);
-        let level = Level::from_layout(&maps::campaign()[mission.layout]);
+        let mut level = Level::from_layout(&maps::campaign()[mission.layout]);
+        // Only once a window exists: this uploads textures and fixes up their
+        // sampling, neither of which works from a headless test.
+        let textures = surface::Textures::load();
+        level.dress(&textures);
         let player = Player::new(level.player_start);
         let arsenal = Arsenal::new(mission.loadout);
         let survive_left = mission.survive_seconds;
@@ -170,6 +203,10 @@ impl Game {
             enemies: Vec::new(),
             pickups: Vec::new(),
             effects: effects::Effects::new(),
+            textures,
+            fog: fog::Fog::load(),
+            scratch: mesh::empty_mesh(),
+            damage_labels: Vec::new(),
             mission,
             mission_index: 0,
             rng: Rng::new(0x9E37_79B9),
@@ -182,6 +219,7 @@ impl Game {
             mouse_ready: false,
             trigger_armed: false,
             aim_on: false,
+            sprint: false,
             lean_cmd: 0.0,
             heal_t: 0.0,
             heal_index: 0,
@@ -197,6 +235,7 @@ impl Game {
             objective_done: false,
             extraction_open: false,
             dead_timer: 0.0,
+            hitstop: 0.0,
             banner: None,
             toast: None,
             unlocked: 1,
@@ -212,6 +251,9 @@ impl Game {
         self.mission = campaign::get(self.mission_index);
         let layouts = maps::campaign();
         self.level = Level::from_layout(&layouts[self.mission.layout]);
+        // A retry or the next mission rebuilds the geometry; the textures are
+        // already uploaded, so only the handle has to be reattached.
+        self.level.dress(&self.textures);
         self.player = Player::new(self.level.player_start);
         self.player.alive = true;
         self.arsenal = Arsenal::new(self.mission.loadout);
@@ -228,6 +270,7 @@ impl Game {
         self.mouse_ready = false;
         self.trigger_armed = false;
         self.aim_on = false;
+        self.sprint = false;
         self.lean_cmd = 0.0;
         self.heal_t = 0.0;
         self.overlay = Overlay::None;
@@ -243,6 +286,7 @@ impl Game {
         self.objective_done = false;
         self.extraction_open = false;
         self.dead_timer = 0.0;
+        self.hitstop = 0.0;
         self.result_sel = 0;
 
         let s = self.level.player_start;
@@ -293,6 +337,10 @@ impl Game {
         self.phase = Phase::Playing;
         self.trigger_armed = false;
         self.mouse_ready = false;
+        // Latched input is dropped on the way back in, for the same reason the
+        // trigger is: whatever the player was holding when they opened the menu
+        // is not something they are still asking for now.
+        self.sprint = false;
     }
 
     fn say(&mut self, text: impl Into<String>) {
@@ -350,6 +398,37 @@ fn level_name(level: &Level) -> String {
     }
 }
 
+/// How far forward the player has to be pushing for a sprint to keep itself on.
+const SPRINT_FORWARD: f32 = 0.4;
+
+/// Hit-stop: how long a kill slows the world, and what fraction of real time
+/// the world gets while it lasts. Short enough to read as impact rather than as
+/// a stutter, and never a full stop — a frozen frame in an FPS reads as a
+/// hitch, not as weight.
+const HITSTOP_TIME: f32 = 0.05;
+const HITSTOP_SCALE: f32 = 0.25;
+
+/// How far a tracer is kept away from the camera plane, in metres.
+///
+/// A beam has a ring of vertices at each end, and a ring that lands on the
+/// camera plane projects through the near plane and smears into a wedge across
+/// half the screen. The player's own shots start at the eye, and an enemy shot
+/// that connects ends at it, so both ends have to be pushed out by this much.
+const TRACER_NEAR: f32 = 0.55;
+
+/// Whether the player is sprinting this frame.
+///
+/// Sprint is a mode rather than a held key: Shift latches it on and it drops
+/// the moment the player stops asking to run — forward released, or sights up.
+/// Holding the key is worse than it sounds on this keyboard, because Shift is
+/// also the IME's language toggle (see `disable_ime`) and the shortcut Windows
+/// uses to offer Sticky Keys, so a key that only has to be tapped is a key that
+/// stops fighting both of them.
+fn sprint_state(on: bool, toggled: bool, forward: f32, aiming: bool) -> bool {
+    let latched = if toggled { !on } else { on };
+    latched && forward > SPRINT_FORWARD && !aiming
+}
+
 /// Stop the Windows IME from eating the game's keys.
 ///
 /// On a Chinese Windows install Left Shift is the IME's default
@@ -366,6 +445,72 @@ fn disable_ime() {
     macroquad::miniquad::window::set_ime_enabled(false);
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sprint had to become a mode rather than a held key, and the parts that
+    /// matter are all in the transitions: a tap has to latch, a second tap has
+    /// to drop it, and letting go of forward has to drop it too — otherwise you
+    /// walk away from the keyboard still flagged as running.
+    #[test]
+    fn sprint_latches_and_releases_itself() {
+        // A tap latches it, and it stays latched while running.
+        assert!(sprint_state(false, true, 1.0, false));
+        assert!(sprint_state(true, false, 1.0, false));
+        // A second tap drops it.
+        assert!(!sprint_state(true, true, 1.0, false));
+        // Releasing forward drops it, and it stays dropped: the tap was a
+        // command to run *now*, not a mode that waits for the next step.
+        assert!(!sprint_state(true, false, 0.0, false));
+        // Nor does it survive the sights coming up.
+        assert!(!sprint_state(true, false, 1.0, true));
+        // Backing up is not running.
+        assert!(!sprint_state(true, false, -1.0, false));
+        // A tap while standing still has nothing to attach to.
+        assert!(!sprint_state(false, true, 0.0, false));
+    }
+
+    /// The damage readouts are the only thing the game projects from world
+    /// space back into pixels, and a mirrored or shifted projection would pass
+    /// a test that only checked for a finite number. A point on the ground five
+    /// metres dead ahead has to land on the centre line and below the middle,
+    /// at the angle the camera's own fov puts it; the player's right has to
+    /// come out right; and a point behind the camera has to project to nothing.
+    #[test]
+    fn the_projection_puts_the_ground_ahead_below_the_crosshair() {
+        let (w, h) = (1280.0f32, 720.0f32);
+        let fovy = 62.0f32.to_radians();
+        let eye = vec3(0.0, 1.8, 0.0);
+        let vp = view_projection(eye, eye + Vec3::NEG_Z, Vec3::Y, fovy, w, h);
+
+        let ground = project_to_screen(&vp, vec3(0.0, 0.0, -5.0), w, h).expect("in front");
+        assert!(
+            (ground.x - w * 0.5).abs() < 0.5,
+            "not on the centre line: {ground:?}"
+        );
+        // Eye 1.8 m up, 5 m out: the point sits atan(1.8 / 5) below the horizon
+        // and the camera puts `f * tan(angle)` of that down the screen.
+        let f = (h * 0.5) / (fovy * 0.5).tan();
+        let want = h * 0.5 + f * (1.8 / 5.0);
+        assert!(
+            (ground.y - want).abs() < 1.0,
+            "ground point at {ground:?}, expected y {want}"
+        );
+
+        // Five metres ahead and 2.5 m to the player's right: right of centre.
+        // Straight out to the side would be culled, correctly — it sits on the
+        // eye plane, where the perspective divide has no answer.
+        let right = project_to_screen(&vp, vec3(2.5, 1.8, -5.0), w, h).expect("in front");
+        assert!(right.x > w * 0.5, "the player's right came out left");
+
+        assert!(
+            project_to_screen(&vp, vec3(0.0, 1.8, 5.0), w, h).is_none(),
+            "a point behind the camera was projected anyway"
+        );
+    }
+}
+
 fn window_conf() -> Conf {
     Conf {
         window_title: "STEEL FRONT / 钢铁前线".to_owned(),
@@ -378,17 +523,26 @@ fn window_conf() -> Conf {
     }
 }
 
+/// The colour the sky reaches at the horizon.
+///
+/// Shared with the fog so that distant geometry fades into the sky rather than
+/// crossing it with a hard edge — two expressions that had to agree would
+/// eventually stop agreeing.
+fn horizon_colour(sky: Color) -> Color {
+    Color::new(
+        (sky.r * 0.55 + 0.12).min(1.0),
+        (sky.g * 0.50 + 0.10).min(1.0),
+        (sky.b * 0.45 + 0.09).min(1.0),
+        1.0,
+    )
+}
+
 fn draw_sky(sky: Color) {
     let h = screen_height();
     let w = screen_width();
     let bands = 40.0;
     let top = Color::new(sky.r * 0.30, sky.g * 0.32, sky.b * 0.42, 1.0);
-    let bottom = Color::new(
-        (sky.r * 0.55 + 0.12).min(1.0),
-        (sky.g * 0.50 + 0.10).min(1.0),
-        (sky.b * 0.45 + 0.09).min(1.0),
-        1.0,
-    );
+    let bottom = horizon_colour(sky);
     for i in 0..bands as i32 {
         let t = i as f32 / bands;
         let c = Color::new(
@@ -421,13 +575,24 @@ fn ray_player(player: &Player, origin: Vec3, dir: Vec3) -> Option<f32> {
     )
 }
 
-fn apply_player_damage(player: &mut Player, armor: &mut f32, audio: &audio::Audio, amount: f32) {
+fn apply_player_damage(
+    player: &mut Player,
+    armor: &mut f32,
+    audio: &audio::Audio,
+    amount: f32,
+    from: Vec3,
+) {
     if !player.alive {
         return;
     }
     let absorbed = (amount * 0.65).min(*armor);
     *armor -= absorbed;
     player.damage(amount - absorbed);
+    // Where the hit came from, for the HUD's directional indicator. `hurt_from`
+    // reads a direction from the player out toward the source and ignores a
+    // flat zero, and this is the one place damage reaches the player, so the
+    // bearing can never be recorded twice for one hit.
+    player.hurt_from(from - player.pos);
     audio.play(Sfx::PlayerHurt);
 }
 
@@ -508,8 +673,21 @@ fn fire_player_shot(game: &mut Game, audio: &audio::Audio, pressed: bool, held: 
             }
         }
         if !s.melee {
-            game.effects
-                .tracer(eye, hit.point, Color::new(1.0, 0.92, 0.55, 1.0), 0.013);
+            // Outgoing fire is the thin, pale strand. The two tracer looks are
+            // built so they are told apart without colour: narrow and washed
+            // out against the incoming one's wide, deep red — colour alone is
+            // the first thing a colour-blind player or a washed-out monitor
+            // loses. It starts out along the barrel rather than at the eye;
+            // see `TRACER_NEAR`. The reach clamp is for a shot into something
+            // the muzzle is already touching, where the offset would otherwise
+            // start the strand beyond its own impact.
+            let reach = (hit.point - eye).length();
+            game.effects.tracer(
+                eye + dir * TRACER_NEAR.min(reach * 0.9),
+                hit.point,
+                Color::new(1.0, 0.97, 0.80, 1.0),
+                0.012,
+            );
         }
     }
 
@@ -527,6 +705,11 @@ fn kill_enemy(game: &mut Game, index: usize, audio: &audio::Audio) {
     game.killed += 1;
     let score = game.enemies[index].score;
     game.score += score;
+    // A kill is the one moment worth a flash and a beat of slow motion. The
+    // flash used to be a field that only ever decayed — nothing set it, so the
+    // frame it was built for never came; it decays in `effects.update`.
+    game.effects.kill_flash = 1.0;
+    game.hitstop = HITSTOP_TIME;
     audio.play(Sfx::EnemyDeath);
     let at = vec3(game.enemies[index].pos.x, 0.0, game.enemies[index].pos.z);
     let spawns = game.enemies[index].spawns_on_death;
@@ -637,6 +820,10 @@ async fn main() {
     // The window exists by the time this body runs, so the IME can be detached
     // before the first keystroke is read.
     disable_ime();
+    // Same reason, other direction: Shift is sprint here, and five taps of it is
+    // how Windows asks whether you want Sticky Keys.
+    #[cfg(windows)]
+    let _quiet_keys = win32::QuietKeys::new();
     i18n::set_lang(i18n::Lang::Zh);
 
     let fonts = hud::Fonts::load().await;
@@ -648,6 +835,10 @@ async fn main() {
 
     loop {
         let dt = get_frame_time().min(0.05);
+        // The HUD takes its accent from the arena, so this has to land before
+        // any panel is drawn — menus included, where the arena is the last one
+        // played.
+        hud::set_accent(game.level.accent);
 
         match game.phase {
             Phase::Menu => {
@@ -868,7 +1059,18 @@ async fn main() {
                     if game.overlay == Overlay::None {
                         pointer::clip(true);
                         pointer::show(false);
-                        simulate(&mut game, &mut audio, dt);
+                        // Hit-stop slows the world, not the game: the pointer,
+                        // the input edges and the HUD all keep the real clock,
+                        // and only `simulate` sees the scaled rate. Timed here
+                        // rather than inside `simulate` because it is the one
+                        // timer that must not be slowed by itself.
+                        let world_dt = if game.hitstop > 0.0 {
+                            dt * HITSTOP_SCALE
+                        } else {
+                            dt
+                        };
+                        game.hitstop = (game.hitstop - dt).max(0.0);
+                        simulate(&mut game, &mut audio, world_dt);
                     } else {
                         // The world holds still while a screen is open.
                         pointer::clip(false);
@@ -1139,6 +1341,11 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
     } else {
         game.player.yaw += look.x;
         game.player.pitch = (game.player.pitch + look.y).clamp(-1.53, 1.53);
+        // Pulling down against the climb has to eat the accumulated recoil, or
+        // the automatic fallback stacks on top of the player's own correction
+        // and lands the aim below where the burst started. Only here: in free
+        // look the player is turning their head, not fighting the muzzle.
+        game.player.compensate_recoil(look.y, look.x);
     }
 
     // --- stance -------------------------------------------------------------
@@ -1176,11 +1383,13 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
     }
     let lean = game.lean_cmd;
 
-    let sprint_held = is_key_down(KeyCode::LeftShift);
     let forward = (is_key_down(KeyCode::W) as i32 - is_key_down(KeyCode::S) as i32) as f32;
+    let sprint_toggled =
+        alive && (is_key_pressed(KeyCode::LeftShift) || is_key_pressed(KeyCode::RightShift));
+    game.sprint = sprint_state(game.sprint, sprint_toggled, forward, game.player.ads > 0.4);
     // Sprinting forces you upright and drops any latched lean, otherwise a
     // toggled lean would silently block sprinting until you noticed.
-    if alive && sprint_held && forward > 0.4 && game.player.ads < 0.4 {
+    if alive && game.sprint && forward > SPRINT_FORWARD {
         game.stance = Stance::Stand;
         game.lean_cmd = 0.0;
     }
@@ -1192,7 +1401,7 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
             forward,
             right: (is_key_down(KeyCode::D) as i32 - is_key_down(KeyCode::A) as i32) as f32,
             jump: is_key_down(KeyCode::Space),
-            sprint: sprint_held,
+            sprint: game.sprint,
             aim: aiming,
             walk: is_key_down(KeyCode::CapsLock),
             lean,
@@ -1431,12 +1640,29 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
     // --- enemy AI -----------------------------------------------------------
     let positions: Vec<Vec3> = game.enemies.iter().map(|e| e.pos).collect();
     let mut attacks: Vec<(Vec3, Attack)> = Vec::new();
+    // A footfall is a pulse that `update` overwrites every frame, so it has to
+    // be read here, on the frame it fires; the dust is emitted after the loop
+    // because that is where the other fields of `game` are free again.
+    let mut footfalls: Vec<Vec3> = Vec::new();
     for (i, e) in game.enemies.iter_mut().enumerate() {
         // The whole squad's positions, once — the enemy skips its own entry.
         // This used to allocate a filtered copy per enemy per frame.
         if let Some(atk) = e.update(&game.level, &game.player, &positions, i, dt, &mut game.rng) {
             attacks.push((e.pos, atk));
         }
+        if e.take_footfall() {
+            footfalls.push(e.pos);
+        }
+    }
+    for at in footfalls {
+        // A small, ground-hugging puff: enough that a unit crossing open ground
+        // reads as walking, little enough that it never looks like a hit.
+        game.effects.smoke(
+            at + vec3(0.0, 0.05, 0.0),
+            Color::new(0.45, 0.42, 0.36, 0.5),
+            5,
+            &mut game.rng,
+        );
     }
     for (from, atk) in attacks {
         match atk {
@@ -1454,17 +1680,41 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
                     && t > 0.02
                     && t < wall
                 {
-                    apply_player_damage(&mut game.player, &mut game.armor, audio, damage);
+                    // `origin` is the eye the round left, not the feet `from`
+                    // holds: both sit on the same column, so the flattened arc
+                    // cannot tell them apart today, but the muzzle is the thing
+                    // the indicator is naming.
+                    apply_player_damage(&mut game.player, &mut game.armor, audio, damage, origin);
                     game.heal_t = 0.0;
-                    end = origin + dir * t;
+                    // Stop the strand short of the eye rather than on it: a
+                    // beam that ends on the camera plane smears the same way a
+                    // player's own tracer does at its start (see `TRACER_NEAR`),
+                    // and the last half metre is behind the crosshair anyway.
+                    end = origin + dir * (t - TRACER_NEAR).max(0.05);
                 }
+                // Incoming fire is the wide, deep orange-red line, and it
+                // carries a short bright head at the muzzle: width and shape
+                // both say "that one is coming at you" before the colour does,
+                // and the head marks the shooter even when the rest of the
+                // tracer is lost against a bright wall.
                 game.effects
-                    .tracer(origin, end, Color::new(1.0, 0.45, 0.25, 1.0), 0.011);
+                    .tracer(origin, end, Color::new(1.0, 0.32, 0.10, 1.0), 0.024);
+                // The head is clamped to the shot itself, so a point-blank one
+                // cannot leave a bright stub sticking out past its own hit.
+                let head = (end - origin).length().min(0.6);
+                game.effects.tracer(
+                    origin,
+                    origin + dir * head,
+                    Color::new(1.0, 0.86, 0.55, 1.0),
+                    0.034,
+                );
                 let d = (from - game.player.pos).length();
                 audio.play_at(Sfx::EnemyShot, d);
             }
             Attack::Melee { damage } => {
-                apply_player_damage(&mut game.player, &mut game.armor, audio, damage);
+                // A swing carries no origin of its own; the attacker's feet are
+                // where it came from.
+                apply_player_damage(&mut game.player, &mut game.armor, audio, damage, from);
                 game.heal_t = 0.0;
             }
         }
@@ -1535,7 +1785,15 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
         let d = eye.distance(b.pos);
         if d < b.radius && game.level.line_of_sight(b.pos, eye) {
             let falloff = 1.0 - (d / b.radius).powf(1.4);
-            apply_player_damage(&mut game.player, &mut game.armor, audio, b.damage * falloff);
+            // The blast has no single muzzle: the grenade's own position is the
+            // source the player has to turn toward.
+            apply_player_damage(
+                &mut game.player,
+                &mut game.armor,
+                audio,
+                b.damage * falloff,
+                b.pos,
+            );
             game.heal_t = 0.0;
         }
     }
@@ -1744,6 +2002,61 @@ fn best_med(game: &Game) -> usize {
         .unwrap_or(0)
 }
 
+/// Seconds of a damage readout's life that are not drawn.
+///
+/// `hud::draw_damage_numbers` has no alpha and draws at a fixed opacity, so the
+/// fade has to live here. A hard cut for the last stretch reads better than
+/// nothing: by then the number is already rising away from the hit (the rise is
+/// `effects.rs`'s, which lifts the world point every frame), so the cut looks
+/// like the readout expiring rather than blinking out mid-flight.
+const DAMAGE_NUMBER_CUTOFF: f32 = 0.3;
+
+/// A perspective view-projection built from `Camera3D`'s own constructors and
+/// defaults, for the CPU-side projection macroquad 0.4.16 does not offer for
+/// 3D cameras.
+fn view_projection(cam: Vec3, target: Vec3, up: Vec3, fovy: f32, width: f32, height: f32) -> Mat4 {
+    let aspect = width / height.max(1.0);
+    // The near and far planes are `Camera3D::default`'s; the near plane only
+    // has to keep the divide away from zero.
+    Mat4::perspective_rh_gl(fovy, aspect, 0.01, 10000.0) * Mat4::look_at_rh(cam, target, up)
+}
+
+/// Where a world point lands in window pixels, or `None` when it is behind the
+/// camera. GL's clip space gives `w = -z_view`, so a `w` at or below the near
+/// plane is the point being on or behind the eye plane, where the perspective
+/// divide is meaningless and the result would smear across the screen.
+fn project_to_screen(view_proj: &Mat4, p: Vec3, width: f32, height: f32) -> Option<Vec2> {
+    let clip = *view_proj * p.extend(1.0);
+    if clip.w <= 0.01 {
+        return None;
+    }
+    let ndc = clip.truncate() / clip.w;
+    if !ndc.x.is_finite() || !ndc.y.is_finite() {
+        return None;
+    }
+    // NDC is y-up with 1 at the top of the screen; window pixels are y-down.
+    Some(vec2(
+        (ndc.x * 0.5 + 0.5) * width,
+        (0.5 - ndc.y * 0.5) * height,
+    ))
+}
+
+/// Projects this frame's damage readouts out of the world and hands them to the
+/// HUD. The list is rebuilt in the buffer the game owns, so the projection —
+/// not the allocation — is what runs per frame.
+fn draw_damage_numbers(game: &mut Game, fonts: &hud::Fonts, view_proj: &Mat4) {
+    game.damage_labels.clear();
+    for &(at, amount, left, head) in &game.effects.damage_numbers {
+        if left <= DAMAGE_NUMBER_CUTOFF {
+            continue;
+        }
+        if let Some(screen) = project_to_screen(view_proj, at, screen_width(), screen_height()) {
+            game.damage_labels.push((screen, amount, head));
+        }
+    }
+    hud::draw_damage_numbers(fonts, &game.damage_labels);
+}
+
 fn render_world(game: &mut Game, fonts: &hud::Fonts) {
     let shake = game.player.shake_offset();
     let eye = game.player.eye();
@@ -1760,6 +2073,19 @@ fn render_world(game: &mut Game, fonts: &hud::Fonts) {
 
     clear_background(game.level.sky);
     draw_sky(game.level.sky);
+    // macroquad 0.4.16 has no `Camera3D::world_to_screen` — its projection
+    // helpers are `Camera2D`-only — so the frame's view-projection is built
+    // here, with the same constructors and defaults this camera is made of.
+    // The damage readouts are the one thing on screen that has to come back
+    // out of the world.
+    let view_proj = view_projection(
+        cam,
+        cam + dir,
+        up_tilted,
+        fovy,
+        screen_width(),
+        screen_height(),
+    );
     set_camera(&Camera3D {
         position: cam,
         target: cam + dir,
@@ -1767,18 +2093,38 @@ fn render_world(game: &mut Game, fonts: &hud::Fonts) {
         fovy,
         ..Default::default()
     });
-    draw_mesh(&game.level.mesh);
+    if let Some(gl_fog) = &game.fog {
+        gl_fog.begin(horizon_colour(game.level.sky), game.level.half);
+    }
+    for mesh in &game.level.meshes {
+        // An arena that uses none of a material still gets a mesh for it, so
+        // skip the empty batches rather than issue a draw call for nothing.
+        if !mesh.indices.is_empty() {
+            draw_mesh(mesh);
+        }
+    }
+    // One scratch mesh for all of it: `draw_mesh` copies the vertices into
+    // macroquad's batch as it is called, so nothing downstream still refers to
+    // this buffer by the next iteration.
     for e in &game.enemies {
         if e.dead && e.death_t > 1.9 {
             continue;
         }
-        draw_mesh(&e.mesh());
+        e.write_mesh(&mut game.scratch);
+        draw_mesh(&game.scratch);
     }
     for p in &game.pickups {
-        draw_mesh(&p.mesh());
+        p.write_mesh(&mut game.scratch);
+        draw_mesh(&game.scratch);
     }
-    draw_mesh(&game.grenades.mesh(&game.level));
-    draw_mesh(&game.effects.build_mesh());
+    game.grenades.write_mesh(&game.level, &mut game.scratch);
+    draw_mesh(&game.scratch);
+    game.effects.write_mesh(&mut game.scratch);
+    draw_mesh(&game.scratch);
+    // Everything in the world is behind us now; the viewmodel and the HUD are
+    // drawn in the 2D pass and are not fogged — a weapon in your hands is not
+    // twenty metres away.
+    fog::Fog::end();
     set_default_camera();
 
     let madness = (1.0 - game.player.sanity_ratio()) * 0.7;
@@ -1786,10 +2132,23 @@ fn render_world(game: &mut Game, fonts: &hud::Fonts) {
         game.player.hurt_flash.max(madness),
         game.player.health < 30.0 || game.player.sanity_ratio() < 0.25,
     );
+    hud::draw_kill_flash(game.effects.kill_flash);
+    // The one place the two yaw conventions meet. `hurt_dir` points from the
+    // player at what hit them; the HUD's bearing is where that lands relative
+    // to the view, 0 dead ahead and positive to the player's right. The game's
+    // yaw grows to the left and the bearing grows to the right, so the
+    // subtraction runs `cam_yaw - yaw_of(dir)`. Check it at yaw 0: the player
+    // faces -Z and their right is +X, `yaw_of(+X)` is `atan2(-1, 0) = -PI/2`,
+    // and `0 - (-PI/2) = +PI/2` — positive, i.e. right ✓.
+    if let Some((dir, strength)) = game.player.hurt_dir() {
+        let arcs = [(game.player.cam_yaw() - util::yaw_of(dir), strength)];
+        hud::draw_hurt_arcs(&arcs);
+    }
     draw_sanity_bar(fonts, game.player.sanity_ratio());
     if game.player.alive {
         game.viewmodel.draw(&game.player, &game.arsenal);
     }
+    draw_damage_numbers(game, fonts, &view_proj);
     draw_hud_state(game, fonts);
     draw_wheel_overlay(game, fonts);
 
@@ -1921,25 +2280,28 @@ fn draw_sanity_bar(fonts: &hud::Fonts, ratio: f32) {
     if ratio > 0.995 {
         return;
     }
-    let w = screen_width();
-    let h = screen_height();
-    let bar_w = 240.0;
+    let (w, h) = (screen_width(), screen_height());
+    let ui = hud::ui_scale();
+    let bar_w = 240.0 * ui;
+    let bar_h = 6.0 * ui;
     let x = w * 0.5 - bar_w * 0.5;
-    let y = h - 92.0;
-    let colour = if ratio < 0.35 {
-        Color::new(0.78, 0.12, 0.46, 1.0)
-    } else {
-        Color::new(0.52, 0.38, 0.82, 1.0)
-    };
+    let y = h - 92.0 * ui;
+    let colour = hud::sanity_colour(ratio);
     draw_rectangle(
-        x - 1.0,
-        y - 1.0,
-        bar_w + 2.0,
-        8.0,
+        x - ui,
+        y - ui,
+        bar_w + 2.0 * ui,
+        bar_h + 2.0 * ui,
         Color::new(0.05, 0.06, 0.08, 0.8),
     );
-    draw_rectangle(x, y, bar_w * ratio, 6.0, colour);
-    fonts.text_c(i18n::t(Key::Sanity), w * 0.5, y - 7.0, 17.0, colour);
+    draw_rectangle(x, y, bar_w * ratio, bar_h, colour);
+    fonts.text_c(
+        i18n::t(Key::Sanity),
+        w * 0.5,
+        y - 8.0 * ui,
+        17.0 * ui,
+        colour,
+    );
 }
 
 fn draw_inventory_overlay(game: &Game, fonts: &hud::Fonts) {

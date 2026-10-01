@@ -1,8 +1,9 @@
 # STEEL FRONT / 钢铁前线
 
 A single-player campaign FPS written in Rust, built on [macroquad](https://macroquad.rs).
-Six hand-built missions, five weapons, five enemy archetypes, a bilingual
-(中文 / English) interface, and no launcher, engine install or runtime to deploy.
+Six hand-built missions, five weapons, five enemy archetypes and three cosmic
+horrors, a bilingual (中文 / English) interface, and no launcher, engine install
+or runtime to deploy.
 
 - **Windows**: a single `rust-fps.exe`
 - **Linux**: a single statically linked ELF that runs on any x86_64 distro
@@ -17,7 +18,7 @@ Six hand-built missions, five weapons, five enemy archetypes, a bilingual
 | --- | --- |
 | Move | `W` `A` `S` `D` |
 | Jump | `Space` |
-| Sprint | `Left Shift` |
+| Sprint | `Left Shift` — a tap latches it, and it drops on its own the moment you stop pushing forward or raise the sights; there is nothing to hold |
 | Crouch (toggle) | `C` |
 | Prone (toggle) | `Z` |
 | Walk quietly | Hold `Caps Lock` |
@@ -35,6 +36,17 @@ weapon sway and spread; and it changes how far away enemies can spot you
 
 You cannot stand up under a low ceiling — the game checks headroom and keeps you
 down until there is room.
+
+Movement runs on the Quake/Source model rather than on an acceleration cap.
+Ground acceleration is a rate (12 /s) that can only add speed along the
+direction you are pushing, ground friction (12 /s) bleeds speed off whenever you
+are over the cap the stance and weapon allow, and air control is deliberately
+weak (2.6 /s) — releasing the keys slides you about 0.77 m at sprint speed. The
+model is integrated in fixed 1/120 s substeps, at most eight per frame, so a
+frame that stalls degrades the step instead of spiralling, because these
+constants stop meaning the same thing at a different step length. One tick after
+touchdown is exempt from friction, which is the classic window a bunny hop needs
+to survive a landing.
 
 ### Looking
 
@@ -68,6 +80,17 @@ the sniper and sidearm are single only; the shotgun is single only.
 A magazine check deliberately reports a *band* — full, mostly full, about half,
 running low, empty — rather than an exact count. It also prints the real number
 next to it, so the honest answer is one glance away.
+
+Recoil is a learnable pattern rather than a random kick. The burst is counted:
+shots 1–3 climb evenly, 4–7 climb harder with each shot, 8–10 walk up and to
+the left, and 11–17 hand over to a sideways walk that plateaus; a gap of 0.25 s
+without firing resets the count, so trigger discipline is rewarded. The muzzle
+only starts falling back 0.05 s after the last shot, which is what lets a burst
+actually climb instead of being flattened to the first shot's kick. Pulling
+against the climb with the mouse cancels the accumulated recoil by the amount
+pulled — capped at what has accumulated, so you can cancel the climb but never
+invert it — because otherwise the automatic fallback would stack on top of your
+correction and end the burst aiming below where it began.
 
 ### Equipment
 
@@ -182,6 +205,32 @@ pit in the middle of the floor, built as a gap between four floor slabs. The
 navigation grid marks it impassable, so nothing walks into it, and anything that
 falls past the floor line inside it is gone.
 
+### Arenas
+
+The layouts are measured, not described from intent: `maps.rs`'s ignored design
+report (`cargo test -- --ignored --nocapture`) re-traces each arena's sightlines,
+cover bands and engagement scales against the real geometry, and the tests beside
+it pin the numbers. RUST YARD is an open ring that teaches the 1.0–1.25 m cover
+band; FOUNDRY is a three-lane machine hall whose one long line is the 46.8 m
+central hall, with no low cover at all; DOCKS is the long-range arena — a 59.1 m
+boulevard and the campaign's deepest sightlines; BUNKER is a single
+close-quarters ring, short enough (32.6 m end to end) that no marksman appears in
+its spawn table; CITADEL is a defended base whose raised keep is the campaign's
+one sniper nest; R'LYEH puts the campaign's longest diagonal (70 m) beside dead
+ends that see 7.2 m, around a bottomless pit. One measurement holds in every
+arena: the navigation grid blocks any cell whose footprint touches a solid, so
+the highest ground an AI can path onto anywhere is 0.60 m and every perch
+belongs to the player.
+
+The pressure curve is flat inside a mission and climbs between them. A mission's
+own waves hold a plateau, and the escalation comes from the campaign ladder —
+mission 6's plateau is more than 3× mission 1's, which
+`the_campaign_is_where_the_peak_lives` asserts. The known design gap is that there
+is no pressure knob *inside* a level: a mission's spawner has only wave strength,
+`max_alive` and the total budget, so what varies within one arena is what spawns,
+not how hard the mission presses. That limit is written down beside the curve in
+`campaign.rs` rather than left implicit.
+
 ### Weapons
 
 | Weapon | Magazine | Damage | Character |
@@ -201,6 +250,16 @@ falls past the floor line inside it is gone.
 | JUGGERNAUT / 重装兵 | Slow, armoured, three-round bursts |
 | MARKSMAN / 射手 | Long range; **telegraphs** its shot with a 0.95 s aim-up |
 | DRONE / 无人机 | Hovering flier at ~2.9 m, fast and erratic |
+
+Every enemy kind — the five archetypes above and the three cosmic horrors — is
+rebuilt and animated every frame. The four humanoids walk through a rigged cycle
+(hip and knee swing half a cycle apart, counter-swinging arms, a body lean that
+pivots at chest height so the head walks a straight line); the Drone's rotors
+turn whether or not it is translating; the Tentacle's arms crawl a beat apart;
+the Spawnling scuttles on its legs and the Colossus strides. The standing pose is
+the pose the static prototype had, so the silhouettes and the hitboxes the arenas
+were measured against are unchanged. The frame a foot lands is reported once per
+step, and the game hangs a small ground-hugging dust puff off it.
 
 Enemies navigate with a **BFS flow field** rebuilt four times a second toward the
 player, so they path around cover instead of pressing into walls. They keep squad
@@ -224,44 +283,90 @@ src/
   campaign.rs   mission table: objectives, loadouts, enemy weights, waves
   maps.rs       six arena layouts as axis-aligned box lists
   level.rs      box collision, raycasts, BFS flow field, level construction
-  player.rs     movement, collision resolution, head bob, recoil, ADS
-  enemy.rs      five archetypes, AI, meshes
-  weapon.rs     five weapons, arsenal/switching, damage falloff
+  player.rs     movement (Quake/Source model, 120 Hz substeps), recoil, ADS
+  enemy.rs      eight enemy kinds, AI, meshes rebuilt per frame
+  weapon.rs     weapon defs and build resolver, arsenal, damage falloff
   grenade.rs    thrown physics, bouncing, fuses, frag blasts and smoke clouds
   combat.rs     hitscan resolution against level and enemies
   viewmodel.rs  first-person weapon, projected to 2D
   pickup.rs     health / ammo / armor drops
-  effects.rs    particles, tracers, hit markers
-  hud.rs        text, HUD, menus, result screens
+  effects.rs    particles, tracers, hit markers, damage readouts
+  hud.rs        text, HUD, menus, combat feedback overlays
   audio.rs      25 procedurally synthesised effects with file override
+  assets.rs     the embedded-asset table, the one place a path is named
+  surface.rs    the six world textures and their sampling
+  fog.rs        distance fog, the one custom shader
+  win32.rs      Windows accessibility-hotkey suppression
   i18n.rs       all user-facing strings, 中文 / English
-  mesh.rs       mesh building, baked vertex lighting
+  mesh.rs       mesh building, baked vertex lighting, world-space UVs
+  mesh_tests.rs mesh and UV regression tests
   util.rs       RNG, ray/AABB
 ```
 
 Two design decisions worth knowing:
 
 **Lighting is baked into vertex colours.** macroquad's default 3D material has no
-lighting model — it draws `vertex_color × texture`. Rather than write custom
-shaders (and risk GLSL differences between desktop GL and GLES), every mesh
-computes a face normal at build time and folds directional + ambient + sky-bounce
-lighting into the vertex colour. Geometry that moves (enemies, pickups) rebuilds
-its transformed mesh each frame. At these vertex counts it is affordable,
-but it is not free, and it used to be considerably worse.
+lighting model — it draws `vertex_color × texture`. Rather than write a shader
+for it, every mesh computes a face normal at build time and folds directional +
+ambient + sky-bounce lighting into the vertex colour. Geometry that moves
+(enemies, pickups) rewrites its transformed vertices each frame, into a scratch
+buffer the renderer keeps, so the work is real but the allocation is not.
 
-A measured pass over the render path removed most of the churn: pre-sizing the
-batch builders, caching the three pickup prototypes, and hoisting the smoke
-clouds' trigonometry out of the per-frame loop took a representative gameplay
-frame from about **135 allocations and 3.1 MB of churn to about 14 and 1.0 MB**,
-with the vertex and index buffers verified byte-identical by hash. The remaining
-allocations are largely structural: `build_mesh` returns a `Mesh` *by value*, so
-the buffer leaves with it and one allocation per vector per frame is the floor
-for that signature. Each enemy still builds a transformed copy of its prototype
-per frame, which is the next place to look if it ever matters.
+**The one custom shader is the fog.** Distance haze is the one effect vertex
+colours cannot carry: it depends on where the camera is standing, so baking it
+would mean rewriting every vertex of every mesh every frame. `src/fog.rs` is a
+material that does it on the GPU, from the eye-space depth the vertex shader
+already has. It is written in GLSL ES 100 — the dialect macroquad's own shaders
+use, which miniquad translates for desktop GL — and a driver that refuses it
+costs the fog and nothing else: the game logs the error and draws the world with
+the default material.
+
+Two things about that path that cost an afternoon each if missed, both recorded
+in the file: a custom material does **not** inherit the default one's depth
+state, so `depth_write` and `depth_test` have to be set explicitly or the world
+draws in submission order; and `Model` really is the view matrix, so fog range is
+in metres with no camera position to pass in.
+
+A measured pass over the render path removed the per-frame allocation entirely:
+pre-sizing the batch builders, caching the three pickup prototypes, hoisting the
+smoke clouds' trigonometry out of the loop, and — with the largest single win —
+giving every per-frame mesh one scratch buffer instead of a fresh `Mesh` each
+time took a representative gameplay frame from about **135 allocations and
+3.1 MB of churn to 0**, with the vertex and index buffers verified byte-identical
+by hash along the way. `a_rebuilt_frame_allocates_nothing` is the standing guard.
 
 **The weapon is drawn in 2D, not in the 3D pass.** It is defined in view space and
 projected to screen triangles with the camera's own FOV. Drawing it as world
 geometry would make it clip through walls whenever the player stands near one.
+
+**Textured faces take their UVs from world position.** A face's UV is where its
+vertices are, measured along two axes that lie in the face's own plane, so two
+faces of one plane — the slabs of a floor, a crate lid and the ledge it sits on,
+a wall that carries on around a corner — name the same texel at the same world
+point. Each quad used to start its pattern at its own first corner, which is
+invisible on a lone box and a visible tiling step everywhere two of them meet;
+`every_level_face_samples_one_uv_field` walks all six arenas and requires the
+shared corners to agree bit for bit.
+
+**Weapon numbers go through a resolver.** A weapon kind is an authored def
+(`WeaponDef`); an instance carries a build (`WeaponBuild`), and the numbers it
+actually uses are `resolve(def, build)`. A shipping gun has an empty build,
+which resolves bit-for-bit to the table the game shipped with —
+`the_shipped_tables_survive_the_resolver_bit_for_bit` is the guard. Nothing in
+the game installs a part yet: the layering exists so that a gunsmith screen, a
+paint or a loadout that changes a stat is a data change on top of one table,
+rather than a second set of numbers to keep in sync.
+
+**Combat feedback is its own layer.** A kill flashes a warm frame in from the
+screen edges and buys a short hit-stop — 0.05 s during which the world is
+simulated at a quarter rate while input, menus and the pointer keep the real
+clock. Damage you deal floats off the impact point as a number, projected back
+from the world each frame (macroquad 0.4.16 has no `Camera3D::world_to_screen`,
+so the frame's view-projection is rebuilt on the CPU from the camera's own
+numbers). Damage you take draws a bearing arc around the crosshair, and a walking
+enemy kicks dust off each footfall. Colour is never the only channel: the arc's
+length carries the hit's strength, the two tracers differ in width and shape as
+well as in colour, and a headshot's number is larger as well as brighter.
 
 ---
 
@@ -285,15 +390,37 @@ name was changed to `RustFPS UI` as OFL-1.1 requires for modified versions —
 
 ### Embedded vs. on-disk assets
 
-The font and the 19 Kenney sound effects are embedded with `include_bytes!`.
-They used to be loaded from a relative `assets/` path, which works under
-`cargo run` (the working directory is the project root) but silently fails for a
-released executable launched from anywhere else — Chinese text fell back to the
-built-in ASCII font, and every sound fell back to its synthesised version
-without saying so.
+The font, the six world textures and the 19 Kenney sound effects are embedded
+with `include_bytes!`. The font and the sounds used to be loaded from a relative
+`assets/` path, which works under `cargo run` (the working directory is the
+project root) but silently fails for a released executable launched from
+anywhere else — Chinese text fell back to the built-in ASCII font, and every
+sound fell back to its synthesised version without saying so.
 
-Both still probe `assets/` **first**, so dropping a replacement file into
+The sounds still probe `assets/` **first**, so dropping a replacement file into
 `assets/sounds/` overrides the embedded copy without a rebuild.
+
+`src/assets.rs` is the only module that names a path: everything goes through
+`assets::bytes(Asset::…)`. That indirection exists to keep the decision above
+reversible — moving the files out to disk, or into an archive beside the
+executable, is a change to one function rather than to its 26 call sites. The
+`Asset` enum has a variant per file rather than taking a path as a string, so a
+renamed file is still a compile error.
+
+**When to revisit it**, in the order the costs actually arrive:
+
+| Trigger | Move |
+| --- | --- |
+| Editing art hurts more than shipping one file helps | probe `assets/` before the embedded copy, as the sounds already do |
+| The executable gets awkward to publish (~100 MB) | pack `assets/` into one indexed archive and ship it beside the binary |
+| Assets stop fitting in memory | stream per level instead of loading everything at start |
+
+Two things worth knowing before touching it. Embedding does **not** cost RAM in
+proportion to the payload: the bytes sit in the binary's read-only segment,
+which the OS maps from the file and pages in on demand, so a large executable is
+not a resident one. And the first cost to arrive is not size but iteration —
+`lto`, `codegen-units = 1` and `strip` mean every art change re-optimises and
+relinks the whole binary.
 
 ### On the 3D models
 
@@ -386,6 +513,26 @@ the IME's own settings — Sogou, QQ Pinyin and friends all have a
 "中英文切换" option where the Shift toggle can be switched to Ctrl+Space or
 turned off. That is the only lever that reaches a global hook.
 
+### Shift and the Windows accessibility shortcuts
+
+The same key is also how Windows offers Sticky Keys — five taps — while holding
+Right Shift for eight seconds offers Filter Keys and holding NumLock for five
+offers Toggle Keys. All three answer with a dialog that takes focus mid-fight,
+and sprint was one short burst of taps away from the first of them.
+
+`src/win32.rs` clears the hotkey bit on all three at startup and puts them back
+when the game exits, through `SystemParametersInfoW`. There is no per-process
+form of the switch, so the flags really are cleared for the session while the
+game runs — `SPIF_UPDATEINIFILE` is deliberately never passed, so nothing is
+written to the user's profile, and a process that is killed rather than closed
+leaves them cleared until logoff, which is the price of the trick.
+
+Two things that cost an afternoon each if missed, both recorded in the file:
+`SPI_SETSTICKYKEYS` is **`0x003B`**, not the `0x000C` that the neighbouring names
+suggest, and `SystemParametersInfoW`'s `uiParam` is the block size **in bytes** —
+passing the word count is accepted by the compiler, rejected by Windows, and the
+only symptom is that nothing happens.
+
 ### A note on automating keyboard input
 
 Sending synthetic keystrokes to this game needs care, and it cost real time to
@@ -408,8 +555,6 @@ harness problem, not a game bug — but it is worth knowing before concluding
 - Enemies cannot climb the raised structures, only step over crates under 0.62 m.
   This is deliberate — it gives the player a vertical advantage — but it also means
   a player who camps somewhere unreachable is only threatened by ranged enemies.
-- Only enemy fire is tracers; player shots use the same visual, so there is no
-  distinction between incoming and outgoing at a glance.
 - **Cosmetic:** the ammo readout shows `0 / 0` in red for the knife, because the
   HUD renders a magazine count unconditionally and melee weapons have none. It
   should read as "no ammo" rather than "empty".

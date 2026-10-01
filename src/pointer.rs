@@ -62,6 +62,10 @@ pub fn recenter(current: Vec2) -> Option<Vec2> {
 
     let scale = macroquad::miniquad::window::dpi_scale();
     let mut p = Point { x: 0, y: 0 };
+    // SAFETY: `Point` is `#[repr(C)]` with two `i32`s, which is Win32's `POINT`;
+    // `GetCursorPos` writes exactly that through the pointer, which is valid and
+    // aligned for the duration of the call. A zero return means the call failed
+    // and nothing was written, which is handled rather than assumed away.
     if unsafe { GetCursorPos(&mut p) } == 0 {
         return None;
     }
@@ -73,6 +77,9 @@ pub fn recenter(current: Vec2) -> Option<Vec2> {
     let dx = ((screen_width() * 0.5 - current.x) * scale).round();
     let dy = ((screen_height() * 0.5 - current.y) * scale).round();
     // Absolute and unaccelerated, so there is no drift to accumulate.
+    // SAFETY: `SetCursorPos` takes two plain `i32`s — no pointer, no lifetime —
+    // so the only obligation is that the values fit the parameter type, which
+    // the casts above enforce.
     if unsafe { SetCursorPos(p.x + dx as i32, p.y + dy as i32) } == 0 {
         return None;
     }
@@ -101,6 +108,11 @@ pub fn recenter(current: Vec2) -> Option<Vec2> {
 
     static HANDLE: OnceLock<Option<(usize, usize)>> = OnceLock::new();
 
+    // SAFETY: `dlopen` and `dlsym` take a NUL-terminated C string — `c"…"`
+    // literals are exactly that — and return opaque handles or null, both of
+    // which are checked before use. The two results are stored as `usize`
+    // because a raw pointer cannot be sent across the `OnceLock`; nothing is
+    // dereferenced here.
     let loaded = HANDLE.get_or_init(|| unsafe {
         let lib = dlopen(c"libX11.so.6".as_ptr(), RTLD_LAZY);
         if lib.is_null() {
@@ -111,6 +123,9 @@ pub fn recenter(current: Vec2) -> Option<Vec2> {
         if open.is_null() || warp.is_null() {
             return None;
         }
+        // SAFETY: `open` was resolved from libX11 under the name
+        // `XOpenDisplay` and checked non-null; the signature is the one X11
+        // declares for it — `Display *XOpenDisplay(const char *display_name)`.
         let open: unsafe extern "C" fn(*const c_char) -> *mut Display = std::mem::transmute(open);
         let dpy = open(std::ptr::null());
         if dpy.is_null() {
@@ -122,12 +137,22 @@ pub fn recenter(current: Vec2) -> Option<Vec2> {
     let Some((warp, dpy)) = *loaded else {
         return None;
     };
+    // SAFETY: the address came from `dlsym("XWarpPointer")` and was checked
+    // non-null, and libX11 is `dlopen`ed without a matching `dlclose`, so it
+    // outlives every call made through this pointer. The signature is X11's,
+    // with `Window` being `unsigned long`: nine arguments, the first a
+    // `Display *`. This is the one assertion in the file a compiler cannot
+    // check, and getting it wrong corrupts the stack rather than failing.
     let warp: XWarpPointer = unsafe { std::mem::transmute(warp) };
     let scale = macroquad::miniquad::window::dpi_scale();
     // A null `dest_w` makes the coordinates relative to the pointer's current
     // position, and `XWarpPointer` is not subject to pointer acceleration.
     let dx = ((screen_width() * 0.5 - current.x) * scale).round();
     let dy = ((screen_height() * 0.5 - current.y) * scale).round();
+    // SAFETY: `dpy` is the non-null `Display *` from `XOpenDisplay` and `warp`
+    // is the checked `XWarpPointer` above; both outlive the call. The remaining
+    // arguments are plain integers, and the null `dest_w` that makes the move
+    // relative is the documented meaning of a zero window, not an accident.
     unsafe {
         warp(
             dpy as *mut Display,

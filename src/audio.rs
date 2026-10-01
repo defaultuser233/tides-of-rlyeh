@@ -10,6 +10,8 @@
 //! the same API, it just does nothing.
 
 #[cfg(feature = "sound")]
+use crate::assets::Asset;
+#[cfg(feature = "sound")]
 use macroquad::audio::{PlaySoundParams, Sound, load_sound_from_bytes, play_sound};
 #[cfg(feature = "sound")]
 use std::cell::RefCell;
@@ -120,6 +122,34 @@ impl Sfx {
             Sfx::MissionComplete => "mission_complete",
             Sfx::MissionFailed => "mission_failed",
         }
+    }
+
+    /// The compiled-in file for this effect, if it has one. The effects with no
+    /// file are synthesised at load time and never name an asset at all.
+    #[cfg(feature = "sound")]
+    const fn asset(self) -> Option<Asset> {
+        Some(match self {
+            Sfx::ShotRifle => Asset::SfxShotRifle,
+            Sfx::ShotShotgun => Asset::SfxShotShotgun,
+            Sfx::ShotSmg => Asset::SfxShotSmg,
+            Sfx::ShotSniper => Asset::SfxShotSniper,
+            Sfx::ShotLmg => Asset::SfxShotLmg,
+            Sfx::EnemyShot => Asset::SfxEnemyShot,
+            Sfx::HitFlesh => Asset::SfxHitFlesh,
+            Sfx::HitWorld => Asset::SfxHitWorld,
+            Sfx::HitHead => Asset::SfxHitHead,
+            Sfx::EnemyDeath => Asset::SfxEnemyDeath,
+            Sfx::Reload => Asset::SfxReload,
+            Sfx::ReloadEmpty => Asset::SfxReloadEmpty,
+            Sfx::Footstep => Asset::SfxFootstep,
+            Sfx::PlayerHurt => Asset::SfxPlayerHurt,
+            Sfx::UiClick => Asset::SfxUiClick,
+            Sfx::UiMove => Asset::SfxUiMove,
+            Sfx::UiBack => Asset::SfxUiBack,
+            Sfx::Explosion => Asset::SfxExplosion,
+            Sfx::Spawn => Asset::SfxSpawn,
+            _ => return None,
+        })
     }
 
     /// Shortest gap allowed between two plays of the same effect, in seconds.
@@ -267,28 +297,7 @@ pub(crate) fn wav_bytes(sfx: Sfx) -> Vec<u8> {
 /// so the files remain replaceable.
 #[cfg(feature = "sound")]
 fn embedded(sfx: Sfx) -> Option<(&'static [u8], &'static str)> {
-    Some(match sfx {
-        Sfx::ShotRifle => (include_bytes!("../assets/sounds/shot_rifle.ogg"), "ogg"),
-        Sfx::ShotShotgun => (include_bytes!("../assets/sounds/shot_shotgun.ogg"), "ogg"),
-        Sfx::ShotSmg => (include_bytes!("../assets/sounds/shot_smg.ogg"), "ogg"),
-        Sfx::ShotSniper => (include_bytes!("../assets/sounds/shot_sniper.ogg"), "ogg"),
-        Sfx::ShotLmg => (include_bytes!("../assets/sounds/shot_lmg.ogg"), "ogg"),
-        Sfx::EnemyShot => (include_bytes!("../assets/sounds/enemy_shot.ogg"), "ogg"),
-        Sfx::HitFlesh => (include_bytes!("../assets/sounds/hit_flesh.ogg"), "ogg"),
-        Sfx::HitWorld => (include_bytes!("../assets/sounds/hit_world.ogg"), "ogg"),
-        Sfx::HitHead => (include_bytes!("../assets/sounds/hit_head.ogg"), "ogg"),
-        Sfx::EnemyDeath => (include_bytes!("../assets/sounds/enemy_death.ogg"), "ogg"),
-        Sfx::Reload => (include_bytes!("../assets/sounds/reload.ogg"), "ogg"),
-        Sfx::ReloadEmpty => (include_bytes!("../assets/sounds/reload_empty.ogg"), "ogg"),
-        Sfx::Footstep => (include_bytes!("../assets/sounds/footstep.ogg"), "ogg"),
-        Sfx::PlayerHurt => (include_bytes!("../assets/sounds/player_hurt.ogg"), "ogg"),
-        Sfx::UiClick => (include_bytes!("../assets/sounds/ui_click.ogg"), "ogg"),
-        Sfx::UiMove => (include_bytes!("../assets/sounds/ui_move.ogg"), "ogg"),
-        Sfx::UiBack => (include_bytes!("../assets/sounds/ui_back.ogg"), "ogg"),
-        Sfx::Explosion => (include_bytes!("../assets/sounds/explosion.ogg"), "ogg"),
-        Sfx::Spawn => (include_bytes!("../assets/sounds/spawn.ogg"), "ogg"),
-        _ => return None,
-    })
+    Some((crate::assets::bytes(sfx.asset()?), "ogg"))
 }
 
 /// Load an override file if there is one, otherwise the synthesised buffer.

@@ -1,4 +1,5 @@
-use crate::mesh::MeshBuilder;
+use crate::mesh::{MeshBuilder, contact_shading};
+use crate::surface::{Skin, Surface, Textures};
 use crate::util::ray_aabb;
 use macroquad::prelude::*;
 use std::collections::VecDeque;
@@ -366,13 +367,22 @@ impl FlowField {
     }
 }
 
+/// One block of level geometry: an axis-aligned box and how it looks.
+#[derive(Clone, Copy)]
+pub struct Block {
+    pub min: Vec3,
+    pub max: Vec3,
+    /// The colour it is painted and the surface texture under it.
+    pub skin: Skin,
+}
+
 /// Declarative arena description. Campaign missions supply one of these and
 /// `Level::from_layout` turns it into collision geometry, a render mesh and a
 /// navigation grid.
 pub struct Layout {
     pub name_en: &'static str,
     pub name_zh: &'static str,
-    pub boxes: Vec<(Vec3, Vec3, Color)>,
+    pub boxes: Vec<Block>,
     pub player_start: Vec3,
     pub spawns: Vec<Vec3>,
     /// Where the player must reach to finish "extract" objectives.
@@ -380,6 +390,10 @@ pub struct Layout {
     /// Half-extent of the navigation grid; also the default outer shell size.
     pub half: f32,
     pub sky: Color,
+    /// The colour this arena is remembered by, for the HUD to pick up. Brighter
+    /// than the palette's own trim, which is a paint colour seen under lighting
+    /// rather than a colour drawn straight onto a panel.
+    pub accent: Color,
     /// Bottomless pits, as XZ rectangles. Navigation treats them as
     /// impassable, and anything that ends up below the floor line inside one
     /// is gone. They exist because the nav rule ("a solid taller than 1.2 m
@@ -411,7 +425,11 @@ pub struct Level {
     pub solids: Vec<Aabb>,
     /// Obstacles tall enough to block movement and line of sight.
     pub blockers: Vec<Aabb>,
-    pub mesh: Mesh,
+    /// One mesh per surface, in `Surface::ALL` order, and empty where an arena
+    /// uses none of that material. A `Mesh` carries exactly one texture
+    /// (`models.rs:41-45`), so batching by material is what makes a textured
+    /// world possible at all — it costs at most six draw calls.
+    pub meshes: Vec<Mesh>,
     pub flow: FlowField,
     pub spawns: Vec<Vec3>,
     pub player_start: Vec3,
@@ -419,21 +437,37 @@ pub struct Level {
     pub sky: Color,
     pub name_en: &'static str,
     pub name_zh: &'static str,
+    /// See `Layout::accent`.
+    pub accent: Color,
     /// Active smoke screens. Owned here so that `line_of_sight` can consult them
     /// without every caller having to thread a separate smoke list through.
     pub smoke: Vec<Smoke>,
     /// See `Layout::voids`.
     pub voids: Vec<(Vec2, Vec2)>,
+    /// Half-extent of the arena, from `Layout::half`.
+    pub half: f32,
 }
 
 impl Level {
     pub fn from_layout(layout: &Layout) -> Self {
-        let mut mb = MeshBuilder::new();
+        // One builder per surface. Each carries its own tile density, so a
+        // concrete slab and a crate panel both get texture at the same scale
+        // per metre no matter how big the box is.
+        let mut builders: [MeshBuilder; Surface::ALL.len()] = std::array::from_fn(|i| {
+            let mut mb = MeshBuilder::new();
+            mb.set_uv_scale(1.0 / Surface::ALL[i].metres_per_tile());
+            mb
+        });
         let mut solids = Vec::with_capacity(layout.boxes.len());
         let mut blockers = Vec::new();
-        for (min, max, color) in &layout.boxes {
-            mb.add_box(*min, *max, *color);
-            let a = Aabb::new(*min, *max);
+        for block in &layout.boxes {
+            builders[block.skin.surface.index()].add_box(
+                block.min,
+                block.max,
+                block.skin.uniform(),
+            );
+            let (min, max) = (block.min, block.max);
+            let a = Aabb::new(min, max);
             solids.push(a);
             // Anything taller than a body can step over has to block the
             // navigation grid, or the flow field routes enemies straight at
@@ -466,19 +500,36 @@ impl Level {
             }
         }
 
+        let mut meshes: Vec<Mesh> = builders.into_iter().map(MeshBuilder::finish).collect();
+        for mesh in &mut meshes {
+            contact_shading(mesh);
+        }
+
         Self {
             solids,
             blockers,
-            mesh: mb.finish(),
+            meshes,
             flow,
             spawns: layout.spawns.clone(),
             player_start: layout.player_start,
             extraction: layout.extraction,
             sky: layout.sky,
+            accent: layout.accent,
             name_en: layout.name_en,
             name_zh: layout.name_zh,
             smoke: Vec::new(),
             voids: layout.voids.clone(),
+            half: layout.half,
+        }
+    }
+
+    /// Attach the loaded textures to the per-surface meshes.
+    ///
+    /// Separate from `from_layout` because it is the one step that needs a live
+    /// GL context, and everything that builds a `Level` in a test has none.
+    pub fn dress(&mut self, textures: &Textures) {
+        for (mesh, surface) in self.meshes.iter_mut().zip(Surface::ALL) {
+            mesh.texture = Some(textures.get(surface).clone());
         }
     }
 

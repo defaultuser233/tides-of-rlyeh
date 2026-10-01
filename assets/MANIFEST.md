@@ -163,6 +163,35 @@ Diffuse **JPG would not work**: macroquad 0.4.16 builds `image` with
 `default-features = false, features = ["png", "tga"]`, so `load_texture`
 accepts PNG and TGA only.
 
+### How they are wired up
+
+All six are in the game now. `src/surface.rs` pairs each file with the
+`Surface` variant that names it; a level block carries a `Skin` (a colour and
+its surface), `Level::from_layout` batches geometry into one mesh per surface,
+and `MeshBuilder::set_uv_scale` generates UVs from each face's own edges, so a
+20 m wall and a 1 m crate tile at the same density.
+
+Three facts from the vendored source shape that code, and each one is a trap
+that costs an afternoon if it is missed:
+
+- The 3D shader is `color * texture2D(Texture, uv)`
+  (`macroquad-0.4.16/src/quad_gl.rs:1060-1068`), so a block's palette colour
+  *multiplies* the photo. `Skin::uniform` divides the texture's measured mean
+  back out per channel (`Surface::mean`, which
+  `the_mean_table_matches_the_textures` re-derives from the PNG), and that is
+  what keeps an arena the colour its palette says it is instead of whatever hue
+  the photo happens to average.
+- A vertex colour cannot exceed 1, so a palette colour brighter than its
+  texture's mean cannot be rendered at the brightness asked for — the level
+  just goes dim, one material at a time.
+  `every_block_can_be_painted_at_its_palette_brightness` pins that at 15% and
+  names the pairings that have to change.
+- miniquad creates textures with `TextureWrap::Clamp`
+  (`miniquad-0.4.11/src/graphics.rs:405-418`) and macroquad exposes no setter
+  for it, so `Textures::load` reaches through `get_internal_gl()` to set
+  `Repeat`. Left clamped, every UV past 1.0 samples the edge texel and smears
+  it into stripes across the whole face.
+
 ---
 
 ## 4. Format constraints, as actually verified
@@ -198,7 +227,7 @@ would rather not keep them.
 
 ## 6. Note on `_downloads/`
 
-`assets/_downloads/` is 61.8 MB (the five zips plus their extractions, kept
-so curation can be re-run or widened). `.gitignore` currently only lists
-`/target`, so this directory would otherwise be committed. Consider adding
-`assets/_downloads/` to `.gitignore`.
+`assets/_downloads/` is 63 MB (the five zips plus their extractions, kept so
+curation can be re-run or widened). `.gitignore` excludes it, along with
+`/target` and the font download cache, so a clone carries only the curated
+subset in `models/`, `sounds/` and `textures/`.

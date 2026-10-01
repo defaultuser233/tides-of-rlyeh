@@ -172,15 +172,9 @@ impl Effects {
         self.damage_numbers.push((at, amount, 0.75, head));
     }
 
-    /// All transient geometry batched into a single mesh for one draw call.
-    ///
-    /// Six quads per box and per beam, so the batch is sized from the live
-    /// counts before anything is written: a builder grown from empty reallocates
-    /// each of its two vectors thirteen times on the way to a full particle load,
-    /// and every one of those lands in the frame's allocation count.
-    pub fn build_mesh(&self) -> Mesh {
-        let quads = self.particles.len() + self.tracers.len();
-        let mut mb = MeshBuilder::with_capacity(quads * 24, quads * 36);
+    /// All transient geometry batched into `dst` for one draw call.
+    pub fn write_mesh(&self, dst: &mut Mesh) {
+        let mut mb = MeshBuilder::reclaim(dst);
         for p in &self.particles {
             let t = (p.life / p.max_life).clamp(0.0, 1.0);
             let c = Color::new(p.color.r, p.color.g, p.color.b, p.color.a * t);
@@ -192,6 +186,6 @@ impl Effects {
             let c = Color::new(t.color.r, t.color.g, t.color.b, t.color.a * k);
             mb.add_beam(t.a, t.b, t.width * k, c);
         }
-        mb.finish()
+        *dst = mb.finish();
     }
 }

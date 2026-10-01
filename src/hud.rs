@@ -9,7 +9,9 @@
 //!
 //! Per frame the caller draws, in this order:
 //! `draw_vignette(hurt, low_health)` so the damage flash sits under the HUD,
-//! then `draw_hud`, or `draw_menu` / `draw_result` for the front end.
+//! then the combat feedback (`draw_kill_flash`, `draw_hurt_arcs`,
+//! `draw_damage_numbers`), then `draw_hud`, or `draw_menu` / `draw_result` for
+//! the front end.
 
 use crate::i18n::{self, Key};
 use macroquad::prelude::*;
@@ -22,8 +24,51 @@ use std::fmt::{self, Write as _};
 const INK: Color = Color::new(0.88, 0.90, 0.93, 1.0);
 /// Translucent panel fill, dark enough to keep text legible over the 3D pass.
 const PANEL: Color = Color::new(0.05, 0.06, 0.08, 0.72);
-/// Amber-orange primary accent.
-const ACCENT: Color = Color::new(0.85, 0.45, 0.12, 1.0);
+/// The accent a menu, and any arena that does not name one, falls back to.
+const DEFAULT_ACCENT: Color = Color::new(0.85, 0.45, 0.12, 1.0);
+
+thread_local! {
+    /// The current arena's accent, set once a frame before anything is drawn.
+    /// A `Cell` in const-initialised thread-local storage, because the HUD is
+    /// drawn from a dozen functions that would otherwise all have to take it as
+    /// a parameter, and macroquad only ever draws from one thread.
+    static ACCENT: std::cell::Cell<Color> = const { std::cell::Cell::new(DEFAULT_ACCENT) };
+}
+
+/// Point the HUD at the arena's accent colour. Called once a frame, before the
+/// panels are drawn: amber panels floating over a violet arena read as two
+/// different games.
+pub fn set_accent(c: Color) {
+    ACCENT.with(|a| a.set(c));
+}
+
+fn accent() -> Color {
+    ACCENT.with(std::cell::Cell::get)
+}
+
+/// Scale factor for anything drawn outside this module's own layout. The sanity
+/// meter predates `Ui` and was the one readout that did not follow the window,
+/// so on a 4K screen it came out a third the size of everything around it.
+pub fn ui_scale() -> f32 {
+    Ui::new().scale
+}
+
+/// The sanity meter's colour. It is the one place the game says "madness" in
+/// colour rather than in words, so it keeps a violet of its own — but its low
+/// state uses the shared danger red rather than the one-off magenta that
+/// appeared nowhere else in the game.
+pub fn sanity_colour(ratio: f32) -> Color {
+    const MADNESS: Color = Color::new(0.52, 0.38, 0.82, 1.0);
+    if ratio < 0.35 { DANGER } else { MADNESS }
+}
+
+/// The colour a headshot is shown in: the arena accent pulled towards white, so
+/// it stays legible on every arena palette while still belonging to the one the
+/// player is standing in. Shared, because a headshot that changes colour between
+/// the crosshair and the damage readout is two different pieces of news.
+fn head_colour() -> Color {
+    mix(accent(), WHITE, 0.30)
+}
 /// Cyan secondary / technical accent.
 const CYAN: Color = Color::new(0.35, 0.80, 1.0, 1.0);
 /// Damage and failure red.
@@ -185,7 +230,7 @@ fn corner_marks(x: f32, y: f32, w: f32, h: f32, len: f32, t: f32, c: Color) {
 fn panel(x: f32, y: f32, w: f32, h: f32) {
     draw_rectangle(x, y, w, h, PANEL);
     draw_rectangle_lines(x, y, w, h, 1.0, fade(INK, 0.16));
-    corner_marks(x, y, w, h, 11.0, 2.0, fade(ACCENT, 0.85));
+    corner_marks(x, y, w, h, 11.0, 2.0, fade(accent(), 0.85));
 }
 
 fn bar(x: f32, y: f32, w: f32, h: f32, frac: f32, color: Color) {
@@ -219,9 +264,9 @@ fn seg_bar(x: f32, y: f32, w: f32, h: f32, frac: f32, color: Color, segments: us
 /// Amber while healthy, sliding to red as the bar empties.
 fn health_color(frac: f32) -> Color {
     if frac > 0.55 {
-        mix(ACCENT, INK, (frac - 0.55) / 0.45)
+        mix(accent(), INK, (frac - 0.55) / 0.45)
     } else if frac > 0.25 {
-        mix(DANGER, ACCENT, (frac - 0.25) / 0.30)
+        mix(DANGER, accent(), (frac - 0.25) / 0.30)
     } else {
         DANGER
     }
@@ -248,7 +293,7 @@ pub struct Fonts {
 /// the project root — which `cargo run` does and a released executable
 /// double-clicked from anywhere else does not. Embedding removes the working
 /// directory from the equation entirely.
-const BUNDLED_FONT: &[u8] = include_bytes!("../assets/fonts/ui_zh.ttf");
+const BUNDLED_FONT: &[u8] = crate::assets::bytes(crate::assets::Asset::UiFont);
 
 impl Fonts {
     /// Loads the bundled CJK font, falling back to macroquad's built-in font
@@ -437,7 +482,7 @@ fn draw_crosshair(s: &HudState, w: f32, h: f32) {
     let gap = (s.spread * h * 0.92).clamp(ui.s(6.0), ui.s(96.0));
     let body = s.hit_marker.clamp(0.0, 1.0);
     let head = s.headshot_marker.clamp(0.0, 1.0);
-    let head_col = mix(ACCENT, WHITE, 0.30);
+    let head_col = head_colour();
     let col = mix(mix(fade(INK, 0.92), CYAN, body), head_col, head);
 
     let len = ui.s(8.0) * (1.0 + head * 0.45);
@@ -595,10 +640,10 @@ fn draw_ammo(f: &Fonts, s: &HudState, t: &mut HudText, ui: &Ui, w: f32, h: f32) 
                 right,
                 y + ui.s(58.0),
                 ui.s(14.0),
-                fade(ACCENT, a),
+                fade(accent(), a),
                 ui.s(2.0),
             );
-            bar(ix, y + ui.s(70.0), iw, ui.s(7.0), p, ACCENT);
+            bar(ix, y + ui.s(70.0), iw, ui.s(7.0), p, accent());
         }
         None => {
             let small = t.mag_size.as_str();
@@ -662,7 +707,7 @@ fn draw_slots(f: &Fonts, s: &HudState, t: &mut HudText, ui: &Ui, at: Slots) {
     for (i, (label, active)) in s.slots.iter().enumerate() {
         let x = right - total + i as f32 * (bw + gap);
         if *active {
-            draw_rectangle(x, y, bw, bh, fade(ACCENT, 0.90));
+            draw_rectangle(x, y, bw, bh, fade(accent(), 0.90));
             draw_rectangle_lines(x, y, bw, bh, 1.0, fade(WHITE, 0.35));
             active_label = label;
         } else {
@@ -719,7 +764,7 @@ fn draw_objective(f: &Fonts, s: &HudState, t: &mut HudText, ui: &Ui) {
         y + ui.s(18.0),
         ui.s(7.0),
         ui.s(7.0),
-        fade(ACCENT, 0.55 + 0.45 * marker),
+        fade(accent(), 0.55 + 0.45 * marker),
     );
     tracked(
         f,
@@ -747,7 +792,7 @@ fn draw_objective(f: &Fonts, s: &HudState, t: &mut HudText, ui: &Ui) {
         right,
         y + ui.s(30.0),
         ui.s(22.0),
-        if s.enemies_left == 0 { CYAN } else { ACCENT },
+        if s.enemies_left == 0 { CYAN } else { accent() },
     );
 
     let obj_col = if s.locked { INK } else { fade(CYAN, 0.85) };
@@ -829,7 +874,7 @@ fn draw_prompt(f: &Fonts, t: &mut HudText, text: &str, ui: &Ui, w: f32, h: f32) 
     let a = 0.35 + 0.65 * pulse(4.6);
 
     draw_rectangle(bx, by, bw, bh, Color::new(0.05, 0.06, 0.08, 0.78));
-    draw_rectangle_lines(bx, by, bw, bh, ui.s(1.5), fade(ACCENT, a));
+    draw_rectangle_lines(bx, by, bw, bh, ui.s(1.5), fade(accent(), a));
     corner_marks(
         bx,
         by,
@@ -837,7 +882,7 @@ fn draw_prompt(f: &Fonts, t: &mut HudText, text: &str, ui: &Ui, w: f32, h: f32) 
         bh,
         ui.s(8.0),
         ui.s(2.0),
-        fade(ACCENT, 0.4 + 0.6 * a),
+        fade(accent(), 0.4 + 0.6 * a),
     );
     f.text_c(label, cx, y, ui.s(17.0), INK);
 }
@@ -867,14 +912,14 @@ fn draw_banner(f: &Fonts, text: &str, alpha: f32, ui: &Ui, w: f32, h: f32) {
         y - ui.s(54.0),
         rw,
         ui.s(2.0),
-        fade(ACCENT, 0.85 * a),
+        fade(accent(), 0.85 * a),
     );
     draw_rectangle(
         cx - rw * 0.5,
         y + ui.s(22.0),
         rw,
         ui.s(2.0),
-        fade(ACCENT, 0.85 * a),
+        fade(accent(), 0.85 * a),
     );
     tracked_c(
         f,
@@ -882,7 +927,7 @@ fn draw_banner(f: &Fonts, text: &str, alpha: f32, ui: &Ui, w: f32, h: f32) {
         cx,
         y,
         size,
-        fade(mix(INK, ACCENT, 0.55), a),
+        fade(mix(INK, accent(), 0.55), a),
         ui.s(8.0),
     );
 }
@@ -925,6 +970,310 @@ pub fn draw_vignette(hurt: f32, low_health: bool) {
     }
 }
 
+// --- combat feedback ------------------------------------------------------
+
+/// How far the kill flash reaches in from each edge, as a fraction of the screen
+/// height. Well under half, so the middle of the screen — the part the player is
+/// aiming through — is never covered.
+const KILL_DEPTH: f32 = 0.13;
+
+/// Radius of the damage ring, in layout units. Fixed, because an indicator that
+/// lands somewhere different every frame cannot be read at a glance.
+const HURT_RADIUS: f32 = 132.0;
+/// Thickness of an arc's bright core, in layout units.
+const HURT_THICK: f32 = 5.0;
+/// Arc length at strength 0 and at strength 1, in radians. A graze still gets a
+/// tick big enough to notice; the strongest hit stops short of a quarter turn,
+/// so an arc can never read as a hit from two directions at once.
+const HURT_SPAN_MIN: f32 = 0.34;
+const HURT_SPAN_MAX: f32 = 1.10;
+/// How far the dark plate behind an arc reaches past it, in radians.
+const HURT_PLATE_PAD: f32 = 0.05;
+
+/// Plate drawn under a feedback glyph. Arcs and floating numbers land on sky,
+/// walls and enemies alike, and a dark edge is what keeps them legible on all
+/// three without turning them into solid boxes that hide what they are about.
+const FEEDBACK_PLATE: Color = Color::new(0.02, 0.025, 0.03, 0.80);
+
+/// Kill confirmation: a warm glow in from every edge plus a bright frame around
+/// them.
+///
+/// `alpha` is `0..=1`; at or below ~0 nothing is drawn, so a decayed value can be
+/// passed straight through. Only the outer band of the screen is touched: a kill
+/// lands in the middle of a firefight, and the player has to keep shooting
+/// through it. It is also deliberately cheap — a few bands and four rectangles,
+/// no shader and no full-screen transparency — because it plays over the busiest
+/// moment of the frame, and the frame it draws is near-white whatever the
+/// arena's accent is, so the pulse reads even where a tint would not.
+pub fn draw_kill_flash(alpha: f32) {
+    let a = sane(alpha, 0.0).clamp(0.0, 1.0);
+    if a <= 0.002 {
+        return;
+    }
+    let w = screen_width();
+    let h = screen_height();
+    let ui = Ui::new();
+
+    let warm = mix(INK, accent(), 0.55);
+    let depth = h * KILL_DEPTH;
+    // Bands get finer as the window grows rather than more numerous with it, so
+    // the glow stays smooth at 4K without the draw calls following the pixels up.
+    let steps = (depth / ui.s(1.5).max(1.0)).ceil().clamp(6.0, 64.0) as usize;
+    let band = depth / steps as f32;
+    for i in 0..steps {
+        let t = (i as f32 + 0.5) / steps as f32;
+        let c = fade(warm, a * 0.55 * kill_falloff(t));
+        if c.a <= 0.002 {
+            continue;
+        }
+        let o = band * i as f32;
+        // Bands tile exactly: overlapping edges would double-blend into stripes.
+        draw_rectangle(0.0, o, w, band, c);
+        draw_rectangle(0.0, h - o - band, w, band, c);
+        draw_rectangle(o, 0.0, band, h, c);
+        draw_rectangle(w - o - band, 0.0, band, h, c);
+    }
+
+    // The frame carries the read on its own: a bright border is there even where
+    // the glow is lost against a bright sky, and unlike a colour it cannot be
+    // missed by anyone.
+    let t = ui.s(2.5).max(1.0);
+    let edge = fade(mix(warm, WHITE, 0.40), a);
+    draw_rectangle(0.0, 0.0, w, t, edge);
+    draw_rectangle(0.0, h - t, w, t, edge);
+    draw_rectangle(0.0, 0.0, t, h, edge);
+    draw_rectangle(w - t, 0.0, t, h, edge);
+}
+
+/// Glow strength `t` of the way in from the edge of the screen, falling to
+/// exactly zero at the inner limit so the glow ends in nothing rather than on a
+/// visible line.
+fn kill_falloff(t: f32) -> f32 {
+    let k = 1.0 - sane(t, 1.0).clamp(0.0, 1.0);
+    k * k
+}
+
+/// Directional damage indicator: one arc per incoming hit, on a ring around the
+/// centre of the screen.
+///
+/// Each entry is `(bearing, strength)`:
+///
+/// * `bearing` is where the hit came *from*, in radians, relative to where the
+///   player is looking: `0.0` is dead ahead, positive is clockwise seen from
+///   above, so `+FRAC_PI_2` is the player's right and `±PI` is directly behind.
+///   `player.yaw - util::yaw_of(pos_of_source - player.pos)` is that bearing; it
+///   need not be wrapped, because the value only ever reaches `sin`/`cos`.
+/// * `strength` is `0..=1` and drives opacity and arc length together: a graze is
+///   a short faint tick, a solid hit a long bright fan.
+///
+/// The reading is positional first — ahead is up, right is right, behind is down
+/// — and the arc's length carries the strength, so the indicator survives any
+/// colour vision; the ramp from near-white to the damage red only reinforces it.
+/// Each arc sits on a dark plate and the strongest still stop short of a quarter
+/// turn, so nothing here can be mistaken for the crosshair or for a panel.
+pub fn draw_hurt_arcs(arcs: &[(f32, f32)]) {
+    if arcs.is_empty() {
+        return;
+    }
+    let ui = Ui::new();
+    let centre = vec2(screen_width() * 0.5, screen_height() * 0.5);
+    // Fixed radius, pulled in only when the window is too short for it, so the
+    // ring never runs off an edge and the eye always knows where to look.
+    let r = ui
+        .s(HURT_RADIUS)
+        .min(screen_width().min(screen_height()) * 0.34);
+    let core = ui.s(HURT_THICK).max(1.0);
+    let pad = ui.s(1.8).max(1.0);
+
+    // Plates first, then the arcs: several pellets from one shot arrive on the
+    // same bearing in the same frame, and an arc drawn over an earlier one must
+    // not erase its plate or swallow its core.
+    for (bearing, strength) in arcs {
+        let s = hurt_strength(*strength);
+        if s <= 0.002 {
+            continue;
+        }
+        let (a0, a1) = hurt_arc_angles(*bearing, s);
+        arc_band(
+            centre,
+            r - core * 0.5 - pad,
+            r + core * 0.5 + pad,
+            a0 - HURT_PLATE_PAD,
+            a1 + HURT_PLATE_PAD,
+            fade(FEEDBACK_PLATE, 0.5 + 0.5 * s),
+        );
+    }
+    for (bearing, strength) in arcs {
+        let s = hurt_strength(*strength);
+        if s <= 0.002 {
+            continue;
+        }
+        let (a0, a1) = hurt_arc_angles(*bearing, s);
+        let colour = fade(hurt_colour(s), hurt_alpha(s));
+        arc_band(centre, r - core * 0.5, r + core * 0.5, a0, a1, colour);
+
+        // A tick past the arc fixes the exact bearing, so a hit from dead astern
+        // reads as "straight behind" rather than "somewhere along the bottom".
+        // It sits outside the plate, so it carries its own dark under-stroke —
+        // the same doubling the crosshair uses to stay legible over the world.
+        let d = hurt_dir(*bearing);
+        let tip = centre + d * (r + core * 0.5 + ui.s(2.0));
+        let tail = centre + d * (r + core * 0.5 + ui.s(8.0));
+        draw_line(
+            tip.x,
+            tip.y,
+            tail.x,
+            tail.y,
+            ui.s(3.2).max(1.5),
+            fade(FEEDBACK_PLATE, 0.85),
+        );
+        draw_line(tip.x, tip.y, tail.x, tail.y, ui.s(1.6).max(1.0), colour);
+    }
+}
+
+/// Screen direction of a hit bearing: ahead is up the screen, the player's right
+/// is to the right of it. Screen y grows downwards, so straight ahead is `-y`.
+fn hurt_dir(bearing: f32) -> Vec2 {
+    let b = sane(bearing, 0.0);
+    vec2(b.sin(), -b.cos())
+}
+
+/// A strength that is known to be usable: `0..=1`, with a non-finite value read
+/// as no hit at all rather than allowed to reach the vertices as a NaN.
+fn hurt_strength(strength: f32) -> f32 {
+    sane(strength, 0.0).clamp(0.0, 1.0)
+}
+
+/// Arc length in radians for a hit of `strength`.
+fn hurt_span(strength: f32) -> f32 {
+    HURT_SPAN_MIN + (HURT_SPAN_MAX - HURT_SPAN_MIN) * hurt_strength(strength)
+}
+
+/// Start and end screen angles of an arc, in the convention macroquad draws in
+/// (0 at 3 o'clock, growing downwards). The span is split evenly either side of
+/// the bearing, so an arc stays centred on where it came from however long the
+/// hit makes it.
+fn hurt_arc_angles(bearing: f32, strength: f32) -> (f32, f32) {
+    let middle = sane(bearing, 0.0) - std::f32::consts::FRAC_PI_2;
+    let half = hurt_span(strength) * 0.5;
+    (middle - half, middle + half)
+}
+
+/// Opacity of an arc: a weak hit is a faint tick, a heavy one is solid.
+fn hurt_alpha(strength: f32) -> f32 {
+    0.30 + 0.70 * hurt_strength(strength)
+}
+
+/// Near-white for a graze, the damage red at full strength. Second to the arc's
+/// length, never a substitute for it.
+fn hurt_colour(strength: f32) -> Color {
+    mix(INK, DANGER, hurt_strength(strength))
+}
+
+/// Fills one annular sector, given in radians, by tiling it with triangles.
+///
+/// `wheel_sector` draws the same shape, but it builds the outline as a `Vec`
+/// first — fine for a menu, which is drawn once in a while, and not for an
+/// indicator that runs for every incoming hit in the same frame, where this
+/// module's per-frame path stays allocation-free. Triangles tile the band
+/// exactly, so overlapping edges cannot double-blend into seams.
+fn arc_band(centre: Vec2, r0: f32, r1: f32, a0: f32, a1: f32, colour: Color) {
+    let r0 = sane(r0, 0.0).max(0.0);
+    let r1 = sane(r1, r0).max(0.0);
+    let start = sane(a0, 0.0);
+    let span = sane(a1, 0.0) - start;
+    if !span.is_finite() || span.abs() < 1.0e-3 || r1 <= r0 || r1 <= 0.0 {
+        return;
+    }
+    let steps = ((span.abs() / (std::f32::consts::TAU / 64.0)).ceil() as usize).clamp(1, 48);
+    let at = |t: f32, r: f32| {
+        let a = start + span * t;
+        centre + vec2(a.cos(), a.sin()) * r
+    };
+    for k in 0..steps {
+        let t0 = k as f32 / steps as f32;
+        let t1 = (k + 1) as f32 / steps as f32;
+        let (i0, o0) = (at(t0, r0), at(t0, r1));
+        let (i1, o1) = (at(t1, r0), at(t1, r1));
+        draw_triangle(i0, o0, o1, colour);
+        draw_triangle(i0, o1, i1, colour);
+    }
+}
+
+thread_local! {
+    /// The frame's damage numbers are reformatted from scratch every frame and
+    /// repeat heavily — the same gun does the same damage shot after shot — so
+    /// the digits go into one reused buffer instead of a `String` per number.
+    /// One buffer is enough because each number is drawn before the next is
+    /// written into it.
+    static NUM_TEXT: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// Floating damage readouts, one per entry of `nums`, each
+/// `(screen position, damage, headshot)`.
+///
+/// The caller owns the 3D-to-2D projection and the lifetime, and hands over the
+/// list for the frame as it stands; nothing is remembered between frames. Each
+/// number is centred on its point, horizontally and vertically, and is drawn at
+/// a fixed opacity — a caller that wants it to fade should offset it instead.
+///
+/// A headshot is both larger and brighter, because at combat distance the size is
+/// what carries: the same number in a different colour alone would leave a
+/// colour-blind player reading a body shot. Damage is rounded to whole units, as
+/// the rest of the HUD's values are.
+pub fn draw_damage_numbers(f: &Fonts, nums: &[(Vec2, f32, bool)]) {
+    if nums.is_empty() {
+        return;
+    }
+    let ui = Ui::new();
+    let (w, h) = (screen_width(), screen_height());
+    NUM_TEXT.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        for (at, amount, head) in nums {
+            if !at.x.is_finite() || !at.y.is_finite() {
+                // A point projected from behind the camera comes back wild;
+                // drawing it would smear a glyph across the whole screen.
+                continue;
+            }
+            let size = ui.s(damage_number_size(*head));
+            if at.x < -size || at.x > w + size || at.y < -size || at.y > h + size {
+                continue;
+            }
+            put(&mut buf, format_args!("{:.0}", sane(*amount, 0.0).max(0.0)));
+
+            // `text_c` takes a baseline: 0.36 of the size is what centres a line
+            // of this font on a y, the same lift the wheel's labels use.
+            let base = at.y + size * 0.36;
+            // Dark halo all round, drawn first. The numbers land on sky as often
+            // as on a wall, and an outline is what keeps them legible on both —
+            // one that only shaded one side would disappear on the other.
+            let halo = ui.s(1.4).max(1.0);
+            for (dx, dy) in [(-1.0f32, 0.0f32), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+                f.text_c(
+                    &buf,
+                    at.x + dx * halo,
+                    base + dy * halo,
+                    size,
+                    FEEDBACK_PLATE,
+                );
+            }
+            f.text_c(&buf, at.x, base, size, damage_number_colour(*head));
+        }
+    });
+}
+
+/// Damage readouts are sized in layout units and scaled by the caller; the
+/// headshot's is the larger of the two.
+fn damage_number_size(head: bool) -> f32 {
+    if head { 30.0 } else { 20.0 }
+}
+
+/// Body shots use the module's base ink, headshots the crosshair's headshot
+/// colour, so one colour means the same thing everywhere in the frame.
+fn damage_number_colour(head: bool) -> Color {
+    if head { head_colour() } else { INK }
+}
+
 // --- front-end screens ----------------------------------------------------
 
 pub struct MenuItem<'a> {
@@ -952,7 +1301,7 @@ fn backdrop(ui: &Ui) {
         h - m * 2.0,
         ui.s(54.0),
         ui.s(2.0),
-        fade(ACCENT, 0.45),
+        fade(accent(), 0.45),
     );
 }
 
@@ -982,7 +1331,7 @@ pub fn draw_menu(
         rule_y = ty + ui.s(56.0);
     }
     let rw = (w * 0.34).clamp(ui.s(280.0), ui.s(520.0));
-    draw_rectangle(cx - rw * 0.5, rule_y, rw, ui.s(2.0), fade(ACCENT, 0.85));
+    draw_rectangle(cx - rw * 0.5, rule_y, rw, ui.s(2.0), fade(accent(), 0.85));
     draw_rectangle(cx - rw * 0.5, rule_y, rw * 0.16, ui.s(2.0), INK);
 
     item_list(
@@ -1150,7 +1499,7 @@ fn item_list(
         };
         draw_rectangle(x, y, iw, ih, fade(fill, a));
         if sel {
-            draw_rectangle(x, y, ui.s(4.0), ih, fade(ACCENT, a));
+            draw_rectangle(x, y, ui.s(4.0), ih, fade(accent(), a));
         }
         draw_rectangle_lines(
             x,
@@ -1159,7 +1508,7 @@ fn item_list(
             ih,
             1.0,
             if sel {
-                fade(ACCENT, 0.85 * a)
+                fade(accent(), 0.85 * a)
             } else {
                 fade(INK, 0.18 * a)
             },
@@ -1186,7 +1535,7 @@ fn item_list(
                 vec2(mx, my - ui.s(7.0)),
                 vec2(mx, my + ui.s(7.0)),
                 vec2(mx + ui.s(11.0), my),
-                fade(ACCENT, a),
+                fade(accent(), a),
             );
         }
         rects.push((x, y, iw, ih));
@@ -1233,7 +1582,7 @@ fn heading(f: &Fonts, ui: &Ui, title: &str, cx: f32, y: f32, rule_w: f32) -> f32
     tracked_c(f, title, cx, y, ui.s(38.0), INK, ui.s(9.0));
     let ry = y + ui.s(20.0);
     let rw = sane(rule_w, 0.0).clamp(0.0, screen_width());
-    draw_rectangle(cx - rw * 0.5, ry, rw, ui.s(2.0), fade(ACCENT, 0.85));
+    draw_rectangle(cx - rw * 0.5, ry, rw, ui.s(2.0), fade(accent(), 0.85));
     draw_rectangle(cx - rw * 0.5, ry, rw * 0.16, ui.s(2.0), INK);
     ry
 }
@@ -1311,7 +1660,7 @@ fn hint_line(f: &Fonts, ui: &Ui, text: &str, cx: f32, y: f32) {
     let by = y - ui.s(16.0);
     draw_rectangle(bx, by, bw, bh, Color::new(0.05, 0.06, 0.08, 0.72));
     draw_rectangle_lines(bx, by, bw, bh, 1.0, fade(INK, 0.20));
-    corner_marks(bx, by, bw, bh, ui.s(7.0), ui.s(2.0), fade(ACCENT, 0.55));
+    corner_marks(bx, by, bw, bh, ui.s(7.0), ui.s(2.0), fade(accent(), 0.55));
     tracked_c(f, text, cx, y + ui.s(2.0), size, fade(INK, 0.62), ui.s(2.0));
 }
 
@@ -1565,7 +1914,7 @@ pub fn draw_inventory(f: &Fonts, s: &InventoryState) {
         row_h,
         i18n::t(Key::Equipment),
         s.grenades,
-        ACCENT,
+        accent(),
     );
     list_column(
         f,
@@ -1660,7 +2009,7 @@ fn slot_row(
     };
     draw_rectangle(ix, y, right - ix, h, fill);
     if active {
-        draw_rectangle(ix, y, ui.s(4.0), h, ACCENT);
+        draw_rectangle(ix, y, ui.s(4.0), h, accent());
     }
     draw_rectangle_lines(
         ix,
@@ -1669,7 +2018,7 @@ fn slot_row(
         h,
         1.0,
         if active {
-            fade(ACCENT, 0.85)
+            fade(accent(), 0.85)
         } else {
             fade(INK, 0.16)
         },
@@ -1681,7 +2030,7 @@ fn slot_row(
         y + h * 0.5 + ui.s(5.0),
         ui.s(13.0),
         if active {
-            fade(ACCENT, 0.95)
+            fade(accent(), 0.95)
         } else {
             fade(INK, 0.45)
         },
@@ -1863,7 +2212,7 @@ pub fn draw_map(
     let tip = pc + face * r;
     let tail_l = pc - face * (r * 0.72) + side_v * (r * 0.62);
     let tail_r = pc - face * (r * 0.72) - side_v * (r * 0.62);
-    draw_triangle(tip, tail_l, tail_r, ACCENT);
+    draw_triangle(tip, tail_l, tail_r, accent());
     draw_triangle_lines(
         tip,
         tail_l,
@@ -2029,7 +2378,7 @@ pub fn draw_panel(f: &Fonts, title: &str, sections: &[(&str, Vec<PanelRow>)], fo
             ix,
             right,
             y + ui.s(14.0),
-            mix(INK, ACCENT, 0.55),
+            mix(INK, accent(), 0.55),
         );
         y += sec_head_h;
 
@@ -2133,7 +2482,7 @@ pub fn draw_wheel(
                     fade(Color::new(0.06, 0.07, 0.09, 0.70), k)
                 };
                 let edge = if sel {
-                    fade(ACCENT, 0.95)
+                    fade(accent(), 0.95)
                 } else {
                     fade(INK, 0.20 * k)
                 };
@@ -2174,7 +2523,7 @@ pub fn draw_wheel(
                 let ccol = if *count == 0 {
                     fade(DANGER, 0.85 * k)
                 } else if sel {
-                    ACCENT
+                    accent()
                 } else {
                     fade(CYAN, 0.80 * k)
                 };
@@ -2189,7 +2538,7 @@ pub fn draw_wheel(
                 if sel {
                     let tx = centre.x + mid.cos() * (outer + ui.s(7.0));
                     let ty = centre.y + mid.sin() * (outer + ui.s(7.0));
-                    draw_circle(tx, ty, ui.s(4.0), ACCENT);
+                    draw_circle(tx, ty, ui.s(4.0), accent());
                 }
             }
             draw_circle_lines(centre.x, centre.y, outer, ui.s(1.5), fade(INK, 0.22));
@@ -2224,7 +2573,7 @@ pub fn draw_wheel(
         centre.x,
         title_y,
         size,
-        fade(ACCENT, 0.95),
+        fade(accent(), 0.95),
         ui.s(1.6),
     );
 
@@ -2247,8 +2596,207 @@ pub fn draw_wheel(
             if *count == 0 {
                 fade(DANGER, 0.85 * k)
             } else {
-                ACCENT
+                accent()
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole indicator is a bearing mapped onto the ring around the middle of
+    /// the screen. Ahead has to come out at the top, the player's right to the
+    /// right of it and behind at the bottom; a flipped sign is the difference
+    /// between telling the player "shot from the left" and "shot from the right",
+    /// which is worse than saying nothing.
+    #[test]
+    fn a_bearing_points_where_the_hit_came_from() {
+        let ahead = hurt_dir(0.0);
+        assert!(ahead.x.abs() < 1e-6 && ahead.y < -0.99, "ahead: {ahead:?}");
+        let right = hurt_dir(std::f32::consts::FRAC_PI_2);
+        assert!(right.x > 0.99 && right.y.abs() < 1e-6, "right: {right:?}");
+        let left = hurt_dir(-std::f32::consts::FRAC_PI_2);
+        assert!(left.x < -0.99 && left.y.abs() < 1e-6, "left: {left:?}");
+        let behind = hurt_dir(std::f32::consts::PI);
+        assert!(
+            behind.x.abs() < 1e-6 && behind.y > 0.99,
+            "behind: {behind:?}"
+        );
+        // Off the shoulder stays on the side it came from.
+        assert!(
+            hurt_dir(0.4).x > 0.0 && hurt_dir(0.4).y < 0.0,
+            "front right"
+        );
+        assert!(
+            hurt_dir(-0.4).x < 0.0 && hurt_dir(-0.4).y < 0.0,
+            "front left"
+        );
+        // Only the direction matters, so an unwrapped yaw difference is fine:
+        // a bearing a full turn out has to land in the same place.
+        assert!((hurt_dir(0.9) - hurt_dir(0.9 + std::f32::consts::TAU)).length() < 1e-5);
+    }
+
+    /// The doc comment hands the caller a formula for turning the game's own yaw
+    /// into a bearing, and the two conventions are not the same one: `yaw` grows
+    /// to the left, this angle grows to the right. The formula is worth a test on
+    /// its own, because a caller who derives it slightly differently gets an
+    /// indicator that is exactly mirrored — confidently wrong in the worst way.
+    #[test]
+    fn the_documented_bearing_matches_the_game_yaw() {
+        use crate::util::yaw_of;
+
+        // Facing down -Z, the player's right hand points along +X.
+        let facing = 0.0f32;
+        let bearing = |d: Vec3| facing - yaw_of(d);
+        assert!(hurt_dir(bearing(vec3(1.0, 0.0, 0.0))).x > 0.99, "right");
+        assert!(hurt_dir(bearing(vec3(-1.0, 0.0, 0.0))).x < -0.99, "left");
+        assert!(hurt_dir(bearing(vec3(0.0, 0.0, -1.0))).y < -0.99, "ahead");
+        assert!(hurt_dir(bearing(vec3(0.0, 0.0, 1.0))).y > 0.99, "behind");
+
+        // Yaw grows the other way, so a quarter turn to the left has to swing a
+        // source that was on the right round to dead astern.
+        let turned = std::f32::consts::FRAC_PI_2;
+        let astern = hurt_dir(turned - yaw_of(vec3(1.0, 0.0, 0.0)));
+        assert!(
+            astern.x.abs() < 1e-5 && astern.y > 0.99,
+            "a left quarter turn put the source at {astern:?}"
+        );
+    }
+
+    /// Strength may stretch an arc, never steer it: the fan has to stay centred
+    /// on its bearing at every value, or a heavy hit would appear to come from a
+    /// direction the player is not being shot from. This is also where the two
+    /// geometry helpers are checked against each other — the direction the arc
+    /// points and the direction the bearing names are the same mapping.
+    #[test]
+    fn an_arc_stays_centred_on_its_bearing() {
+        for b in [-3.0f32, -1.57, -0.6, 0.0, 0.6, 1.57, 3.0] {
+            for s in [0.0f32, 0.25, 0.5, 1.0] {
+                let (a0, a1) = hurt_arc_angles(b, s);
+                assert!(a0 < a1, "arc runs backwards at {b}/{s}: {a0}..{a1}");
+                let mid = (a0 + a1) * 0.5;
+                let dir = vec2(mid.cos(), mid.sin());
+                let want = hurt_dir(b);
+                assert!(
+                    (dir - want).length() < 1e-5,
+                    "arc at {b}/{s} points {dir:?}, bearing is {want:?}"
+                );
+            }
+        }
+    }
+
+    /// Strength is read as opacity and as length at the same time, and both have
+    /// to be bounded: a span that grew without limit would wrap the ring into a
+    /// hit from nowhere, and a NaN strength would reach macroquad as a NaN vertex.
+    #[test]
+    fn strength_stretches_an_arc_without_escaping_its_bounds() {
+        assert!((hurt_span(0.0) - HURT_SPAN_MIN).abs() < 1e-6);
+        assert!((hurt_span(1.0) - HURT_SPAN_MAX).abs() < 1e-6);
+        assert!(hurt_span(0.5) > hurt_span(0.25) && hurt_span(0.75) > hurt_span(0.5));
+        for s in [-5.0f32, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let span = hurt_span(s);
+            assert!(
+                span.is_finite() && (HURT_SPAN_MIN..=HURT_SPAN_MAX).contains(&span),
+                "strength {s} gave a span of {span}"
+            );
+        }
+        assert!((hurt_alpha(1.0) - 1.0).abs() < 1e-6);
+        // Even the faintest hit has to be visible, and still not solid.
+        assert!((0.15..0.5).contains(&hurt_alpha(0.0)));
+        assert!(hurt_alpha(0.75) > hurt_alpha(0.25));
+        assert!(hurt_alpha(f32::NAN).is_finite());
+    }
+
+    /// A full-strength arc still has to be a fan. Past a quarter turn it would
+    /// cover two sides of the ring at once and stop saying which one the shot
+    /// came from — which is the only thing this indicator exists to say.
+    #[test]
+    fn even_the_strongest_hit_stays_a_sector() {
+        // Constant arithmetic, so these are compile-time checks: a tuning change
+        // that breaks the fan fails the build, not one run of the suite.
+        const _: () = assert!(HURT_SPAN_MAX < std::f32::consts::FRAC_PI_2);
+        const _: () = assert!(HURT_SPAN_MIN > 0.0);
+        const _: () = assert!(
+            HURT_PLATE_PAD > 0.0,
+            "an arc with no plate reads on nothing"
+        );
+    }
+
+    /// The ring has to stay outside everything the crosshair draws. At full
+    /// spread its arms reach 96 layout units out and add 11.6 more, and the hit
+    /// ticks reach 24; an arc from dead ahead landing on the sight the player is
+    /// aiming through would be the one way this indicator actively hurts.
+    #[test]
+    fn the_damage_ring_clears_the_crosshair() {
+        let crosshair = 96.0 + 12.0;
+        let inner = HURT_RADIUS - HURT_THICK * 0.5;
+        assert!(
+            inner > crosshair,
+            "the ring's inner edge is at {inner}, inside the crosshair's reach"
+        );
+    }
+
+    /// Colour is the reinforcement and length is the reading, so the ramp has to
+    /// be the one the rest of the HUD uses for damage: the base ink at a graze,
+    /// the damage red at full strength, and never a third colour of its own.
+    #[test]
+    fn an_arc_ramps_from_ink_to_the_damage_red() {
+        // `mix` interpolates rather than snapping to its ends, so "at full
+        // strength it is the damage red" is one rounding step short of `DANGER`.
+        let near = |x: Color, y: Color| {
+            (x.r - y.r).abs() < 1e-5 && (x.g - y.g).abs() < 1e-5 && (x.b - y.b).abs() < 1e-5
+        };
+        assert!(near(hurt_colour(0.0), INK));
+        assert!(near(hurt_colour(1.0), DANGER));
+        let mid = hurt_colour(0.5);
+        assert!(
+            mid.r > DANGER.r && mid.g > DANGER.g && mid.b > DANGER.b,
+            "the halfway colour is not between the two: {mid:?}"
+        );
+        // A broken strength reads as a graze rather than as a scramble for the palette.
+        assert!(near(hurt_colour(f32::NAN), INK));
+    }
+
+    /// The kill flash lands in the middle of a firefight, so it may only ever
+    /// touch the edges: the player is still shooting at whatever is behind the
+    /// effect, and it has to end in nothing rather than on a visible line.
+    #[test]
+    fn the_kill_flash_never_reaches_the_middle_of_the_screen() {
+        // Compile-time: the band width is a constant, and a message with an
+        // inline argument is not available to a const panic.
+        const _: () = assert!(KILL_DEPTH < 0.35, "the flash must stay off the centre");
+        assert_eq!(kill_falloff(0.0), 1.0, "the edge is not the brightest part");
+        assert_eq!(kill_falloff(1.0), 0.0);
+        assert!(kill_falloff(0.25) > kill_falloff(0.5));
+        assert!(kill_falloff(0.5) > kill_falloff(0.75));
+        for t in [1.0f32, 1.5, 8.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(kill_falloff(t), 0.0, "glow leaked past the band at {t}");
+        }
+    }
+
+    /// A headshot has to be a different *readout*, not just a different tint: it
+    /// is the larger of the two sizes, and it wears the crosshair's headshot
+    /// colour so one colour means "headshot" in the whole frame.
+    #[test]
+    fn a_headshot_readout_is_bigger_and_keeps_the_headshot_colour() {
+        let body = damage_number_size(false);
+        let head = damage_number_size(true);
+        assert!(
+            head > body,
+            "headshot {head} is not bigger than body {body}"
+        );
+        for size in [body, head] {
+            // `font_px` rounds and clamps whatever it is handed, so a size outside
+            // this range would be drawn at one the HUD never chose.
+            assert!(
+                (8.0..=220.0).contains(&size),
+                "a size of {size} is not one the font can honour"
+            );
+        }
+        assert_eq!(damage_number_colour(false), INK);
+        assert_eq!(damage_number_colour(true), head_colour());
+        assert_ne!(damage_number_colour(true), damage_number_colour(false));
     }
 }

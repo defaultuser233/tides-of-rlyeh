@@ -1,8 +1,8 @@
-use crate::mesh::{MeshBuilder, transform_mesh};
+use crate::mesh::{MeshBuilder, transform_into};
 use macroquad::prelude::*;
 use std::cell::OnceCell;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PickupKind {
     Health,
     Ammo,
@@ -81,7 +81,7 @@ impl Pickup {
         self.pos + vec3(0.0, 0.55 + (self.phase * 2.0).sin() * 0.07, 0.0)
     }
 
-    pub fn mesh(&self) -> Mesh {
+    pub fn write_mesh(&self, dst: &mut Mesh) {
         PROTOS.with(|cell| {
             let protos = cell.get_or_init(|| {
                 [
@@ -93,9 +93,9 @@ impl Pickup {
             let proto = &protos[self.kind.index()];
             let pulse = 0.85 + (self.phase * 4.0).sin() * 0.15;
             let mat = Mat4::from_translation(self.centre()) * Mat4::from_rotation_y(self.spin);
-            let mut m = transform_mesh(proto, mat);
+            transform_into(dst, proto, mat);
             // Gentle emissive pulse so pickups read clearly against dark geometry.
-            for v in &mut m.vertices {
+            for v in &mut dst.vertices {
                 v.color = [
                     (v.color[0] as f32 * pulse).min(255.0) as u8,
                     (v.color[1] as f32 * pulse).min(255.0) as u8,
@@ -103,7 +103,6 @@ impl Pickup {
                     v.color[3],
                 ];
             }
-            m
         })
     }
 }

@@ -64,6 +64,16 @@ const BLACK: Color = Color::new(0.07, 0.07, 0.08, 1.0);
 const WOOD: Color = Color::new(0.45, 0.28, 0.14, 1.0);
 const WOOD_DARK: Color = Color::new(0.31, 0.19, 0.10, 1.0);
 const OLIVE: Color = Color::new(0.28, 0.30, 0.22, 1.0);
+/// Gloved hands. Without them the weapon is the only thing in the frame and
+/// reads as floating in front of the camera, which is the first thing anyone
+/// notices about a first-person view.
+const GLOVE: Color = Color::new(0.30, 0.25, 0.19, 1.0);
+const GLOVE_DARK: Color = Color::new(0.19, 0.16, 0.12, 1.0);
+const SLEEVE: Color = Color::new(0.31, 0.33, 0.26, 1.0);
+/// How much of the weapon's sway the hands do not follow. A hand that tracked
+/// the weapon exactly would make the two read as one rigid object; a little
+/// lag is what makes an arm look like it is holding something.
+const HAND_LAG: f32 = 0.4;
 
 /// One solid face, in whichever space it is handed to the pipeline.
 #[derive(Clone, Copy)]
@@ -755,6 +765,57 @@ fn build(kind: WeaponKind) -> Vec<Tri> {
     out
 }
 
+/// One gloved hand closed around `at`, with the forearm running back and
+/// outboard. `side` is +1 for the right hand and -1 for the left, and is the
+/// only thing that differs between the two.
+fn hand(out: &mut Vec<Tri>, at: Vec3, side: f32) {
+    // Fist, wrapped round whatever it is holding.
+    box3(
+        out,
+        at + vec3(-0.036, -0.050, -0.044),
+        at + vec3(0.036, 0.034, 0.044),
+        GLOVE,
+    );
+    // Knuckles on top, so it reads as a hand rather than a cube.
+    box3(
+        out,
+        at + vec3(-0.030, 0.030, -0.028),
+        at + vec3(0.030, 0.046, 0.028),
+        GLOVE_DARK,
+    );
+    // Thumb, folded over the near side of the grip.
+    box3(
+        out,
+        at + vec3(side * 0.020, -0.014, 0.024),
+        at + vec3(side * 0.047, 0.024, 0.062),
+        GLOVE_DARK,
+    );
+    // The forearm leaves the frame low and outboard, which is where an arm
+    // holding a weapon at the hip actually goes. It stops well short of the eye
+    // so that no corner of it crosses the near plane — one vertex behind the
+    // eye drops the whole triangle, and the arm would wink out mid-swing.
+    let wrist = at + vec3(side * 0.008, -0.040, -0.048);
+    let elbow = wrist + vec3(side * 0.115, -0.165, -0.105);
+    bar(
+        out,
+        wrist,
+        vec2(0.038, 0.042),
+        elbow,
+        vec2(0.052, 0.050),
+        SLEEVE,
+    );
+}
+
+fn hands_for(kind: WeaponKind) -> Vec<Tri> {
+    let d = def(kind);
+    let mut out = Vec::new();
+    hand(&mut out, d.grip, 1.0);
+    if let Some(at) = d.support {
+        hand(&mut out, at, -1.0);
+    }
+    out
+}
+
 /// Eased 0..1 ramp, flat at both ends.
 fn smooth(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
@@ -784,51 +845,70 @@ struct Def {
     aim: Vec3,
     /// Where the flash appears, in local space.
     muzzle: Vec3,
+    /// Where the firing hand closes on the grip, in local space.
+    grip: Vec3,
+    /// Where the support hand closes on the fore-end. `None` for the weapons
+    /// that are held in one hand, where a second hand would have nowhere to be.
+    support: Option<Vec3>,
 }
 
 fn def(kind: WeaponKind) -> Def {
     match kind {
         WeaponKind::Rifle => Def {
-            hip: vec3(0.150, -0.150, 0.400),
+            hip: vec3(0.150, -0.092, 0.400),
             rotation: vec3(-0.120, 0.045, 0.060),
             aim: vec3(0.0, 0.0, 0.340),
             muzzle: vec3(0.0, -0.074, 0.872),
+            grip: vec3(0.0, -0.166, -0.114),
+            support: Some(vec3(0.0, -0.150, 0.190)),
         },
         WeaponKind::Shotgun => Def {
-            hip: vec3(0.165, -0.170, 0.420),
+            hip: vec3(0.165, -0.112, 0.420),
             rotation: vec3(-0.140, 0.060, 0.090),
             aim: vec3(0.0, 0.0, 0.365),
             muzzle: vec3(0.0, -0.094, 0.746),
+            grip: vec3(0.0, -0.176, -0.076),
+            support: Some(vec3(0.0, -0.164, 0.120)),
         },
         WeaponKind::Smg => Def {
-            hip: vec3(0.130, -0.135, 0.360),
+            hip: vec3(0.130, -0.077, 0.360),
             rotation: vec3(-0.100, 0.030, 0.040),
             aim: vec3(0.0, 0.0, 0.305),
             muzzle: vec3(0.0, -0.076, 0.406),
+            grip: vec3(0.0, -0.155, -0.096),
+            support: Some(vec3(0.0, -0.148, 0.158)),
         },
         WeaponKind::Sniper => Def {
-            hip: vec3(0.170, -0.160, 0.440),
+            hip: vec3(0.170, -0.102, 0.440),
             rotation: vec3(-0.150, 0.050, 0.100),
             aim: vec3(0.0, 0.0, 0.340),
             muzzle: vec3(0.0, -0.085, 1.006),
+            grip: vec3(0.0, -0.158, -0.130),
+            support: Some(vec3(0.0, -0.146, 0.215)),
         },
         WeaponKind::Lmg => Def {
-            hip: vec3(0.175, -0.175, 0.430),
+            hip: vec3(0.175, -0.117, 0.430),
             rotation: vec3(-0.130, 0.070, 0.070),
             aim: vec3(0.0, 0.0, 0.360),
             muzzle: vec3(0.0, -0.095, 0.891),
+            grip: vec3(0.0, -0.190, -0.138),
+            support: Some(vec3(0.0, -0.172, 0.300)),
         },
         WeaponKind::Pistol => Def {
-            hip: vec3(0.140, -0.105, 0.355),
+            hip: vec3(0.140, -0.047, 0.355),
             rotation: vec3(-0.090, 0.035, 0.055),
             aim: vec3(0.0, 0.0, 0.300),
             muzzle: vec3(0.0, -0.036, 0.132),
+            grip: vec3(0.0, -0.118, -0.066),
+            support: None,
         },
         WeaponKind::Knife => Def {
-            hip: vec3(0.150, -0.115, 0.350),
+            hip: vec3(0.150, -0.057, 0.350),
             rotation: vec3(-0.105, 0.045, 0.085),
             aim: vec3(0.0, 0.0, 0.330),
             muzzle: vec3(0.0, 0.0, 0.212),
+            grip: vec3(0.0, -0.072, -0.074),
+            support: None,
         },
     }
 }
@@ -874,6 +954,14 @@ pub struct ViewModel {
     /// Countdown for the grenade throw motion; zero when idle.
     grenade_t: f32,
     parts: [Vec<Tri>; 7],
+    /// The hands that hold each weapon. Kept apart from `parts` because they do
+    /// not move with it — see `HAND_LAG`.
+    hands: [Vec<Tri>; 7],
+    /// Scratch for `draw`. The body and the flash are rebuilt from `parts` every
+    /// frame anyway; collecting them into a fresh vector each time was a handful
+    /// of allocations a frame for geometry that never changes size.
+    body: Vec<Tri>,
+    flash: Vec<Tri>,
 }
 
 impl ViewModel {
@@ -886,6 +974,9 @@ impl ViewModel {
             grenade_t: 0.0,
             // One entry per kind, in `slot` order.
             parts: ALL_KINDS.map(build),
+            hands: ALL_KINDS.map(hands_for),
+            body: Vec::new(),
+            flash: Vec::new(),
         }
     }
 
@@ -923,7 +1014,7 @@ impl ViewModel {
     }
 
     /// Call in the 2D pass, after `set_default_camera()`.
-    pub fn draw(&self, player: &Player, arsenal: &Arsenal) {
+    pub fn draw(&mut self, player: &Player, arsenal: &Arsenal) {
         let viewport = vec2(screen_width(), screen_height());
         let fovy = player.fovy();
         if viewport.x < 1.0 || viewport.y < 1.0 || fovy <= 0.0 {
@@ -936,14 +1027,19 @@ impl ViewModel {
         let pose = self.pose(player, weapon);
         let mat = pose.matrix();
 
-        let mut body: Vec<Tri> = self.parts[slot(weapon.kind)]
-            .iter()
-            .map(|t| t.map(mat))
-            .filter(Tri::finite)
-            .collect();
+        let parts = &self.parts[slot(weapon.kind)];
+        let hand_parts = &self.hands[slot(weapon.kind)];
+        let body = &mut self.body;
+        body.clear();
+        body.extend(parts.iter().map(|t| t.map(mat)).filter(Tri::finite));
+        // The hands are held slightly back from the weapon's sway, so a weapon
+        // being swung around does not read as one rigid object with arms welded
+        // to it.
+        let lag = mat * Mat4::from_translation(vec3(-self.sway.x, -self.sway.y, 0.0) * HAND_LAG);
+        body.extend(hand_parts.iter().map(|t| t.map(lag)).filter(Tri::finite));
         // Painter's algorithm: farthest faces first, nearer ones cover them.
         body.sort_by(|x, y| y.depth().total_cmp(&x.depth()));
-        for t in &body {
+        for t in body.iter() {
             if let Some(p) = project(t, viewport, f) {
                 draw_triangle(p[0], p[1], p[2], t.shaded());
             }
@@ -952,13 +1048,9 @@ impl ViewModel {
         // The flash is light rather than geometry, so it goes over the top —
         // except for blades, which flash nothing at all.
         if weapon.flash > 0.0 && !weapon.stats().melee {
-            let mut flash = Vec::new();
-            flash_shape(
-                &mut flash,
-                def(weapon.kind).muzzle,
-                weapon.flash,
-                weapon.shots,
-            );
+            let flash = &mut self.flash;
+            flash.clear();
+            flash_shape(flash, def(weapon.kind).muzzle, weapon.flash, weapon.shots);
             for t in flash.iter().map(|t| t.map(mat)).filter(Tri::finite) {
                 if let Some(p) = project(&t, viewport, f) {
                     draw_triangle(p[0], p[1], p[2], t.color);

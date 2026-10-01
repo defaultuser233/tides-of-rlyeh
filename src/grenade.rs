@@ -241,14 +241,10 @@ impl Grenades {
         blasts
     }
 
-    /// Live bodies plus the smoke clouds they left, batched for one draw call.
-    pub fn mesh(&self, level: &Level) -> Mesh {
-        // Two boxes per body, and every shell of every cloud at most. Sizing the
-        // batch from that beats the run of reallocations a builder grown from
-        // empty spends on the same geometry every frame.
-        let per_cloud: usize = SMOKE_SHELLS.iter().map(|s| s.1).sum();
-        let boxes = (self.live.len() * 2 + level.smoke.len() * per_cloud).min(MAX_BOXES);
-        let mut mb = MeshBuilder::with_capacity(boxes * 24, boxes * 36);
+    /// Live bodies plus the smoke clouds they left, batched for one draw call
+    /// into `dst`.
+    pub fn write_mesh(&self, level: &Level, dst: &mut Mesh) {
+        let mut mb = MeshBuilder::reclaim(dst);
         let mut budget = MAX_BOXES;
 
         for g in &self.live {
@@ -287,7 +283,7 @@ impl Grenades {
             }
         }
 
-        mb.finish()
+        *dst = mb.finish();
     }
 
     pub fn live_count(&self) -> usize {

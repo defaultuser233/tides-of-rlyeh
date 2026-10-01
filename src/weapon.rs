@@ -65,7 +65,13 @@ const AUTO_SEMI: &[FireMode] = &[FireMode::Auto, FireMode::Single];
 const RIFLE_MODES: &[FireMode] = &[FireMode::Auto, FireMode::Burst, FireMode::Single];
 const SMG_MODES: &[FireMode] = &[FireMode::Auto, FireMode::Burst, FireMode::Single];
 
-#[derive(Clone, Copy)]
+/// The numbers the rest of the game reads, one field per concept.
+///
+/// This is the field-named view of a `ResolvedStats`: produced by resolving a
+/// def against a build, and no longer where a weapon's numbers are authored —
+/// `WeaponDef::base` is. Kept field for field so that every caller that reads
+/// `WeaponStats` needed no change when the model behind it arrived.
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct WeaponStats {
     pub class: SlotClass,
     pub damage: f32,
@@ -93,6 +99,798 @@ pub struct WeaponStats {
     pub infinite_ammo: bool,
     /// Melee weapons resolve as a very short, very wide hit instead of a shot.
     pub melee: bool,
+}
+
+/// Where a number comes from.
+///
+/// `Static` is what every shipping weapon uses. `Range` is the source of "same
+/// part, different feel": whoever builds the instance draws a roll and hands it
+/// in, so nothing here needs to know about `util::Rng`, and `resolve` stays a
+/// function that a test, a tutorial hint and a network check can all replay.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Value {
+    Static(f32),
+    // No shipping data is ranged yet — the part catalogue stays empty until
+    // the gunsmith UI can install something — so only the tests construct one.
+    // It is the point of the model, not a leftover.
+    #[allow(dead_code)]
+    Range {
+        min: f32,
+        max: f32,
+    },
+}
+
+impl Value {
+    /// The number this stands for at `roll`, clamped into `[0, 1]`: a caller
+    /// that draws outside the unit interval gets the nearest end of the range,
+    /// not a value the range never allowed.
+    pub fn sample(self, roll: f32) -> f32 {
+        match self {
+            Value::Static(v) => v,
+            Value::Range { min, max } => min + (max - min) * roll.clamp(0.0, 1.0),
+        }
+    }
+}
+
+/// One tunable number of a weapon: the numeric half of `WeaponStats`.
+///
+/// Identity is deliberately not a stat. A part changes how a weapon performs;
+/// it cannot change what the weapon *is* — its class, its fire modes, whether
+/// it burns ammunition.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StatId {
+    Damage,
+    Pellets,
+    FireInterval,
+    MagSize,
+    ReloadTime,
+    BaseSpread,
+    BloomPerShot,
+    MaxBloom,
+    BloomDecay,
+    RecoilPitch,
+    RecoilYaw,
+    AdsFov,
+    MoveScale,
+    HeadshotMult,
+    FalloffStart,
+    FalloffEnd,
+    FalloffMin,
+    BurstCount,
+}
+
+/// How many stats there are: the length of `WeaponDef::base` and of the value
+/// block inside a `ResolvedStats`.
+pub const STAT_COUNT: usize = 18;
+
+impl StatId {
+    /// The stats in declaration order, which is the order `WeaponDef::base` is
+    /// written in and the order `resolve` walks.
+    pub const ALL: [StatId; 18] = [
+        StatId::Damage,
+        StatId::Pellets,
+        StatId::FireInterval,
+        StatId::MagSize,
+        StatId::ReloadTime,
+        StatId::BaseSpread,
+        StatId::BloomPerShot,
+        StatId::MaxBloom,
+        StatId::BloomDecay,
+        StatId::RecoilPitch,
+        StatId::RecoilYaw,
+        StatId::AdsFov,
+        StatId::MoveScale,
+        StatId::HeadshotMult,
+        StatId::FalloffStart,
+        StatId::FalloffEnd,
+        StatId::FalloffMin,
+        StatId::BurstCount,
+    ];
+
+    /// Place in `WeaponDef::base`. It is the declaration order, which is why
+    /// `ALL` has to be written in that order too — the check below is what
+    /// stops a stat from resolving out of another stat's row.
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    /// Whether the stat counts whole things. Those are rounded between the
+    /// `MulPre` and `MulPost` stages: nothing holds 14.5 rounds.
+    pub const fn whole(self) -> bool {
+        matches!(self, StatId::Pellets | StatId::MagSize | StatId::BurstCount)
+    }
+
+    /// The envelope a stat is snapped into between the `MulPre` and `MulPost`
+    /// stages. Every number of today's seven weapons sits inside its own
+    /// envelope, which is what lets an empty build resolve to the untouched
+    /// table.
+    pub const fn bounds(self) -> (f32, f32) {
+        match self {
+            StatId::Damage => (0.0, 1000.0),
+            StatId::Pellets => (0.0, 64.0),
+            StatId::FireInterval => (0.02, 5.0),
+            StatId::MagSize => (0.0, 500.0),
+            StatId::ReloadTime => (0.0, 10.0),
+            StatId::BaseSpread => (0.0, 0.5),
+            StatId::BloomPerShot => (0.0, 0.5),
+            StatId::MaxBloom => (0.0, 1.0),
+            StatId::BloomDecay => (0.0, 5.0),
+            StatId::RecoilPitch => (0.0, 1.0),
+            StatId::RecoilYaw => (0.0, 1.0),
+            StatId::AdsFov => (5.0, 120.0),
+            StatId::MoveScale => (0.1, 2.0),
+            StatId::HeadshotMult => (1.0, 10.0),
+            StatId::FalloffStart => (0.0, 1000.0),
+            StatId::FalloffEnd => (0.0, 1000.0),
+            StatId::FalloffMin => (0.0, 1.0),
+            StatId::BurstCount => (0.0, 16.0),
+        }
+    }
+}
+
+const _: () = {
+    assert!(StatId::ALL.len() == STAT_COUNT);
+    let mut i: usize = 0;
+    while i < STAT_COUNT {
+        assert!(StatId::ALL[i].index() == i);
+        i += 1;
+    }
+};
+
+/// One arithmetic step, already carrying its number.
+///
+/// Steps are not applied in the order their parts are listed. `resolve` walks
+/// one stat at a time and runs the stages in this fixed order:
+///
+/// 1. every `Add` is summed into the base value, so two flat bonuses cannot
+///    depend on which part was bolted on first;
+/// 2. every `MulPre` multiplies that sum;
+/// 3. the result is snapped into the stat's envelope (`StatId::bounds`), and a
+///    whole-number stat is rounded there;
+/// 4. every `MulPost` multiplies what survived step 3. It has the last word, so
+///    it is the one stage allowed to leave the envelope the design declared —
+///    that is what a late or cursed bonus uses — and the only thing it may not
+///    do is leave a stat non-finite or negative.
+///
+/// `MulPre` and `MulPost` are the same arithmetic, and part ways only where
+/// step 3 bites: at the envelope, or on a whole-number stat. They are two
+/// stages rather than one so that a designer can say which side of the design
+/// envelope a multiplier was meant for.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Modifier {
+    Add(f32),
+    MulPre(f32),
+    MulPost(f32),
+}
+
+/// Which stage a `StatMod` feeds: the declarative half of `Modifier`.
+///
+/// The two are separate because a `Modifier` carries a number while a `StatMod`
+/// carries a `Value`, whose number is only rolled when an instance is built.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+// Nothing in a shipping build writes a part spec, so nothing picks a stage yet:
+// the catalogue is empty until the gunsmith UI has something to install, and
+// the tests are what build `StatMod`s today.
+#[allow(dead_code)]
+pub enum ModKind {
+    Add,
+    MulPre,
+    MulPost,
+}
+
+/// One line of a part's spec sheet: the stat it touches, the stage it feeds,
+/// and how much — as a `Value`, so the same part can be authored to roll.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct StatMod {
+    pub stat: StatId,
+    pub kind: ModKind,
+    pub amount: Value,
+}
+
+impl StatMod {
+    /// Materialise this line for one instance. The `roll` belongs to the build
+    /// entry, which is the only thing that differs between two copies of the
+    /// same part.
+    pub fn modifier(&self, roll: f32) -> Modifier {
+        let n = self.amount.sample(roll);
+        match self.kind {
+            ModKind::Add => Modifier::Add(n),
+            ModKind::MulPre => Modifier::MulPre(n),
+            ModKind::MulPost => Modifier::MulPost(n),
+        }
+    }
+}
+
+/// A slot: one the weapon offers, or one a part opens up.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SlotId(pub &'static str);
+
+/// The mounting standard a slot takes and a part declares. Two slots that take
+/// the same standard take the same parts, which is how one optic can fit a
+/// rifle and a pistol without either def knowing about the other.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct InterfaceId(pub &'static str);
+
+/// A part, by the name the catalogue files it under.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PartId(pub &'static str);
+
+/// One slot on a weapon.
+#[derive(Clone, Copy, Debug)]
+pub struct SlotDef {
+    pub id: SlotId,
+    /// The standard a part must declare to seat here.
+    pub accepts: InterfaceId,
+    /// How many parts the slot holds at once. An optic rail takes one; a
+    /// handguard rail takes as many as it has room for.
+    pub max_parts: usize,
+}
+
+/// A part, as its designer writes it: what it is built for, what standard it
+/// declares, what it opens up, and what it does to the numbers.
+#[derive(Clone, Copy, Debug)]
+pub struct PartDef {
+    pub id: PartId,
+    /// The slot it is built for.
+    pub slot: SlotId,
+    pub interface: InterfaceId,
+    /// Slots it opens once installed — which is how a scope ends up on a rifle
+    /// whose def never mentions it, on the invitation of the handguard.
+    pub subslots: &'static [SlotDef],
+    pub mods: &'static [StatMod],
+}
+
+/// Everything a weapon kind is authored as: what it is, what it starts at, and
+/// what can be hung on it.
+///
+/// A def is shared by every instance of its kind and is never written to.
+/// `resolve` reads it; the outcome is a `ResolvedStats`, which belongs to the
+/// instance. Writing a build's outcome back into a def is how one weapon's
+/// scope becomes every weapon's scope.
+pub struct WeaponDef {
+    /// Identity: what the weapon is. No part may change these.
+    pub class: SlotClass,
+    pub fire_modes: &'static [FireMode],
+    pub infinite_ammo: bool,
+    pub melee: bool,
+    /// The starting value of every stat, in `StatId::ALL` order. A `Range` here
+    /// is sampled at its midpoint: a def is shared, so it has no per-instance
+    /// roll of its own, and a number meant to differ between two copies belongs
+    /// on a part, whose build entry carries one.
+    pub base: [Value; STAT_COUNT],
+    /// The slots the weapon offers before anything is installed.
+    pub slots: &'static [SlotDef],
+}
+
+/// One weapon as it is actually built: which part went into which slot, and the
+/// roll that samples any range that part declared.
+///
+/// The roll is the caller's — drawn from `util::Rng` at the bench, pinned to a
+/// constant by a test — because `resolve` may not draw one itself.
+#[derive(Clone, PartialEq, Debug)]
+pub struct WeaponBuild {
+    pub entries: Vec<BuildEntry>,
+}
+
+impl WeaponBuild {
+    /// A weapon as it comes out of the crate: no parts, so resolving it yields
+    /// the def's own numbers.
+    pub const fn empty() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+}
+
+/// One choice: a part in a slot, at a roll.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct BuildEntry {
+    pub slot: SlotId,
+    pub part: PartId,
+    /// In `[0, 1]`; samples every ranged number the part declares.
+    pub roll: f32,
+}
+
+/// A weapon's numbers once its build has been resolved.
+///
+/// Cache, not truth: this is what an instance carries instead of recomputing
+/// `resolve` per shot, and it exists per weapon rather than per kind, so no
+/// instance can see another's build.
+#[derive(Clone, Copy, Debug)]
+pub struct ResolvedStats {
+    class: SlotClass,
+    fire_modes: &'static [FireMode],
+    infinite_ammo: bool,
+    melee: bool,
+    values: [f32; STAT_COUNT],
+}
+
+impl ResolvedStats {
+    /// One stat by id: what a gunsmith screen draws its bars from, and what a
+    /// delta readout compares two builds with.
+    pub fn stat(&self, id: StatId) -> f32 {
+        self.values[id.index()]
+    }
+
+    /// The field-named view the rest of the game reads. Whole-number stats are
+    /// already rounded, so nothing is converted here — only named.
+    pub fn as_stats(&self) -> WeaponStats {
+        WeaponStats {
+            class: self.class,
+            damage: self.stat(StatId::Damage),
+            pellets: self.stat(StatId::Pellets) as u32,
+            fire_interval: self.stat(StatId::FireInterval),
+            mag_size: self.stat(StatId::MagSize) as u32,
+            reload_time: self.stat(StatId::ReloadTime),
+            base_spread: self.stat(StatId::BaseSpread),
+            bloom_per_shot: self.stat(StatId::BloomPerShot),
+            max_bloom: self.stat(StatId::MaxBloom),
+            bloom_decay: self.stat(StatId::BloomDecay),
+            recoil_pitch: self.stat(StatId::RecoilPitch),
+            recoil_yaw: self.stat(StatId::RecoilYaw),
+            ads_fov: self.stat(StatId::AdsFov),
+            move_scale: self.stat(StatId::MoveScale),
+            headshot_mult: self.stat(StatId::HeadshotMult),
+            falloff_start: self.stat(StatId::FalloffStart),
+            falloff_end: self.stat(StatId::FalloffEnd),
+            falloff_min: self.stat(StatId::FalloffMin),
+            fire_modes: self.fire_modes,
+            burst_count: self.stat(StatId::BurstCount) as u32,
+            infinite_ammo: self.infinite_ammo,
+            melee: self.melee,
+        }
+    }
+}
+
+/// The part the catalogue files under `id`, or `None` when it has never heard
+/// of it — a build from another version, or a typo.
+fn part_def(id: PartId) -> Option<&'static PartDef> {
+    CATALOG.iter().find(|p| p.id == id)
+}
+
+/// The parts this build of the game knows about.
+///
+/// Shipping builds have none: nothing in the game can install a part yet, so
+/// one here would be content with no way to reach it. The tests swap in a
+/// catalogue of their own (`demo_parts`, at the bottom of the file), which keeps
+/// `resolve` and `validate` honest against real part data without inventing an
+/// inventory that no screen can open.
+#[cfg(not(test))]
+static CATALOG: &[PartDef] = &[];
+
+#[cfg(test)]
+static CATALOG: &[PartDef] = &[
+    demo_parts::MICRO_DOT,
+    demo_parts::COMPENSATOR,
+    demo_parts::EXTENDED_MAG,
+    demo_parts::SURPLUS_LOT,
+    demo_parts::RISER,
+    demo_parts::SCOPE,
+    demo_parts::PROBE_FLAT,
+    demo_parts::PROBE_X3,
+    demo_parts::PROBE_HALF,
+    demo_parts::PROBE_HEAVY,
+    demo_parts::PROBE_PELLETS,
+];
+
+/// Roll a def's own base value is sampled with; see `WeaponDef::base`.
+const DEF_BASE_ROLL: f32 = 0.5;
+
+/// The slots a weapon offers with this build installed: the def's own, plus
+/// every subslot an installed part opens.
+///
+/// Walked to a fixpoint rather than in list order, so a part may be listed
+/// before the part that opened its slot. A build is a set of choices, not a
+/// sequence of assembly steps.
+fn reachable_slots(def: &WeaponDef, build: &WeaponBuild) -> Vec<SlotDef> {
+    let mut slots = def.slots.to_vec();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for entry in &build.entries {
+            let Some(slot) = slots.iter().find(|s| s.id == entry.slot).copied() else {
+                continue;
+            };
+            let Some(part) = part_def(entry.part) else {
+                continue;
+            };
+            // A part that does not seat properly opens nothing.
+            if part.slot != entry.slot || part.interface != slot.accepts {
+                continue;
+            }
+            for sub in part.subslots {
+                if !slots.iter().any(|s| s.id == sub.id) {
+                    slots.push(*sub);
+                    changed = true;
+                }
+            }
+        }
+    }
+    slots
+}
+
+/// The parts a build lands, each with the roll its entry carried: everything
+/// `validate` would accept.
+///
+/// Resolution drops an entry it cannot accept instead of guessing at it, so a
+/// build that was never validated degrades to the parts that do fit rather than
+/// applying a muzzle brake as a stock.
+fn installed(def: &WeaponDef, build: &WeaponBuild) -> Vec<(f32, &'static [StatMod])> {
+    let slots = reachable_slots(def, build);
+    build
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            let slot = slots.iter().find(|s| s.id == entry.slot)?;
+            let part = part_def(entry.part)?;
+            (part.slot == entry.slot && part.interface == slot.accepts)
+                .then_some((entry.roll, part.mods))
+        })
+        .collect()
+}
+
+/// Push a build through a def: what one weapon built this way ends up with.
+///
+/// Pure. Both inputs are read and never written, and every roll comes from the
+/// build, so the same pair always resolves to the same numbers.
+pub fn resolve(def: &WeaponDef, build: &WeaponBuild) -> ResolvedStats {
+    let parts = installed(def, build);
+    let mut values = [0.0; STAT_COUNT];
+    for stat in StatId::ALL {
+        // One pass per stat into three buckets. Bucketing is what keeps the
+        // stages from being applied in the order the build happened to list its
+        // parts in: the order is the contract, not the file.
+        let (mut add, mut pre, mut post) = (0.0, 1.0, 1.0);
+        for (roll, mods) in &parts {
+            for m in mods.iter().filter(|m| m.stat == stat) {
+                match m.modifier(*roll) {
+                    Modifier::Add(n) => add += n,
+                    Modifier::MulPre(n) => pre *= n,
+                    Modifier::MulPost(n) => post *= n,
+                }
+            }
+        }
+        // Add, then MulPre, then the envelope and rounding, then MulPost — the
+        // order documented on `Modifier`.
+        let (lo, hi) = stat.bounds();
+        let mut value = (def.base[stat.index()].sample(DEF_BASE_ROLL) + add) * pre;
+        if stat.whole() {
+            value = value.round();
+        }
+        value = value.clamp(lo, hi) * post;
+        // A post multiplier may leave the design envelope, but not the realm of
+        // numbers a weapon can be simulated with.
+        values[stat.index()] = if value.is_nan() { lo } else { value.max(0.0) };
+    }
+    ResolvedStats {
+        class: def.class,
+        fire_modes: def.fire_modes,
+        infinite_ammo: def.infinite_ammo,
+        melee: def.melee,
+        values,
+    }
+}
+
+/// A reason a build is not legal. Every one of them is a data error — a loadout
+/// table, a tutorial reward, a save from another version — not a runtime state,
+/// so `validate` reports all of them instead of stopping at the first and
+/// callers log the list rather than picking a favourite.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Violation {
+    /// The build names a slot the weapon does not offer, not even with every
+    /// part that is installed opening what it can.
+    UnknownSlot(SlotId),
+    /// The catalogue has no such part.
+    UnknownPart(PartId),
+    /// The part was built for a different slot.
+    WrongSlot {
+        slot: SlotId,
+        part: PartId,
+        built_for: SlotId,
+    },
+    /// The slot takes a different mounting standard.
+    WrongInterface {
+        slot: SlotId,
+        part: PartId,
+        accepts: InterfaceId,
+        declares: InterfaceId,
+    },
+    /// More parts in one slot than it holds.
+    Overfull {
+        slot: SlotId,
+        max: usize,
+        found: usize,
+    },
+}
+
+/// Check a build against a def: the one gate that a mission load, a tutorial, an
+/// achievement and a network check all share, so that they cannot disagree about
+/// what a legal weapon is. Pure, like `resolve`, and it keeps going after the
+/// first fault so a screen can show the whole list at once.
+pub fn validate(def: &WeaponDef, build: &WeaponBuild) -> Result<(), Vec<Violation>> {
+    let slots = reachable_slots(def, build);
+    let mut violations = Vec::new();
+    for entry in &build.entries {
+        let Some(slot) = slots.iter().find(|s| s.id == entry.slot) else {
+            violations.push(Violation::UnknownSlot(entry.slot));
+            continue;
+        };
+        let Some(part) = part_def(entry.part) else {
+            violations.push(Violation::UnknownPart(entry.part));
+            continue;
+        };
+        if part.slot != entry.slot {
+            violations.push(Violation::WrongSlot {
+                slot: entry.slot,
+                part: entry.part,
+                built_for: part.slot,
+            });
+        }
+        if part.interface != slot.accepts {
+            violations.push(Violation::WrongInterface {
+                slot: entry.slot,
+                part: entry.part,
+                accepts: slot.accepts,
+                declares: part.interface,
+            });
+        }
+    }
+    for slot in &slots {
+        let found = build.entries.iter().filter(|e| e.slot == slot.id).count();
+        if found > slot.max_parts {
+            violations.push(Violation::Overfull {
+                slot: slot.id,
+                max: slot.max_parts,
+                found,
+            });
+        }
+    }
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(violations)
+    }
+}
+
+/// Shorthand for the only `Value` a shipping weapon uses.
+const fn st(v: f32) -> Value {
+    Value::Static(v)
+}
+
+/// The slots a gun offers before anything is installed: an optic rail, a
+/// threaded muzzle and a magazine well.
+///
+/// One table for every gun for now. The standards are the part of this that
+/// matters — a shotgun choke and a rifle brake are different standards the day
+/// a part needs them to be, and splitting one is a line here, not a rewrite.
+/// The knife offers nothing, which is why it is absent.
+const GUN_SLOTS: &[SlotDef] = &[
+    SlotDef {
+        id: SlotId("optic"),
+        accepts: InterfaceId("rail"),
+        max_parts: 1,
+    },
+    SlotDef {
+        id: SlotId("muzzle"),
+        accepts: InterfaceId("threaded_muzzle"),
+        max_parts: 1,
+    },
+    SlotDef {
+        id: SlotId("magazine"),
+        accepts: InterfaceId("magwell"),
+        max_parts: 1,
+    },
+];
+
+/// The rifle. Every number is the one the pre-resolver table held, pinned by
+/// `the_shipped_tables_survive_the_resolver_bit_for_bit` below.
+const RIFLE: WeaponDef = WeaponDef {
+    class: SlotClass::Primary,
+    fire_modes: RIFLE_MODES,
+    infinite_ammo: false,
+    melee: false,
+    base: [
+        st(24.0),   // Damage
+        st(1.0),    // Pellets
+        st(0.088),  // FireInterval
+        st(30.0),   // MagSize
+        st(1.35),   // ReloadTime
+        st(0.0042), // BaseSpread
+        st(0.0055), // BloomPerShot
+        st(0.040),  // MaxBloom
+        st(0.085),  // BloomDecay
+        st(0.0165), // RecoilPitch
+        st(0.0042), // RecoilYaw
+        st(42.0),   // AdsFov
+        st(1.0),    // MoveScale
+        st(2.4),    // HeadshotMult
+        st(30.0),   // FalloffStart
+        st(70.0),   // FalloffEnd
+        st(0.55),   // FalloffMin
+        st(3.0),    // BurstCount
+    ],
+    slots: GUN_SLOTS,
+};
+
+const SHOTGUN: WeaponDef = WeaponDef {
+    class: SlotClass::Primary,
+    fire_modes: SEMI,
+    infinite_ammo: false,
+    melee: false,
+    base: [
+        st(15.0),  // Damage
+        st(9.0),   // Pellets
+        st(0.78),  // FireInterval
+        st(6.0),   // MagSize
+        st(2.30),  // ReloadTime
+        st(0.055), // BaseSpread
+        st(0.0),   // BloomPerShot
+        st(0.0),   // MaxBloom
+        st(0.1),   // BloomDecay
+        st(0.055), // RecoilPitch
+        st(0.012), // RecoilYaw
+        st(50.0),  // AdsFov
+        st(0.94),  // MoveScale
+        st(1.6),   // HeadshotMult
+        st(8.0),   // FalloffStart
+        st(26.0),  // FalloffEnd
+        st(0.25),  // FalloffMin
+        st(3.0),   // BurstCount
+    ],
+    slots: GUN_SLOTS,
+};
+
+const SMG: WeaponDef = WeaponDef {
+    class: SlotClass::Primary,
+    fire_modes: SMG_MODES,
+    infinite_ammo: false,
+    melee: false,
+    base: [
+        st(14.0),   // Damage
+        st(1.0),    // Pellets
+        st(0.055),  // FireInterval
+        st(40.0),   // MagSize
+        st(1.50),   // ReloadTime
+        st(0.0105), // BaseSpread
+        st(0.0045), // BloomPerShot
+        st(0.045),  // MaxBloom
+        st(0.110),  // BloomDecay
+        st(0.0105), // RecoilPitch
+        st(0.0055), // RecoilYaw
+        st(46.0),   // AdsFov
+        st(1.05),   // MoveScale
+        st(2.0),    // HeadshotMult
+        st(18.0),   // FalloffStart
+        st(45.0),   // FalloffEnd
+        st(0.50),   // FalloffMin
+        st(3.0),    // BurstCount
+    ],
+    slots: GUN_SLOTS,
+};
+
+const SNIPER: WeaponDef = WeaponDef {
+    class: SlotClass::Primary,
+    fire_modes: SEMI,
+    infinite_ammo: false,
+    melee: false,
+    base: [
+        st(115.0),  // Damage
+        st(1.0),    // Pellets
+        st(1.15),   // FireInterval
+        st(5.0),    // MagSize
+        st(2.50),   // ReloadTime
+        st(0.0009), // BaseSpread
+        st(0.020),  // BloomPerShot
+        st(0.030),  // MaxBloom
+        st(0.500),  // BloomDecay
+        st(0.075),  // RecoilPitch
+        st(0.010),  // RecoilYaw
+        st(16.0),   // AdsFov
+        st(0.85),   // MoveScale
+        st(2.2),    // HeadshotMult
+        st(1000.0), // FalloffStart
+        st(1000.0), // FalloffEnd
+        st(1.0),    // FalloffMin
+        st(3.0),    // BurstCount
+    ],
+    slots: GUN_SLOTS,
+};
+
+const LMG: WeaponDef = WeaponDef {
+    class: SlotClass::Primary,
+    fire_modes: AUTO_SEMI,
+    infinite_ammo: false,
+    melee: false,
+    base: [
+        st(21.0),   // Damage
+        st(1.0),    // Pellets
+        st(0.075),  // FireInterval
+        st(100.0),  // MagSize
+        st(3.40),   // ReloadTime
+        st(0.0135), // BaseSpread
+        st(0.0075), // BloomPerShot
+        st(0.075),  // MaxBloom
+        st(0.050),  // BloomDecay
+        st(0.0135), // RecoilPitch
+        st(0.0060), // RecoilYaw
+        st(48.0),   // AdsFov
+        st(0.82),   // MoveScale
+        st(2.0),    // HeadshotMult
+        st(35.0),   // FalloffStart
+        st(80.0),   // FalloffEnd
+        st(0.60),   // FalloffMin
+        st(3.0),    // BurstCount
+    ],
+    slots: GUN_SLOTS,
+};
+
+const PISTOL: WeaponDef = WeaponDef {
+    class: SlotClass::Pistol,
+    fire_modes: SEMI,
+    infinite_ammo: false,
+    melee: false,
+    base: [
+        st(26.0),   // Damage
+        st(1.0),    // Pellets
+        st(0.160),  // FireInterval
+        st(15.0),   // MagSize
+        st(1.25),   // ReloadTime
+        st(0.0060), // BaseSpread
+        st(0.0080), // BloomPerShot
+        st(0.038),  // MaxBloom
+        st(0.160),  // BloomDecay
+        st(0.0220), // RecoilPitch
+        st(0.0030), // RecoilYaw
+        st(48.0),   // AdsFov
+        st(1.10),   // MoveScale
+        st(2.6),    // HeadshotMult
+        st(14.0),   // FalloffStart
+        st(45.0),   // FalloffEnd
+        st(0.45),   // FalloffMin
+        st(3.0),    // BurstCount
+    ],
+    slots: GUN_SLOTS,
+};
+
+const KNIFE: WeaponDef = WeaponDef {
+    class: SlotClass::Melee,
+    fire_modes: SEMI,
+    infinite_ammo: true,
+    melee: true,
+    base: [
+        st(55.0),   // Damage
+        st(1.0),    // Pellets
+        st(0.55),   // FireInterval
+        st(0.0),    // MagSize
+        st(0.0),    // ReloadTime
+        st(0.0),    // BaseSpread
+        st(0.0),    // BloomPerShot
+        st(0.0),    // MaxBloom
+        st(0.1),    // BloomDecay
+        st(0.030),  // RecoilPitch
+        st(0.0),    // RecoilYaw
+        st(55.0),   // AdsFov
+        st(1.18),   // MoveScale
+        st(1.0),    // HeadshotMult
+        st(1000.0), // FalloffStart
+        st(1000.0), // FalloffEnd
+        st(1.0),    // FalloffMin
+        st(3.0),    // BurstCount
+    ],
+    slots: &[],
+};
+
+/// The authoring table for a weapon kind.
+pub fn def(kind: WeaponKind) -> &'static WeaponDef {
+    match kind {
+        WeaponKind::Rifle => &RIFLE,
+        WeaponKind::Shotgun => &SHOTGUN,
+        WeaponKind::Smg => &SMG,
+        WeaponKind::Sniper => &SNIPER,
+        WeaponKind::Lmg => &LMG,
+        WeaponKind::Pistol => &PISTOL,
+        WeaponKind::Knife => &KNIFE,
+    }
 }
 
 impl WeaponKind {
@@ -125,129 +923,12 @@ impl WeaponKind {
         self.stats().class
     }
 
+    /// The weapon as it comes out of the crate: its def resolved against an
+    /// empty build. An instance resolves its own build — see `Weapon::stats` —
+    /// and this is the kind-level answer, from the same code path, so the two
+    /// cannot drift apart.
     pub fn stats(self) -> WeaponStats {
-        let base = |class, damage, pellets, fire_interval, mag_size, reload_time| WeaponStats {
-            class,
-            damage,
-            pellets,
-            fire_interval,
-            mag_size,
-            reload_time,
-            base_spread: 0.0,
-            bloom_per_shot: 0.0,
-            max_bloom: 0.0,
-            bloom_decay: 0.1,
-            recoil_pitch: 0.0,
-            recoil_yaw: 0.0,
-            ads_fov: 45.0,
-            move_scale: 1.0,
-            headshot_mult: 2.0,
-            falloff_start: 1000.0,
-            falloff_end: 1000.0,
-            falloff_min: 1.0,
-            fire_modes: SEMI,
-            burst_count: 3,
-            infinite_ammo: false,
-            melee: false,
-        };
-        match self {
-            WeaponKind::Rifle => WeaponStats {
-                base_spread: 0.0042,
-                bloom_per_shot: 0.0055,
-                max_bloom: 0.040,
-                bloom_decay: 0.085,
-                recoil_pitch: 0.0165,
-                recoil_yaw: 0.0042,
-                ads_fov: 42.0,
-                headshot_mult: 2.4,
-                falloff_start: 30.0,
-                falloff_end: 70.0,
-                falloff_min: 0.55,
-                fire_modes: RIFLE_MODES,
-                ..base(SlotClass::Primary, 24.0, 1, 0.088, 30, 1.35)
-            },
-            WeaponKind::Shotgun => WeaponStats {
-                base_spread: 0.055,
-                recoil_pitch: 0.055,
-                recoil_yaw: 0.012,
-                ads_fov: 50.0,
-                move_scale: 0.94,
-                headshot_mult: 1.6,
-                falloff_start: 8.0,
-                falloff_end: 26.0,
-                falloff_min: 0.25,
-                ..base(SlotClass::Primary, 15.0, 9, 0.78, 6, 2.30)
-            },
-            WeaponKind::Smg => WeaponStats {
-                base_spread: 0.0105,
-                bloom_per_shot: 0.0045,
-                max_bloom: 0.045,
-                bloom_decay: 0.110,
-                recoil_pitch: 0.0105,
-                recoil_yaw: 0.0055,
-                ads_fov: 46.0,
-                move_scale: 1.05,
-                headshot_mult: 2.0,
-                falloff_start: 18.0,
-                falloff_end: 45.0,
-                falloff_min: 0.50,
-                fire_modes: SMG_MODES,
-                ..base(SlotClass::Primary, 14.0, 1, 0.055, 40, 1.50)
-            },
-            WeaponKind::Sniper => WeaponStats {
-                base_spread: 0.0009,
-                bloom_per_shot: 0.020,
-                max_bloom: 0.030,
-                bloom_decay: 0.500,
-                recoil_pitch: 0.075,
-                recoil_yaw: 0.010,
-                ads_fov: 16.0,
-                move_scale: 0.85,
-                headshot_mult: 2.2,
-                ..base(SlotClass::Primary, 115.0, 1, 1.15, 5, 2.50)
-            },
-            WeaponKind::Lmg => WeaponStats {
-                base_spread: 0.0135,
-                bloom_per_shot: 0.0075,
-                max_bloom: 0.075,
-                bloom_decay: 0.050,
-                recoil_pitch: 0.0135,
-                recoil_yaw: 0.0060,
-                ads_fov: 48.0,
-                move_scale: 0.82,
-                falloff_start: 35.0,
-                falloff_end: 80.0,
-                falloff_min: 0.60,
-                fire_modes: AUTO_SEMI,
-                ..base(SlotClass::Primary, 21.0, 1, 0.075, 100, 3.40)
-            },
-            WeaponKind::Pistol => WeaponStats {
-                base_spread: 0.0060,
-                bloom_per_shot: 0.0080,
-                max_bloom: 0.038,
-                bloom_decay: 0.160,
-                recoil_pitch: 0.0220,
-                recoil_yaw: 0.0030,
-                ads_fov: 48.0,
-                move_scale: 1.10,
-                headshot_mult: 2.6,
-                falloff_start: 14.0,
-                falloff_end: 45.0,
-                falloff_min: 0.45,
-                ..base(SlotClass::Pistol, 26.0, 1, 0.160, 15, 1.25)
-            },
-            WeaponKind::Knife => WeaponStats {
-                base_spread: 0.0,
-                recoil_pitch: 0.030,
-                ads_fov: 55.0,
-                move_scale: 1.18,
-                headshot_mult: 1.0,
-                fire_modes: SEMI,
-                infinite_ammo: true,
-                melee: true,
-                ..base(SlotClass::Melee, 55.0, 1, 0.55, 0, 0.0)
-            },
-        }
+        resolve(def(self), &WeaponBuild::empty()).as_stats()
     }
 }
 
@@ -265,14 +946,27 @@ pub struct Weapon {
     burst_left: u32,
     pub inspect_t: f32,
     pub mag_check_t: f32,
+    /// What this instance is built with, and the numbers that came out of it.
+    /// Both belong here rather than to the def, which is shared by every weapon
+    /// of its kind: a build's outcome must never be written back into one.
+    build: WeaponBuild,
+    resolved: ResolvedStats,
 }
 
 impl Weapon {
+    /// The weapon as it comes out of the crate: its def resolved against an
+    /// empty build.
     pub fn new(kind: WeaponKind) -> Self {
-        let s = kind.stats();
+        Self::with_build(kind, WeaponBuild::empty())
+    }
+
+    /// A weapon carrying `build`. The def is read and the numbers it resolves to
+    /// are kept on this instance.
+    pub fn with_build(kind: WeaponKind, build: WeaponBuild) -> Self {
+        let resolved = resolve(def(kind), &build);
         Self {
             kind,
-            mag: s.mag_size,
+            mag: resolved.as_stats().mag_size,
             cooldown: 0.0,
             reload_t: 0.0,
             bloom: 0.0,
@@ -283,11 +977,19 @@ impl Weapon {
             burst_left: 0,
             inspect_t: 0.0,
             mag_check_t: 0.0,
+            build,
+            resolved,
         }
     }
 
+    /// The build this instance carries, for whoever wants to show, check or
+    /// change it.
+    pub fn build(&self) -> &WeaponBuild {
+        &self.build
+    }
+
     pub fn stats(&self) -> WeaponStats {
-        self.kind.stats()
+        self.resolved.as_stats()
     }
 
     pub fn mode(&self) -> FireMode {
@@ -472,12 +1174,27 @@ impl Arsenal {
             // A melee weapon never takes a long-gun slot — that is what slot 4
             // is for — and the sidearm is always carried.
             if let Some(k) = k.filter(|k| k.class() != SlotClass::Melee) {
-                ars.slots[i] = Some(Weapon::new(k));
+                ars.slots[i] = Some(Self::carry(k));
             }
         }
-        ars.slots[2] = Some(Weapon::new(WeaponKind::Pistol));
-        ars.slots[3] = Some(Weapon::new(WeaponKind::Knife));
+        ars.slots[2] = Some(Self::carry(WeaponKind::Pistol));
+        ars.slots[3] = Some(Self::carry(WeaponKind::Knife));
         ars
+    }
+
+    /// One carried weapon, checked against its def before it is handed out.
+    ///
+    /// A build that breaks the gunsmith rules is reported and carried anyway:
+    /// the only builds in the game today are empty ones, so a violation here
+    /// means a loadout table somewhere is wrong, and a mission that refuses to
+    /// start is a worse answer to a typo than a log line and the weapon as
+    /// issued.
+    fn carry(kind: WeaponKind) -> Weapon {
+        let w = Weapon::new(kind);
+        if let Err(bad) = validate(def(kind), w.build()) {
+            eprintln!("{kind:?} does not build cleanly: {bad:?}");
+        }
+        w
     }
 
     pub fn slot(&self, i: usize) -> Option<&Weapon> {
@@ -538,8 +1255,208 @@ impl Arsenal {
     }
 }
 
+/// Parts for the tests to build with.
+///
+/// A shipping build has no catalogue, so the model would be exercised by empty
+/// builds alone if these lived anywhere else. The first six are parts a rifle
+/// can legitimately take — one of them structural, opening a slot for another,
+/// and one ranged, which is what "same part, different feel" means — and the
+/// rest are arithmetic probes whose names say what they do, so that the ordering
+/// tests are about the order and not about anyone's idea of what a compensator
+/// should feel like.
+#[cfg(test)]
+mod demo_parts {
+    use super::*;
+
+    /// A slot with room for a handful of probe parts.
+    pub const PROBE_SLOT: SlotDef = SlotDef {
+        id: SlotId("probe"),
+        accepts: InterfaceId("probe"),
+        max_parts: 8,
+    };
+
+    pub const MICRO_DOT: PartDef = PartDef {
+        id: PartId("micro_dot"),
+        slot: SlotId("optic"),
+        interface: InterfaceId("rail"),
+        subslots: &[],
+        mods: &[StatMod {
+            stat: StatId::AdsFov,
+            kind: ModKind::Add,
+            amount: Value::Static(-4.0),
+        }],
+    };
+
+    pub const COMPENSATOR: PartDef = PartDef {
+        id: PartId("compensator"),
+        slot: SlotId("muzzle"),
+        interface: InterfaceId("threaded_muzzle"),
+        subslots: &[],
+        mods: &[
+            StatMod {
+                stat: StatId::RecoilPitch,
+                kind: ModKind::MulPre,
+                amount: Value::Static(0.75),
+            },
+            StatMod {
+                stat: StatId::RecoilYaw,
+                kind: ModKind::MulPre,
+                amount: Value::Static(0.75),
+            },
+        ],
+    };
+
+    pub const EXTENDED_MAG: PartDef = PartDef {
+        id: PartId("extended_mag"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell"),
+        subslots: &[],
+        mods: &[
+            StatMod {
+                stat: StatId::MagSize,
+                kind: ModKind::Add,
+                amount: Value::Static(10.0),
+            },
+            StatMod {
+                stat: StatId::ReloadTime,
+                kind: ModKind::Add,
+                amount: Value::Static(0.15),
+            },
+        ],
+    };
+
+    /// Surplus ammunition: the same crate, a different lot. A range is what
+    /// makes two copies of one part feel different without a second part.
+    pub const SURPLUS_LOT: PartDef = PartDef {
+        id: PartId("surplus_lot"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell"),
+        subslots: &[],
+        mods: &[StatMod {
+            stat: StatId::Damage,
+            kind: ModKind::Add,
+            amount: Value::Range {
+                min: -4.0,
+                max: 4.0,
+            },
+        }],
+    };
+
+    /// A rail riser: no numbers of its own, one slot for whatever goes on top.
+    pub const RISER: PartDef = PartDef {
+        id: PartId("riser"),
+        slot: SlotId("optic"),
+        interface: InterfaceId("rail"),
+        subslots: &[SlotDef {
+            id: SlotId("riser_top"),
+            accepts: InterfaceId("rail"),
+            max_parts: 1,
+        }],
+        mods: &[],
+    };
+
+    pub const SCOPE: PartDef = PartDef {
+        id: PartId("scope"),
+        slot: SlotId("riser_top"),
+        interface: InterfaceId("rail"),
+        subslots: &[],
+        mods: &[StatMod {
+            stat: StatId::AdsFov,
+            kind: ModKind::Add,
+            amount: Value::Static(-8.0),
+        }],
+    };
+
+    pub const PROBE_FLAT: PartDef = PartDef {
+        id: PartId("probe_flat"),
+        slot: PROBE_SLOT.id,
+        interface: PROBE_SLOT.accepts,
+        subslots: &[],
+        mods: &[StatMod {
+            stat: StatId::Damage,
+            kind: ModKind::Add,
+            amount: Value::Static(5.0),
+        }],
+    };
+
+    /// Two `MulPre` lines on one part, in one stage, on one stat.
+    pub const PROBE_X3: PartDef = PartDef {
+        id: PartId("probe_x3"),
+        slot: PROBE_SLOT.id,
+        interface: PROBE_SLOT.accepts,
+        subslots: &[],
+        mods: &[
+            StatMod {
+                stat: StatId::Damage,
+                kind: ModKind::MulPre,
+                amount: Value::Static(2.0),
+            },
+            StatMod {
+                stat: StatId::Damage,
+                kind: ModKind::MulPre,
+                amount: Value::Static(1.5),
+            },
+        ],
+    };
+
+    pub const PROBE_HALF: PartDef = PartDef {
+        id: PartId("probe_half"),
+        slot: PROBE_SLOT.id,
+        interface: PROBE_SLOT.accepts,
+        subslots: &[],
+        mods: &[StatMod {
+            stat: StatId::Damage,
+            kind: ModKind::MulPost,
+            amount: Value::Static(0.5),
+        }],
+    };
+
+    /// Both multiply stages on a stat whose envelope is tight enough to tell
+    /// them apart.
+    pub const PROBE_HEAVY: PartDef = PartDef {
+        id: PartId("probe_heavy"),
+        slot: PROBE_SLOT.id,
+        interface: PROBE_SLOT.accepts,
+        subslots: &[],
+        mods: &[
+            StatMod {
+                stat: StatId::MoveScale,
+                kind: ModKind::MulPre,
+                amount: Value::Static(3.0),
+            },
+            StatMod {
+                stat: StatId::MoveScale,
+                kind: ModKind::MulPost,
+                amount: Value::Static(1.5),
+            },
+        ],
+    };
+
+    /// Both multiply stages on a whole-number stat, with the rounding stage
+    /// sitting between them.
+    pub const PROBE_PELLETS: PartDef = PartDef {
+        id: PartId("probe_pellets"),
+        slot: PROBE_SLOT.id,
+        interface: PROBE_SLOT.accepts,
+        subslots: &[],
+        mods: &[
+            StatMod {
+                stat: StatId::Pellets,
+                kind: ModKind::MulPre,
+                amount: Value::Static(1.5),
+            },
+            StatMod {
+                stat: StatId::Pellets,
+                kind: ModKind::MulPost,
+                amount: Value::Static(1.5),
+            },
+        ],
+    };
+}
+
 #[cfg(test)]
 mod tests {
+    use super::demo_parts::*;
     use super::*;
 
     const FRAME: f32 = 1.0 / 60.0;
@@ -555,6 +1472,449 @@ mod tests {
             }
         }
         shots
+    }
+
+    // ---- the resolver ------------------------------------------------------
+
+    /// A build from `(slot, part, roll)` triples: the shape the rest of the game
+    /// thinks in.
+    fn build(entries: &[(SlotId, PartId, f32)]) -> WeaponBuild {
+        WeaponBuild {
+            entries: entries
+                .iter()
+                .map(|&(slot, part, roll)| BuildEntry { slot, part, roll })
+                .collect(),
+        }
+    }
+
+    /// A def with one stat set and slots to hang parts on. Every other stat is
+    /// left at a value its own envelope keeps, so a test only has to think about
+    /// the stat it names.
+    fn probe_def(stat: StatId, base: f32, slots: &'static [SlotDef]) -> WeaponDef {
+        let mut values = [st(1.0); STAT_COUNT];
+        values[stat.index()] = st(base);
+        WeaponDef {
+            class: SlotClass::Primary,
+            fire_modes: SEMI,
+            infinite_ammo: false,
+            melee: false,
+            base: values,
+            slots,
+        }
+    }
+
+    /// A `WeaponStats` field read by id. Written out separately from the
+    /// resolver's own mapping on purpose: a mix-up there — bloom decay taken
+    /// from max bloom, say — has to fail the regression below, not agree with it.
+    fn field(s: WeaponStats, stat: StatId) -> f32 {
+        match stat {
+            StatId::Damage => s.damage,
+            StatId::Pellets => s.pellets as f32,
+            StatId::FireInterval => s.fire_interval,
+            StatId::MagSize => s.mag_size as f32,
+            StatId::ReloadTime => s.reload_time,
+            StatId::BaseSpread => s.base_spread,
+            StatId::BloomPerShot => s.bloom_per_shot,
+            StatId::MaxBloom => s.max_bloom,
+            StatId::BloomDecay => s.bloom_decay,
+            StatId::RecoilPitch => s.recoil_pitch,
+            StatId::RecoilYaw => s.recoil_yaw,
+            StatId::AdsFov => s.ads_fov,
+            StatId::MoveScale => s.move_scale,
+            StatId::HeadshotMult => s.headshot_mult,
+            StatId::FalloffStart => s.falloff_start,
+            StatId::FalloffEnd => s.falloff_end,
+            StatId::FalloffMin => s.falloff_min,
+            StatId::BurstCount => s.burst_count as f32,
+        }
+    }
+
+    /// The documented stage order, on one stat: the flat bonus is summed in
+    /// first, then both `MulPre`s, then the `MulPost` — `(10 + 5) * 2 * 1.5 *
+    /// 0.5`. An `Add` applied last would give 20.0 and multiplies applied to the
+    /// base first would give 15.0, so only one order produces 22.5.
+    #[test]
+    fn modifiers_run_add_then_mul_pre_then_mul_post() {
+        let def = probe_def(StatId::Damage, 10.0, &[PROBE_SLOT]);
+        let b = build(&[
+            (PROBE_SLOT.id, PROBE_FLAT.id, 0.0),
+            (PROBE_SLOT.id, PROBE_X3.id, 0.0),
+            (PROBE_SLOT.id, PROBE_HALF.id, 0.0),
+        ]);
+        let got = resolve(&def, &b).stat(StatId::Damage);
+        assert!(
+            (got - 22.5).abs() < 1e-6,
+            "the stages ran out of order: {got}"
+        );
+    }
+
+    /// `MulPost` has the last word: it runs after the envelope, so it can push a
+    /// stat past what the design allowed — 3.0 here, where the envelope stops at
+    /// 2.0. Run before the envelope it would give 2.0, which is what makes the
+    /// two stages worth distinguishing.
+    #[test]
+    fn a_post_multiplier_is_applied_after_the_envelope() {
+        let def = probe_def(StatId::MoveScale, 1.0, &[PROBE_SLOT]);
+        let b = build(&[(PROBE_SLOT.id, PROBE_HEAVY.id, 0.0)]);
+        let got = resolve(&def, &b).stat(StatId::MoveScale);
+        assert!(
+            (got - 3.0).abs() < 1e-6,
+            "the post stage was clamped: {got}"
+        );
+        assert!(got > StatId::MoveScale.bounds().1);
+    }
+
+    /// Whole-number stats are rounded between the stages, so the post multiplier
+    /// sees the rounds the pre multiplier produced: 9 pellets, half again is
+    /// 13.5, which is 14, and half again is 21. Rounding once at the end would
+    /// give 20.
+    #[test]
+    fn whole_number_stats_are_rounded_between_the_stages() {
+        let def = probe_def(StatId::Pellets, 9.0, &[PROBE_SLOT]);
+        let b = build(&[(PROBE_SLOT.id, PROBE_PELLETS.id, 0.0)]);
+        let got = resolve(&def, &b).stat(StatId::Pellets);
+        assert!((got - 21.0).abs() < 1e-6, "{got} pellets");
+    }
+
+    /// A roll belongs to the build entry, not to the resolver: two copies of one
+    /// part differ only because their entries say so, and the same entry always
+    /// resolves to the same number.
+    #[test]
+    fn a_range_is_rolled_by_the_caller_and_resolve_stays_pure() {
+        let rifle = def(WeaponKind::Rifle);
+        let at = |roll: f32| {
+            let b = build(&[(SlotId("magazine"), SURPLUS_LOT.id, roll)]);
+            resolve(rifle, &b).stat(StatId::Damage)
+        };
+        let (lo, mid, hi) = (at(0.0), at(0.5), at(1.0));
+        assert!(
+            lo < mid && mid < hi,
+            "the range did not interpolate: {lo} {mid} {hi}"
+        );
+        assert_eq!(
+            mid,
+            at(0.5),
+            "resolve stopped being a function of its inputs"
+        );
+        assert_eq!(hi, at(9.0), "a roll outside [0, 1] was not clamped");
+
+        // A roll from the game's own generator is still just a number handed in:
+        // nothing in the resolver draws one.
+        let mut rng = crate::util::Rng::new(7);
+        let roll = rng.f32();
+        assert_eq!(at(roll), at(roll), "the resolver rolled its own dice");
+    }
+
+    /// Resolution reads the def and leaves it alone. A build's outcome written
+    /// back into a def is how one weapon's scope becomes every weapon's scope.
+    #[test]
+    fn resolving_a_build_leaves_the_def_untouched() {
+        let rifle = def(WeaponKind::Rifle);
+        let issued = resolve(rifle, &WeaponBuild::empty()).as_stats();
+        let base_before = rifle.base;
+        let built = resolve(
+            rifle,
+            &build(&[
+                (SlotId("optic"), MICRO_DOT.id, 1.0),
+                (SlotId("muzzle"), COMPENSATOR.id, 1.0),
+                (SlotId("magazine"), SURPLUS_LOT.id, 1.0),
+            ]),
+        );
+        assert_ne!(built.as_stats(), issued, "the build changed nothing");
+        assert_eq!(rifle.base, base_before, "resolve wrote back into the def");
+        assert_eq!(
+            resolve(rifle, &WeaponBuild::empty()).as_stats(),
+            issued,
+            "the issued numbers changed after a build was resolved",
+        );
+    }
+
+    /// The live path, end to end: a real weapon, a real part, and only the stats
+    /// that part names are allowed to move.
+    #[test]
+    fn an_installed_part_moves_only_the_stats_it_names() {
+        let rifle = def(WeaponKind::Rifle);
+        let issued = resolve(rifle, &WeaponBuild::empty());
+        let tuned = resolve(rifle, &build(&[(SlotId("muzzle"), COMPENSATOR.id, 0.0)]));
+        for stat in StatId::ALL {
+            let moved = tuned.stat(stat) != issued.stat(stat);
+            let meant = matches!(stat, StatId::RecoilPitch | StatId::RecoilYaw);
+            assert_eq!(moved, meant, "{stat:?} moved: {moved}");
+        }
+        assert!(tuned.stat(StatId::RecoilPitch) < issued.stat(StatId::RecoilPitch));
+    }
+
+    /// A flat bonus on a whole-number stat passes the rounding stage untouched:
+    /// 30 rounds plus 10 is 40, and the reload penalty comes with it.
+    #[test]
+    fn a_part_adds_to_whole_number_stats() {
+        let rifle = def(WeaponKind::Rifle);
+        let tuned = resolve(rifle, &build(&[(SlotId("magazine"), EXTENDED_MAG.id, 0.0)]));
+        assert!((tuned.stat(StatId::MagSize) - 40.0).abs() < 1e-6);
+        assert!((tuned.stat(StatId::ReloadTime) - 1.50).abs() < 1e-6);
+    }
+
+    /// A slot a part opens is a slot like any other — and the build may list it
+    /// before the part that opened it, because a build is a set of choices, not a
+    /// sequence of assembly steps.
+    #[test]
+    fn a_part_can_open_a_slot_for_another_part_in_any_order() {
+        let rifle = def(WeaponKind::Rifle);
+        let stacked = build(&[
+            (SlotId("riser_top"), SCOPE.id, 0.0),
+            (SlotId("optic"), RISER.id, 0.0),
+        ]);
+        assert_eq!(validate(rifle, &stacked), Ok(()), "the slot stayed shut");
+        let issued = resolve(rifle, &WeaponBuild::empty()).stat(StatId::AdsFov);
+        assert!(resolve(rifle, &stacked).stat(StatId::AdsFov) < issued);
+
+        // Without the part that opens it, the slot does not exist.
+        let orphan = build(&[(SlotId("riser_top"), SCOPE.id, 0.0)]);
+        assert_eq!(
+            validate(rifle, &orphan),
+            Err(vec![Violation::UnknownSlot(SlotId("riser_top"))]),
+            "a slot existed before anything opened it",
+        );
+    }
+
+    /// An instance resolves its own build and keeps the numbers: the cache is
+    /// per weapon, and the magazine follows the resolved size, not the def's.
+    #[test]
+    fn a_weapon_with_a_build_uses_its_own_numbers() {
+        let built = Weapon::with_build(
+            WeaponKind::Rifle,
+            build(&[(SlotId("magazine"), EXTENDED_MAG.id, 0.0)]),
+        );
+        let issued = Weapon::new(WeaponKind::Rifle);
+        assert_eq!(built.build().entries.len(), 1);
+        assert_eq!(built.mag, 40, "the magazine did not follow the build");
+        assert_eq!(issued.mag, 30);
+        assert!(built.stats().mag_size > issued.stats().mag_size);
+        assert_eq!(built.stats().recoil_pitch, issued.stats().recoil_pitch);
+    }
+
+    /// The two paths to a weapon's numbers — the kind-level resolve and the one
+    /// `Weapon::new` took — agree, which is what lets the rest of the game keep
+    /// reading `Weapon::stats` without knowing this model exists.
+    #[test]
+    fn an_empty_build_resolves_to_the_weapon_stats_table() {
+        for kind in ALL_KINDS {
+            let resolved = resolve(def(kind), &WeaponBuild::empty()).as_stats();
+            assert_eq!(resolved, Weapon::new(kind).stats(), "{kind:?}");
+        }
+    }
+
+    // ---- validation --------------------------------------------------------
+
+    #[test]
+    fn validate_reports_a_slot_the_weapon_does_not_offer() {
+        let knife = def(WeaponKind::Knife);
+        let bad = validate(knife, &build(&[(SlotId("optic"), MICRO_DOT.id, 0.0)]))
+            .expect_err("a knife accepted an optic");
+        assert_eq!(bad, vec![Violation::UnknownSlot(SlotId("optic"))]);
+    }
+
+    #[test]
+    fn validate_reports_a_part_that_does_not_fit_the_standard() {
+        let rifle = def(WeaponKind::Rifle);
+        // A dot sight on the muzzle: built for another slot *and* speaking a
+        // different mounting standard. Both faults are reported, not just the
+        // first one the check happened to run into.
+        let bad = validate(rifle, &build(&[(SlotId("muzzle"), MICRO_DOT.id, 0.0)]))
+            .expect_err("a sight fitted a muzzle");
+        assert!(
+            bad.contains(&Violation::WrongSlot {
+                slot: SlotId("muzzle"),
+                part: MICRO_DOT.id,
+                built_for: SlotId("optic"),
+            }),
+            "{bad:?}"
+        );
+        assert!(
+            bad.contains(&Violation::WrongInterface {
+                slot: SlotId("muzzle"),
+                part: MICRO_DOT.id,
+                accepts: InterfaceId("threaded_muzzle"),
+                declares: InterfaceId("rail"),
+            }),
+            "{bad:?}"
+        );
+        assert_eq!(bad.len(), 2, "one fault reported twice: {bad:?}");
+    }
+
+    #[test]
+    fn validate_reports_more_parts_than_the_slot_holds() {
+        let rifle = def(WeaponKind::Rifle);
+        let stacked = build(&[
+            (SlotId("optic"), MICRO_DOT.id, 0.0),
+            (SlotId("optic"), RISER.id, 0.0),
+        ]);
+        let bad = validate(rifle, &stacked).expect_err("two parts in a one-part slot");
+        assert_eq!(
+            bad,
+            vec![Violation::Overfull {
+                slot: SlotId("optic"),
+                max: 1,
+                found: 2,
+            }]
+        );
+    }
+
+    #[test]
+    fn validate_reports_a_part_the_catalogue_never_heard_of() {
+        let rifle = def(WeaponKind::Rifle);
+        let bad = validate(
+            rifle,
+            &build(&[(SlotId("optic"), PartId("no_such_part"), 0.0)]),
+        )
+        .expect_err("a part materialised out of nothing");
+        assert_eq!(bad, vec![Violation::UnknownPart(PartId("no_such_part"))]);
+    }
+
+    /// The table must not move. The expectations are the numbers the old
+    /// `WeaponKind::stats` match held, copied longhand on purpose: a test that
+    /// read them back out of the defs would agree with any change to them, and
+    /// this is the only thing standing between a refactor and a silent rebalance.
+    #[test]
+    fn the_shipped_tables_survive_the_resolver_bit_for_bit() {
+        for kind in ALL_KINDS {
+            let got = resolve(def(kind), &WeaponBuild::empty()).as_stats();
+            let want = table_before_the_resolver(kind);
+            assert_eq!(got.class, want.class, "{kind:?} class");
+            assert_eq!(got.fire_modes, want.fire_modes, "{kind:?} fire modes");
+            assert_eq!(got.infinite_ammo, want.infinite_ammo, "{kind:?} ammunition");
+            assert_eq!(got.melee, want.melee, "{kind:?} melee");
+            for stat in StatId::ALL {
+                assert_eq!(field(got, stat), field(want, stat), "{kind:?} {stat:?}");
+            }
+        }
+    }
+
+    /// `WeaponKind::stats` as it stood before the def table existed, including
+    /// the shared `base` it used to build each weapon from.
+    fn table_before_the_resolver(kind: WeaponKind) -> WeaponStats {
+        let base = |class, damage, pellets, fire_interval, mag_size, reload_time| WeaponStats {
+            class,
+            damage,
+            pellets,
+            fire_interval,
+            mag_size,
+            reload_time,
+            base_spread: 0.0,
+            bloom_per_shot: 0.0,
+            max_bloom: 0.0,
+            bloom_decay: 0.1,
+            recoil_pitch: 0.0,
+            recoil_yaw: 0.0,
+            ads_fov: 45.0,
+            move_scale: 1.0,
+            headshot_mult: 2.0,
+            falloff_start: 1000.0,
+            falloff_end: 1000.0,
+            falloff_min: 1.0,
+            fire_modes: SEMI,
+            burst_count: 3,
+            infinite_ammo: false,
+            melee: false,
+        };
+        match kind {
+            WeaponKind::Rifle => WeaponStats {
+                base_spread: 0.0042,
+                bloom_per_shot: 0.0055,
+                max_bloom: 0.040,
+                bloom_decay: 0.085,
+                recoil_pitch: 0.0165,
+                recoil_yaw: 0.0042,
+                ads_fov: 42.0,
+                headshot_mult: 2.4,
+                falloff_start: 30.0,
+                falloff_end: 70.0,
+                falloff_min: 0.55,
+                fire_modes: RIFLE_MODES,
+                ..base(SlotClass::Primary, 24.0, 1, 0.088, 30, 1.35)
+            },
+            WeaponKind::Shotgun => WeaponStats {
+                base_spread: 0.055,
+                recoil_pitch: 0.055,
+                recoil_yaw: 0.012,
+                ads_fov: 50.0,
+                move_scale: 0.94,
+                headshot_mult: 1.6,
+                falloff_start: 8.0,
+                falloff_end: 26.0,
+                falloff_min: 0.25,
+                ..base(SlotClass::Primary, 15.0, 9, 0.78, 6, 2.30)
+            },
+            WeaponKind::Smg => WeaponStats {
+                base_spread: 0.0105,
+                bloom_per_shot: 0.0045,
+                max_bloom: 0.045,
+                bloom_decay: 0.110,
+                recoil_pitch: 0.0105,
+                recoil_yaw: 0.0055,
+                ads_fov: 46.0,
+                move_scale: 1.05,
+                headshot_mult: 2.0,
+                falloff_start: 18.0,
+                falloff_end: 45.0,
+                falloff_min: 0.50,
+                fire_modes: SMG_MODES,
+                ..base(SlotClass::Primary, 14.0, 1, 0.055, 40, 1.50)
+            },
+            WeaponKind::Sniper => WeaponStats {
+                base_spread: 0.0009,
+                bloom_per_shot: 0.020,
+                max_bloom: 0.030,
+                bloom_decay: 0.500,
+                recoil_pitch: 0.075,
+                recoil_yaw: 0.010,
+                ads_fov: 16.0,
+                move_scale: 0.85,
+                headshot_mult: 2.2,
+                ..base(SlotClass::Primary, 115.0, 1, 1.15, 5, 2.50)
+            },
+            WeaponKind::Lmg => WeaponStats {
+                base_spread: 0.0135,
+                bloom_per_shot: 0.0075,
+                max_bloom: 0.075,
+                bloom_decay: 0.050,
+                recoil_pitch: 0.0135,
+                recoil_yaw: 0.0060,
+                ads_fov: 48.0,
+                move_scale: 0.82,
+                falloff_start: 35.0,
+                falloff_end: 80.0,
+                falloff_min: 0.60,
+                fire_modes: AUTO_SEMI,
+                ..base(SlotClass::Primary, 21.0, 1, 0.075, 100, 3.40)
+            },
+            WeaponKind::Pistol => WeaponStats {
+                base_spread: 0.0060,
+                bloom_per_shot: 0.0080,
+                max_bloom: 0.038,
+                bloom_decay: 0.160,
+                recoil_pitch: 0.0220,
+                recoil_yaw: 0.0030,
+                ads_fov: 48.0,
+                move_scale: 1.10,
+                headshot_mult: 2.6,
+                falloff_start: 14.0,
+                falloff_end: 45.0,
+                falloff_min: 0.45,
+                ..base(SlotClass::Pistol, 26.0, 1, 0.160, 15, 1.25)
+            },
+            WeaponKind::Knife => WeaponStats {
+                base_spread: 0.0,
+                recoil_pitch: 0.030,
+                ads_fov: 55.0,
+                move_scale: 1.18,
+                headshot_mult: 1.0,
+                fire_modes: SEMI,
+                infinite_ammo: true,
+                melee: true,
+                ..base(SlotClass::Melee, 55.0, 1, 0.55, 0, 0.0)
+            },
+        }
     }
 
     /// The bug that shipped: a latch only the firing path could clear, while the
