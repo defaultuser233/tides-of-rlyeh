@@ -3,7 +3,7 @@
 #
 #   ./build.sh
 #
-# Produces: target/release/rust-fps
+# Produces: target/release/tides-of-rlyeh
 #
 # The binary links against the system glibc and loads X11/GL at runtime, so the
 # usual desktop packages must be present:
@@ -16,7 +16,7 @@ cd "$(dirname "$0")"
 echo "==> Building for Linux (native)"
 cargo build --release
 
-bin="target/release/rust-fps"
+bin="target/release/tides-of-rlyeh"
 if [[ ! -f "$bin" ]]; then
     echo "Build finished but $bin is missing" >&2
     exit 1

@@ -1,11 +1,11 @@
-# STEEL FRONT / 钢铁前线
+# TIDES OF R'LYEH / 拉莱耶的潮声
 
 A single-player campaign FPS written in Rust, built on [macroquad](https://macroquad.rs).
 Six hand-built missions, five weapons, five enemy archetypes and three cosmic
 horrors, a bilingual (中文 / English) interface, and no launcher, engine install
 or runtime to deploy.
 
-- **Windows**: a single `rust-fps.exe`
+- **Windows**: a single `tides-of-rlyeh.exe`
 - **Linux**: a single statically linked ELF that runs on any x86_64 distro
 
 ---
@@ -198,14 +198,19 @@ Settings persist between runs, in one small text file per user:
 
 | Platform | Path |
 | --- | --- |
-| Windows | `%APPDATA%\steel-front\config` |
-| Linux | `$XDG_CONFIG_HOME/steel-front/config`, or `~/.config/steel-front/config` when `XDG_CONFIG_HOME` is unset |
+| Windows | `%APPDATA%\tides-of-rlyeh\config` |
+| Linux | `$XDG_CONFIG_HOME/tides-of-rlyeh/config`, or `~/.config/tides-of-rlyeh/config` when `XDG_CONFIG_HOME` is unset |
+
+The file lived in `steel-front` (and later `eldritch-front`) before the game was
+renamed. Those are still **read** when the new path has never been written, so a
+rename does not cost the player their settings or their progress; the first save
+puts everything where it belongs now, and the old directories can be deleted.
 
 The format is `key = value`, one per line, with `#` comments — the file is meant
 to be readable and editable by hand:
 
 ```text
-# STEEL FRONT settings. Delete this file to go back to the defaults.
+# TIDES OF R'LYEH settings. Delete this file to go back to the defaults.
 fullscreen = false
 width = 1280
 height = 720
@@ -256,7 +261,7 @@ over. `unlocked = 400` in a hand-edited file is clamped rather than believed.
 .\build-windows.ps1
 ```
 
-Produces `target\x86_64-pc-windows-msvc\release\rust-fps.exe` (~4.2 MiB).
+Produces `target\x86_64-pc-windows-msvc\release\tides-of-rlyeh.exe` (~4.2 MiB).
 
 The Chinese font and the curated sound effects are **compiled into the
 executable**, so it is genuinely a single file: copy it anywhere and it runs.
@@ -268,7 +273,7 @@ Nothing needs to sit beside it, and the working directory does not matter.
 .\build-linux.ps1
 ```
 
-Produces `target\x86_64-unknown-linux-musl\release\rust-fps`, a **statically
+Produces `target\x86_64-unknown-linux-musl\release\tides-of-rlyeh`, a **statically
 linked x86_64 ELF** (~4.0 MiB). No glibc, no shared libraries, no X11 development
 packages needed on the target: macroquad resolves X11 and OpenGL at runtime with
 `dlopen`, so the binary needs nothing but a desktop session.
@@ -295,7 +300,7 @@ ELF. Build natively on Linux for sound.
 ./build.sh
 ```
 
-Produces `target/release/rust-fps` with **full audio**.
+Produces `target/release/tides-of-rlyeh` with **full audio**.
 
 ---
 

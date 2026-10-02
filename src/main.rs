@@ -1127,7 +1127,7 @@ mod tests {
 fn window_conf() -> Conf {
     let saved = config::load();
     Conf {
-        window_title: "STEEL FRONT / 钢铁前线".to_owned(),
+        window_title: "TIDES OF R'LYEH / 拉莱耶的潮声".to_owned(),
         window_width: saved.width,
         window_height: saved.height,
         fullscreen: saved.fullscreen,

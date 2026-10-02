@@ -3,12 +3,12 @@
 //!
 //! # Where
 //!
-//! One file named `config`, in a `steel-front` directory under the user's
+//! One file named `config`, in a `tides-of-rlyeh` directory under the user's
 //! settings directory:
 //!
-//! - Windows: `%APPDATA%\steel-front\config`
-//! - Linux: `$XDG_CONFIG_HOME/steel-front/config`, falling back to
-//!   `$HOME/.config/steel-front/config`
+//! - Windows: `%APPDATA%\tides-of-rlyeh\config`
+//! - Linux: `$XDG_CONFIG_HOME/tides-of-rlyeh/config`, falling back to
+//!   `$HOME/.config/tides-of-rlyeh/config`
 //!
 //! Nothing is ever written next to the executable: this game ships as a single
 //! file that is meant to run from anywhere, so the directory it happens to sit
@@ -24,7 +24,7 @@
 //! file from a newer build stays readable). Every key is optional:
 //!
 //! ```text
-//! # STEEL FRONT settings. Delete this file to go back to the defaults.
+//! # TIDES OF R'LYEH settings. Delete this file to go back to the defaults.
 //! fullscreen = false
 //! width = 1280
 //! height = 720
@@ -59,7 +59,11 @@ use crate::i18n::Lang;
 
 /// The directory and file name, shared by every base directory the environment
 /// can name, so the file is in the same place relative to whichever one it is.
-const DIR: &str = "steel-front";
+const DIR: &str = "tides-of-rlyeh";
+/// Where the file lived under the game's earlier names, newest first. The first
+/// one that exists is read when the current path has never been written, so a
+/// save survives a rename; the next save puts it where it belongs now.
+const LEGACY_DIRS: [&str; 2] = ["eldritch-front", "steel-front"];
 const FILE: &str = "config";
 
 /// The window sizes this game believes. A saved size outside the range is a
@@ -154,6 +158,16 @@ pub fn path() -> Option<PathBuf> {
 /// platform lands where its own convention says without a `cfg` in the middle of
 /// the decision, and a machine that sets none of them gets `None`.
 pub fn path_in(appdata: Option<&str>, xdg: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
+    path_in_with(DIR, appdata, xdg, home)
+}
+
+/// `path_in` for any directory name: the current one, or the pre-rename one.
+fn path_in_with(
+    dir: &str,
+    appdata: Option<&str>,
+    xdg: Option<&str>,
+    home: Option<&str>,
+) -> Option<PathBuf> {
     // An empty variable is the same as an unset one: some shells export
     // `XDG_CONFIG_HOME=` and some build environments leave `APPDATA` empty.
     let base = [appdata, xdg]
@@ -165,7 +179,7 @@ pub fn path_in(appdata: Option<&str>, xdg: Option<&str>, home: Option<&str>) -> 
             let home = home.filter(|dir| !dir.trim().is_empty())?;
             Some(Path::new(home).join(".config"))
         })?;
-    Some(base.join(DIR).join(FILE))
+    Some(base.join(dir).join(FILE))
 }
 
 /// Reads the settings, or the defaults when there is nothing to read.
@@ -174,9 +188,30 @@ pub fn path_in(appdata: Option<&str>, xdg: Option<&str>, home: Option<&str>) -> 
 /// or understood is reported on stderr and answered with the defaults.
 pub fn load() -> Config {
     match path() {
-        Some(path) => load_from(&path),
+        Some(path) => load_from(&source_path(path, legacy_path())),
         None => Config::default(),
     }
+}
+
+/// Which file to read: the current one, or the pre-rename one when the current
+/// one has never been written. Split out so the rule can be tested with two
+/// files in a temporary directory rather than by renaming the reader.
+fn source_path(current: PathBuf, legacy: Option<PathBuf>) -> PathBuf {
+    match legacy {
+        Some(old) if !current.exists() && old.exists() => old,
+        _ => current,
+    }
+}
+
+/// The pre-rename settings path, from the same environment `path` reads.
+pub fn legacy_path() -> Option<PathBuf> {
+    let appdata = std::env::var("APPDATA").ok();
+    let xdg = std::env::var("XDG_CONFIG_HOME").ok();
+    let home = std::env::var("HOME").ok();
+    LEGACY_DIRS
+        .iter()
+        .filter_map(|dir| path_in_with(dir, appdata.as_deref(), xdg.as_deref(), home.as_deref()))
+        .find(|path| path.exists())
 }
 
 /// Writes the settings, creating the settings directory on the first save.
@@ -192,7 +227,7 @@ pub fn save(config: &Config) {
         return;
     };
     if let Err(e) = save_to(&path, config) {
-        eprintln!("steel-front: cannot write {}: {e}", path.display());
+        eprintln!("tides-of-rlyeh: cannot write {}: {e}", path.display());
     }
 }
 
@@ -203,7 +238,7 @@ fn load_from(path: &Path) -> Config {
         Ok(text) => parse(&text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
         Err(e) => {
-            eprintln!("steel-front: cannot read {}: {e}", path.display());
+            eprintln!("tides-of-rlyeh: cannot read {}: {e}", path.display());
             Config::default()
         }
     }
@@ -224,7 +259,7 @@ fn render(config: &Config) -> String {
     use std::fmt::Write as _;
 
     let mut out = String::with_capacity(256);
-    out.push_str("# STEEL FRONT settings. Delete this file to go back to the defaults.\n");
+    out.push_str("# TIDES OF R'LYEH settings. Delete this file to go back to the defaults.\n");
     // Floats use `{}`, the shortest text that reads back as the same value: a
     // fixed number of decimals would round a hand-edited 1.2345678 on the way
     // out, and the file is one people are meant to edit.
@@ -357,7 +392,7 @@ mod tests {
     /// the test into it.
     fn scratch_dir() -> PathBuf {
         let temp = std::env::temp_dir();
-        let probe = temp.join(format!("steel-front-{}.probe", std::process::id()));
+        let probe = temp.join(format!("tides-of-rlyeh-{}.probe", std::process::id()));
         match std::fs::File::create(&probe) {
             Ok(_) => {
                 let _ = std::fs::remove_file(&probe);
@@ -371,7 +406,10 @@ mod tests {
     /// colliding with each other when they run in parallel, and the pid keeps
     /// two `cargo test` runs apart.
     fn temp_file(tag: &str) -> PathBuf {
-        scratch_dir().join(format!("steel-front-{}-{tag}.config", std::process::id()))
+        scratch_dir().join(format!(
+            "tides-of-rlyeh-{}-{tag}.config",
+            std::process::id()
+        ))
     }
 
     /// The path a base directory produces, so the tests below state only the
@@ -497,9 +535,44 @@ mod tests {
         assert_eq!(parse("# nothing here\n\n   \n"), Config::default());
         assert_eq!(parse("this line has no equals sign\n"), Config::default());
         assert_eq!(
-            load_from(Path::new("steel-front-file-that-does-not-exist.config")),
+            load_from(Path::new("tides-of-rlyeh-file-that-does-not-exist.config")),
             Config::default()
         );
+    }
+
+    /// The file used to live in a directory named after the old title. A save
+    /// written then still has to load, or renaming the game would silently cost
+    /// the player their settings and their progress.
+    #[test]
+    fn a_save_from_before_the_rename_is_still_read() {
+        let old = temp_file("rename-legacy");
+        let new = temp_file("rename-current");
+        let _ = std::fs::remove_file(&new);
+
+        let before = Config {
+            volume: 0.42,
+            unlocked: 5,
+            ..Config::default()
+        };
+        save_to(&old, &before).expect("write the pre-rename file");
+
+        // Nothing has been written to the new path yet: the old one is read, and
+        // its values survive.
+        let chosen = source_path(new.clone(), Some(old.clone()));
+        assert_eq!(chosen, old, "the pre-rename file was ignored");
+        let got = load_from(&chosen);
+        assert_eq!(got.volume, 0.42);
+        assert_eq!(got.unlocked, 5);
+
+        // Once the current file exists it wins, so the rename is a one-way trip.
+        save_to(&new, &Config::default()).expect("write the current file");
+        assert_eq!(source_path(new.clone(), Some(old.clone())), new);
+
+        // No legacy file at all (a first run, or one already migrated): the
+        // current path is the answer whether or not it exists.
+        assert_eq!(source_path(new.clone(), None), new);
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::remove_file(&new);
     }
 
     /// A window size is only believable inside the range the game will hand to
@@ -563,7 +636,7 @@ mod tests {
     /// players who read them will write files that do nothing.
     #[test]
     fn the_documented_sample_is_what_a_default_file_holds() {
-        let sample = "# STEEL FRONT settings. Delete this file to go back to the defaults.\n\
+        let sample = "# TIDES OF R'LYEH settings. Delete this file to go back to the defaults.\n\
                       fullscreen = false\n\
                       width = 1280\n\
                       height = 720\n\

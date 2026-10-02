@@ -19,7 +19,7 @@ public class D {
 "@
 [void][D]::SetProcessDPIAware()
 
-$exe = "D:\Documents\rust-fps\target\release\rust-fps.exe"
+$exe = "D:\Documents\rust-fps\target\release\tides-of-rlyeh.exe"
 $out = "D:\Documents\rust-fps\target\shots"
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 

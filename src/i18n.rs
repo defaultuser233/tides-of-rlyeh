@@ -74,8 +74,8 @@ macro_rules! define_strings {
 
 define_strings! {
     // --- shell ---
-    Title            => ("STEEL FRONT", "钢铁前线"),
-    Subtitle         => ("A TACTICAL FPS", "战术第一人称射击"),
+    Title            => ("TIDES OF R'LYEH", "拉莱耶的潮声"),
+    Subtitle         => ("A COSMIC HORROR FPS", "宇宙恐怖第一人称射击"),
     NewCampaign      => ("NEW CAMPAIGN", "开始战役"),
     ContinueGame     => ("CONTINUE", "继续游戏"),
     SelectMission    => ("SELECT MISSION", "选择关卡"),

@@ -2,7 +2,7 @@
 #
 #   powershell -ExecutionPolicy Bypass -File build-linux.ps1
 #
-# Produces: target\x86_64-unknown-linux-musl\release\rust-fps
+# Produces: target\x86_64-unknown-linux-musl\release\tides-of-rlyeh
 #
 # The result is a statically linked x86_64 ELF (static-pie). It needs no glibc
 # and no shared libraries, so it runs on any x86_64 Linux with a desktop
@@ -52,7 +52,7 @@ Write-Host "==> Building for Linux" -ForegroundColor Cyan
 cargo build --release --no-default-features --target $target
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 
-$bin = "target\$target\release\rust-fps"
+$bin = "target\$target\release\tides-of-rlyeh"
 if (-not (Test-Path $bin)) { throw "Build finished but $bin is missing" }
 
 # Prove the artefact really is a Linux ELF and not a mislabelled PE.
@@ -67,4 +67,4 @@ Write-Host ("==> Built: {0}  ({1:N1} MB)" -f $bin, $size) -ForegroundColor Green
 Write-Host "    ELF magic verified: $magic" -ForegroundColor Green
 Write-Host ""
 Write-Host "Transfer the file to a Linux box and:" -ForegroundColor DarkGray
-Write-Host "    chmod +x rust-fps && ./rust-fps" -ForegroundColor DarkGray
+Write-Host "    chmod +x tides-of-rlyeh && ./tides-of-rlyeh" -ForegroundColor DarkGray
