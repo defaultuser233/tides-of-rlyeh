@@ -1,7 +1,9 @@
 mod assets;
 mod audio;
 mod campaign;
+mod codex;
 mod combat;
+mod config;
 mod effects;
 mod enemy;
 mod fog;
@@ -27,6 +29,7 @@ use audio::Sfx;
 use campaign::{Mission, Objective};
 use enemy::{Attack, Enemy, Kind as EnemyKind};
 use grenade::{GrenadeKind, Grenades};
+use hud::{CodexRow, HelpSection};
 use i18n::Key;
 use level::Level;
 use macroquad::prelude::*;
@@ -47,12 +50,16 @@ enum Phase {
 }
 
 /// Full-screen overlays that suspend the simulation but keep the world drawn.
+///
+/// `Manual` is the field's manual: over a menu the same pages are carried by
+/// `Game::menu_manual` instead, because a menu has no simulation to suspend.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Overlay {
     None,
     Inventory,
     Map,
     Mission,
+    Manual,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -79,6 +86,10 @@ fn med_key(i: usize) -> Key {
     }
 }
 
+/// The settings the page edits, live. There is no `Default` here on purpose:
+/// the defaults live in `config::Config::default`, which is what a machine
+/// without a settings file loads, and two tables of defaults would eventually
+/// disagree about one of them.
 #[derive(Clone, Copy)]
 struct Settings {
     sensitivity: f32,
@@ -87,22 +98,272 @@ struct Settings {
     lean_toggle: bool,
     invert_y: bool,
     show_fps: bool,
+    fullscreen: bool,
+    width: i32,
+    height: i32,
 }
 
-impl Default for Settings {
-    fn default() -> Self {
+impl Settings {
+    /// The settings the file carries. Every field is named in both directions,
+    /// so a field added on one side is a compile error on the other.
+    ///
+    /// The language is not here: `i18n` owns it, and a copy on `Settings` would
+    /// be a second thing to keep in step with it. `to_config` reads it back out
+    /// of `i18n` at the moment it builds the file.
+    fn from_config(c: &config::Config) -> Self {
         Self {
-            sensitivity: 1.60,
-            volume: 0.80,
-            aim_toggle: true,
-            lean_toggle: true,
-            invert_y: false,
-            show_fps: false,
+            sensitivity: c.sensitivity,
+            volume: c.volume,
+            aim_toggle: c.aim_toggle,
+            lean_toggle: c.lean_toggle,
+            invert_y: c.invert_y,
+            show_fps: c.show_fps,
+            fullscreen: c.fullscreen,
+            width: c.width,
+            height: c.height,
+        }
+    }
+
+    /// By value: `Settings` is `Copy`, and clippy's convention for `to_*` is
+    /// that a copyable `self` is cheaper to pass than a reference to it.
+    /// The settings half of the file. The campaign progress is not a setting
+    /// and lives in `Game`, so it is passed in rather than stored twice.
+    fn to_config(self, unlocked: usize, last_mission: usize) -> config::Config {
+        config::Config {
+            fullscreen: self.fullscreen,
+            width: self.width,
+            height: self.height,
+            sensitivity: self.sensitivity,
+            volume: self.volume,
+            aim_toggle: self.aim_toggle,
+            lean_toggle: self.lean_toggle,
+            invert_y: self.invert_y,
+            show_fps: self.show_fps,
+            lang: i18n::lang(),
+            unlocked,
+            last_mission,
         }
     }
 }
 
+/// A window mode: whether it is fullscreen, and the size it should have when it
+/// is not.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct WindowState {
+    fullscreen: bool,
+    width: i32,
+    height: i32,
+}
+
+/// What the window still has to be told, given what it was last told.
+///
+/// The size is deliberately not pushed while fullscreen: the mode decides it,
+/// and miniquad's `set_window_size` would resize the fullscreen window itself —
+/// it keeps the borderless style, so the window would stop covering the screen.
+/// The choice is not lost: it is recorded, and applied by the same change that
+/// leaves fullscreen.
+fn window_calls(want: WindowState, applied: WindowState) -> (Option<bool>, Option<(i32, i32)>) {
+    let fullscreen = (want.fullscreen != applied.fullscreen).then_some(want.fullscreen);
+    // Coming back from fullscreen has to re-apply the size even when it never
+    // changed, because the mode change leaves the window at whatever size the OS
+    // picked — hence the whole-state comparison rather than a size comparison.
+    let size = (!want.fullscreen && want != applied).then_some((want.width, want.height));
+    (fullscreen, size)
+}
+
+/// Pushes the settings at everything that reads them, and writes the file.
+///
+/// Every row on the settings page ends here, so "changed something" and "saved
+/// it" cannot come apart as rows are added. The window is only touched when it
+/// actually has to move — see `window_calls` — because both of its calls are
+/// requests to the OS, while the volume is re-set unconditionally because it is
+/// a field assignment and the audio side is the only other reader.
+/// The whole settings file, from the one place that owns every field in it:
+/// the settings screen, the window mode and the campaign progress.
+fn config_of(game: &Game) -> config::Config {
+    game.settings.to_config(game.unlocked, game.last_mission)
+}
+
+/// Writes the file when the campaign moves on. Called from the two places a
+/// mission is marked finished, so quitting mid-campaign cannot lose it.
+fn save_progress(game: &Game) {
+    config::save(&config_of(game));
+}
+
+fn apply_settings(game: &mut Game, audio: &mut audio::Audio) {
+    let want = WindowState {
+        fullscreen: game.settings.fullscreen,
+        width: game.settings.width,
+        height: game.settings.height,
+    };
+    let (fullscreen, size) = window_calls(want, game.window_state);
+    if let Some(on) = fullscreen {
+        set_fullscreen(on);
+    }
+    if let Some((w, h)) = size {
+        // `Conf`, which built the window at startup, reads its size as physical
+        // pixels; this call reads logical points and multiplies by the display's
+        // scale itself. Undo that here so both paths mean the same thing: on a
+        // 150% display a 1920 × 1080 entry must be the window the game opens at
+        // 1920 × 1080, not one 1.5 times larger that spills off the screen.
+        let scale = screen_dpi_scale().max(1.0);
+        request_new_screen_size(w as f32 / scale, h as f32 / scale);
+    }
+    game.window_state = want;
+    audio.set_master(game.settings.volume);
+    config::save(&config_of(game));
+}
+
+/// The resolution row's presets: the sizes the game is framed for. The list is
+/// short on purpose — every entry has to work on the screens players actually
+/// have — and the file may hold a size that is not in it.
+const RESOLUTIONS: [(i32, i32); 4] = [(1280, 720), (1600, 900), (1920, 1080), (2560, 1440)];
+
+/// The resolution row's list: the presets, with the current size appended when
+/// it is not one of them.
+///
+/// The alternative was to snap an unknown size to the nearest preset. That would
+/// rewrite a size the file still names on the next launch and quietly change a
+/// window the player had chosen; carrying it as an extra entry costs one row and
+/// keeps the file honest about what is in it.
+fn resolution_options(current: (i32, i32)) -> Vec<(i32, i32)> {
+    let mut options = RESOLUTIONS.to_vec();
+    if !options.contains(&current) {
+        options.push(current);
+    }
+    options
+}
+
+/// Moves the resolution one step through `resolution_options`, wrapping at both
+/// ends.
+fn step_resolution(settings: &mut Settings, forward: bool) {
+    let options = resolution_options((settings.width, settings.height));
+    let current = options
+        .iter()
+        .position(|size| *size == (settings.width, settings.height))
+        .unwrap_or(0);
+    let next = if forward {
+        (current + 1) % options.len()
+    } else {
+        (current + options.len() - 1) % options.len()
+    };
+    if let Some(&(w, h)) = options.get(next) {
+        settings.width = w;
+        settings.height = h;
+    }
+}
+
 const ARMOR_MAX: f32 = 50.0;
+
+// --- the field manual -----------------------------------------------------
+
+/// The manual's pages, in order: what to press and what to do, the hostiles,
+/// and the weapons and kit. Every page number that arrives from a key binding
+/// or a menu row is wrapped into this range by `wrap_page`.
+const MANUAL_PAGES: usize = 3;
+
+/// One built page of the manual.
+///
+/// `codex::*` formats the stat lines and builds the portrait meshes every time
+/// it is called, so a page is built when it opens or is turned to and held on
+/// `Game` until the manual shuts. Drawing only borrows it: this is the one
+/// screen with a cache, because rebuilding a page in the draw path would
+/// allocate and rebuild meshes sixty times a second.
+enum ManualContent {
+    /// Page 0: the keys, grouped, with the survival notes under them.
+    Controls {
+        sections: Vec<HelpSection>,
+        tips: Vec<&'static str>,
+    },
+    /// The card pages, under their own title.
+    Cards { title: Key, rows: Vec<CodexRow> },
+}
+
+/// Wraps a page number into the manual, so an index from a key binding or a
+/// menu row can never point past the last page.
+fn wrap_page(page: usize) -> usize {
+    page % MANUAL_PAGES
+}
+
+/// The page a `←`/`→` lands on. The pager is a ring: `→` off the last page
+/// comes back to the first, and `←` off the first goes to the last.
+fn flip_page(page: usize, turn: isize) -> usize {
+    (wrap_page(page) as isize + turn).rem_euclid(MANUAL_PAGES as isize) as usize
+}
+
+/// Page 2's rows: the armoury, then the rest of the kit. `draw_manual_cards`
+/// draws one table per call, so the two lists are appended into one, weapons
+/// first because they are what the page is opened to read.
+fn weapons_and_kit() -> Vec<CodexRow> {
+    let mut rows = codex::weapons();
+    rows.extend(codex::kit());
+    rows
+}
+
+/// Builds one page of the manual: the whole "page number → which table is
+/// drawn" decision, in the one place the field and the menus both reach.
+fn manual_content(page: usize) -> ManualContent {
+    match wrap_page(page) {
+        1 => ManualContent::Cards {
+            title: Key::ManualTitleEnemies,
+            rows: codex::enemies(),
+        },
+        2 => ManualContent::Cards {
+            title: Key::ManualTitleKit,
+            rows: weapons_and_kit(),
+        },
+        _ => ManualContent::Controls {
+            sections: codex::controls(),
+            tips: codex::tips(),
+        },
+    }
+}
+
+/// `H` and `K`: the page an opening key asks for, or `None` when neither is
+/// down. The same two keys open the manual in the field and over a menu.
+fn manual_jump_key() -> Option<usize> {
+    if is_key_pressed(KeyCode::H) {
+        Some(0)
+    } else if is_key_pressed(KeyCode::K) {
+        Some(1)
+    } else {
+        None
+    }
+}
+
+/// `←`/`→`: which way the page keys turn the manual, `0` for neither.
+fn manual_turn_key() -> isize {
+    isize::from(is_key_pressed(KeyCode::Right)) - isize::from(is_key_pressed(KeyCode::Left))
+}
+
+/// The manual after this frame's keys: whether it is showing, and the page it
+/// is on.
+///
+/// `was_open`/`page` are the state it was in, `jump` the page an opening key or
+/// a menu row asked for, `turn` which way `←`/`→` pushed, and `escape` whether
+/// Esc was pressed. The field and the menus drive this same rule — in the field
+/// the manual is `Overlay::Manual`, over a menu it is `Game::menu_manual`,
+/// because a menu has no world for an overlay to suspend — so its keys mean the
+/// same thing in both, and the transition is a pure function of its inputs that
+/// a test can drive without a window.
+fn manual_after_keys(
+    was_open: bool,
+    page: usize,
+    jump: Option<usize>,
+    turn: isize,
+    escape: bool,
+) -> (bool, usize) {
+    if escape {
+        return (false, page);
+    }
+    if let Some(page) = jump {
+        return (true, wrap_page(page));
+    }
+    if !was_open {
+        return (false, page);
+    }
+    (true, flip_page(page, turn))
+}
 
 struct Game {
     phase: Phase,
@@ -175,14 +436,41 @@ struct Game {
     banner: Option<(String, f32)>,
     toast: Option<(String, f32)>,
     unlocked: usize,
+    /// The mission the player is in, mirrored into the settings file so that
+    /// `continue` can put them back here.
+    last_mission: usize,
     menu_sel: usize,
     result_sel: usize,
     settings_sel: usize,
+    /// Where the cursor was on the previous frame, so a menu can tell "the
+    /// mouse moved" from "the cursor happens to be sitting on a row".
+    menu_mouse: Vec2,
     settings: Settings,
+    /// The window mode the OS has actually been told about. Kept so a settings
+    /// change pushes only what moved, and so leaving fullscreen re-applies the
+    /// size the file holds — see `window_calls`.
+    window_state: WindowState,
+    /// The manual's page, 0-based and wrapped by `wrap_page`. One number for
+    /// both places it opens, so its keys and the cache below mean the same
+    /// thing wherever the page was opened from.
+    manual_page: usize,
+    /// The page's built content, or `None` while the manual is shut. Built on
+    /// open and on every turn, never in the draw path: see `ManualContent`.
+    manual_cache: Option<ManualContent>,
+    /// Whether the manual is open over a menu. The field's manual is
+    /// `Overlay::Manual` — an overlay is what freezes the world behind it, and
+    /// the main menu and the pause screen have no world to freeze — and
+    /// overloading that with a second meaning would overload its Esc handler
+    /// too, which for an overlay means "back to the field". `phase` does not
+    /// move while the manual is open over a menu, so closing it has nothing to
+    /// restore: the menu underneath is still the one it was opened from.
+    menu_manual: bool,
 }
 
 impl Game {
-    fn new() -> Self {
+    /// `settings` come from the file, and are what the window was built with:
+    /// `window_conf` read the same file before the window existed.
+    fn new(settings: Settings, unlocked: usize, last_mission: usize) -> Self {
         let mission = campaign::get(0);
         let mut level = Level::from_layout(&maps::campaign()[mission.layout]);
         // Only once a window exists: this uploads textures and fixes up their
@@ -238,16 +526,32 @@ impl Game {
             hitstop: 0.0,
             banner: None,
             toast: None,
-            unlocked: 1,
+            // Clamped here rather than trusted: the file is hand-editable and
+            // the campaign is shorter than the file's range allows.
+            unlocked: unlocked.clamp(1, campaign::count()),
+            last_mission: last_mission.min(campaign::count() - 1),
             menu_sel: 0,
             result_sel: 0,
             settings_sel: 0,
-            settings: Settings::default(),
+            menu_mouse: Vec2::ZERO,
+            settings,
+            window_state: WindowState {
+                fullscreen: settings.fullscreen,
+                width: settings.width,
+                height: settings.height,
+            },
+            manual_page: 0,
+            manual_cache: None,
+            menu_manual: false,
         }
     }
 
     fn start(&mut self, index: usize) {
         self.mission_index = index.min(campaign::count() - 1);
+        // The file is written on every start, so `continue` resumes the mission
+        // the player was actually in rather than the furthest they reached.
+        self.last_mission = self.mission_index;
+        save_progress(self);
         self.mission = campaign::get(self.mission_index);
         let layouts = maps::campaign();
         self.level = Level::from_layout(&layouts[self.mission.layout]);
@@ -274,6 +578,9 @@ impl Game {
         self.lean_cmd = 0.0;
         self.heal_t = 0.0;
         self.overlay = Overlay::None;
+        self.manual_page = 0;
+        self.manual_cache = None;
+        self.menu_manual = false;
         self.spawned = 0;
         self.killed = 0;
         self.score = 0;
@@ -388,6 +695,44 @@ impl Game {
 
     fn select_slot(&mut self, i: usize) {
         self.arsenal.select(i);
+    }
+
+    /// Begins a campaign from the top, with the manual's hint armed again: a
+    /// player who opens the menu to start a new campaign is a player the manual
+    /// has not introduced itself to yet. Retries and mission select go to
+    /// `start` directly, so the hint cannot return on every mission.
+    fn new_campaign(&mut self) {
+        self.start(0);
+    }
+
+    /// Shows page `page` of the manual, wrapped into range, and builds it.
+    ///
+    /// The page and its built rows are only ever set here, together, so the
+    /// cache can never be a page behind what is drawn — and both the field's
+    /// keys and the menu's rows come through it rather than building their own.
+    fn show_manual_page(&mut self, page: usize) {
+        self.manual_page = wrap_page(page);
+        self.manual_cache = Some(manual_content(self.manual_page));
+    }
+
+    /// Opens the manual over a menu on `page`, for the menu rows and the H and
+    /// K keys: the page is built and the menu is flagged as the surface
+    /// underneath, which is what Esc drops back to.
+    fn open_menu_manual(&mut self, page: usize) {
+        self.show_manual_page(page);
+        self.menu_manual = true;
+    }
+
+    /// Shuts the manual and drops the page it had built. Clears both of the
+    /// places it can be open — the field's overlay slot and the menu flag — one
+    /// of which is already clear wherever this is called; the rows are built
+    /// again the next time it opens.
+    fn close_manual(&mut self) {
+        if self.overlay == Overlay::Manual {
+            self.overlay = Overlay::None;
+        }
+        self.menu_manual = false;
+        self.manual_cache = None;
     }
 }
 
@@ -509,13 +854,283 @@ mod tests {
             "a point behind the camera was projected anyway"
         );
     }
+
+    /// The manual is three pages behind two keys and a pair of arrows, and the
+    /// pages are a ring: `→` off the last page has to come back to the first
+    /// and `←` off the first to the last, or a page is unreachable from one
+    /// side. Page numbers that arrive from a binding are wrapped, not trusted.
+    #[test]
+    fn the_manual_pages_wrap_both_ways() {
+        assert_eq!(flip_page(0, 1), 1);
+        assert_eq!(flip_page(1, 1), 2);
+        assert_eq!(flip_page(2, 1), 0);
+        assert_eq!(flip_page(0, -1), MANUAL_PAGES - 1);
+        assert_eq!(flip_page(2, -1), 1);
+        // Turning one way and back lands on the page it started from, and a
+        // turn of zero is not a turn.
+        for page in 0..MANUAL_PAGES {
+            assert_eq!(flip_page(flip_page(page, 1), -1), page);
+            assert_eq!(flip_page(page, 0), page);
+        }
+        // Every page a key can ask for is inside the manual.
+        assert_eq!(wrap_page(0), 0);
+        assert_eq!(wrap_page(MANUAL_PAGES - 1), MANUAL_PAGES - 1);
+        assert_eq!(wrap_page(MANUAL_PAGES), 0);
+        assert_eq!(wrap_page(2 * MANUAL_PAGES + 2), 2);
+    }
+
+    /// The menus answer to the keyboard and the mouse at once, and this is the
+    /// rule that keeps them from fighting: a hover only takes the selection when
+    /// the cursor has just moved, so a mouse parked over a row cannot drag the
+    /// highlight back while the arrow keys are being used.
+    #[test]
+    fn a_parked_mouse_does_not_take_the_selection_back() {
+        assert_eq!(hover_selection(3, Some(0), false), 3);
+        assert_eq!(hover_selection(3, Some(0), true), 0);
+        assert_eq!(hover_selection(3, None, true), 3);
+        assert_eq!(hover_selection(0, None, false), 0);
+        // Out of range is the caller's business: it only ever passes a row it
+        // found in the rect list.
+        assert_eq!(hover_selection(2, Some(9), true), 9);
+    }
+
+    /// `continue` picks up where the player was, held inside what they have
+    /// unlocked and inside the campaign. The file is hand-editable, so a
+    /// nonsense value must not send them to a mission that does not exist.
+    #[test]
+    fn continue_resumes_where_the_player_was() {
+        assert_eq!(resume_mission(1, 0), 0);
+        assert_eq!(resume_mission(2, 1), 1);
+        assert_eq!(resume_mission(6, 3), 3);
+        // Ahead of the unlocks, or past the end of the campaign: clamped, never
+        // off the table.
+        assert_eq!(resume_mission(2, 5), 1);
+        assert_eq!(resume_mission(99, 99), campaign::count() - 1);
+        // A file that says nothing sensible still produces a real mission.
+        assert_eq!(resume_mission(0, 0), 0);
+    }
+
+    /// Which table a page draws is the manual's whole model: the menu's rows
+    /// and the field's keys both name a page by number, so the two have to
+    /// agree on what page 1 is. Page 2 is one card list made of two tables, the
+    /// weapons first and the rest of the kit after them.
+    #[test]
+    fn each_manual_page_draws_its_own_table() {
+        assert!(
+            matches!(manual_content(0), ManualContent::Controls { .. }),
+            "page 0 is the controls and the survival notes"
+        );
+
+        match manual_content(1) {
+            ManualContent::Cards { title, rows } => {
+                assert_eq!(title, Key::ManualTitleEnemies);
+                assert_eq!(rows.len(), codex::enemies().len());
+            }
+            ManualContent::Controls { .. } => panic!("page 1 is the bestiary"),
+        }
+
+        match manual_content(2) {
+            ManualContent::Cards { title, rows } => {
+                assert_eq!(title, Key::ManualTitleKit);
+                // Nothing may be dropped in the joining.
+                assert_eq!(rows.len(), codex::weapons().len() + codex::kit().len());
+            }
+            ManualContent::Controls { .. } => panic!("page 2 is the armoury"),
+        }
+
+        // A page number off the end of the manual is wrapped before it is
+        // matched on, so it lands on a page rather than drawing nothing.
+        assert!(
+            matches!(manual_content(MANUAL_PAGES), ManualContent::Controls { .. }),
+            "an out-of-range page was not wrapped"
+        );
+    }
+
+    /// The manual's keys are one rule in two places: in the field it is an
+    /// overlay over the frozen world, and over the menu and pause screens it is
+    /// a flag, so H, K, `←`, `→` and Esc have to mean the same thing in both.
+    /// The parts worth testing are the transitions — a page key must not be
+    /// able to open a shut manual, and Esc has to shut it whatever else is
+    /// pressed with it.
+    #[test]
+    fn the_manual_opens_turns_and_closes() {
+        let open = |page| manual_after_keys(false, 0, Some(page), 0, false);
+        let turn = |page, turn| manual_after_keys(true, page, None, turn, false);
+        let esc = |page| manual_after_keys(true, page, None, 0, true);
+
+        // H and K open it on the controls and the codex, whatever page it was
+        // left on, and an opening key cannot point past the end of the manual.
+        assert_eq!(open(0), (true, 0));
+        assert_eq!(open(1), (true, 1));
+        assert_eq!(manual_after_keys(false, 2, Some(0), 0, false), (true, 0));
+        assert_eq!(open(MANUAL_PAGES + 1), (true, 1));
+
+        // Left and right walk it, wrapping at both ends.
+        assert_eq!(turn(0, 1), (true, 1));
+        assert_eq!(turn(2, 1), (true, 0));
+        assert_eq!(turn(0, -1), (true, MANUAL_PAGES - 1));
+        // A frame with nothing pressed leaves it where it was.
+        assert_eq!(turn(1, 0), (true, 1));
+        assert_eq!(manual_after_keys(false, 1, None, 0, false), (false, 1));
+
+        // A page key on its own cannot open it: only H and K — and the menu's
+        // own rows — do that, and an arrow reaching a shut manual would be a
+        // manual opening itself.
+        assert_eq!(manual_after_keys(false, 0, None, 1, false), (false, 0));
+
+        // Esc shuts it, and outranks whatever was pressed with it.
+        assert_eq!(esc(2), (false, 2));
+        assert_eq!(manual_after_keys(true, 1, Some(0), 1, true), (false, 1));
+        // Shutting it keeps the page for the next open, unless an opening key
+        // names another one.
+        assert_eq!(manual_after_keys(false, 2, None, 0, false), (false, 2));
+        assert_eq!(manual_after_keys(false, 2, Some(1), 0, false), (true, 1));
+    }
+
+    /// The settings page and the file hold the same settings, and the two
+    /// conversions are the only place that is written down. A field that one of
+    /// them drops is a setting that quietly stops being saved.
+    ///
+    /// The language is deliberately not asserted here: it belongs to `i18n`, and
+    /// checking it would mean setting the process-wide language from a test
+    /// binary that runs its tests in parallel with the ones in `codex` that do
+    /// the same thing.
+    #[test]
+    fn settings_survive_the_config_conversion() {
+        let live = Settings {
+            sensitivity: 3.45,
+            volume: 0.15,
+            aim_toggle: false,
+            lean_toggle: false,
+            invert_y: true,
+            show_fps: true,
+            fullscreen: true,
+            width: 1920,
+            height: 1080,
+        };
+        let back = Settings::from_config(&live.to_config(3, 2));
+        assert_eq!(back.sensitivity, live.sensitivity);
+        assert_eq!(back.volume, live.volume);
+        assert_eq!(back.aim_toggle, live.aim_toggle);
+        assert_eq!(back.lean_toggle, live.lean_toggle);
+        assert_eq!(back.invert_y, live.invert_y);
+        assert_eq!(back.show_fps, live.show_fps);
+        assert_eq!(back.fullscreen, live.fullscreen);
+        assert_eq!(back.width, live.width);
+        assert_eq!(back.height, live.height);
+    }
+
+    /// A game with no settings file has to be the game that shipped, so the live
+    /// settings built from a default config are the values the old
+    /// `Settings::default` held, plus the window it opened with.
+    #[test]
+    fn the_default_config_builds_the_shipped_settings() {
+        let live = Settings::from_config(&config::Config::default());
+        assert_eq!(live.sensitivity, 1.60);
+        assert_eq!(live.volume, 0.80);
+        assert!(live.aim_toggle);
+        assert!(live.lean_toggle);
+        assert!(!live.invert_y);
+        assert!(!live.show_fps);
+        assert!(!live.fullscreen);
+        assert_eq!((live.width, live.height), (1280, 720));
+    }
+
+    /// What the window is told, and — more to the point — what it is not. A
+    /// frame that changes nothing must not send window requests, and fullscreen
+    /// must defer the size rather than resize a borderless window to something
+    /// smaller than the screen.
+    #[test]
+    fn a_settings_change_only_moves_the_window_when_it_has_to() {
+        let windowed = |w, h| WindowState {
+            fullscreen: false,
+            width: w,
+            height: h,
+        };
+        let full = |w, h| WindowState {
+            fullscreen: true,
+            width: w,
+            height: h,
+        };
+
+        // Nothing changed: nothing to say.
+        assert_eq!(
+            window_calls(windowed(1280, 720), windowed(1280, 720)),
+            (None, None)
+        );
+
+        // A new size while windowed is applied now.
+        assert_eq!(
+            window_calls(windowed(1920, 1080), windowed(1280, 720)),
+            (None, Some((1920, 1080)))
+        );
+
+        // Going fullscreen leaves the size alone...
+        assert_eq!(
+            window_calls(full(1920, 1080), windowed(1920, 1080)),
+            (Some(true), None)
+        );
+        // ...and a size picked while fullscreen is only recorded, not pushed.
+        assert_eq!(
+            window_calls(full(2560, 1440), full(1920, 1080)),
+            (None, None)
+        );
+        // Coming back re-applies the size the file holds, even though the size
+        // itself never changed: leaving fullscreen restores whatever the OS had.
+        assert_eq!(
+            window_calls(windowed(2560, 1440), full(2560, 1440)),
+            (Some(false), Some((2560, 1440)))
+        );
+    }
+
+    /// The resolution row walks a list that always holds the current size, so a
+    /// size the presets do not name is shown and kept instead of being rewritten
+    /// by the first arrow press.
+    #[test]
+    fn the_resolution_row_keeps_a_size_that_is_not_a_preset() {
+        assert_eq!(
+            resolution_options((1280, 720)),
+            RESOLUTIONS.to_vec(),
+            "a preset is already in the list"
+        );
+        assert_eq!(
+            resolution_options((1366, 768)).last(),
+            Some(&(1366, 768)),
+            "an odd size is carried as an extra entry"
+        );
+
+        let mut settings = Settings::from_config(&config::Config::default());
+        // Right walks the presets in order...
+        step_resolution(&mut settings, true);
+        assert_eq!((settings.width, settings.height), (1600, 900));
+        step_resolution(&mut settings, false);
+        assert_eq!((settings.width, settings.height), (1280, 720));
+        // ...and left from the first entry wraps to the last.
+        step_resolution(&mut settings, false);
+        assert_eq!((settings.width, settings.height), (2560, 1440));
+        // A size that is not a preset takes part in the walk like any other
+        // entry, rather than being snapped the first time an arrow is pressed.
+        settings.width = 1366;
+        settings.height = 768;
+        step_resolution(&mut settings, true);
+        assert_eq!((settings.width, settings.height), (1280, 720));
+    }
 }
 
+/// The window's opening state, read from the settings file.
+///
+/// macroquad calls this once, before the window exists, so it is the only chance
+/// the saved size and mode get to shape the window rather than being applied to
+/// one that is already on screen. The file is read again in `main`, where the
+/// language and the volume are wanted too; it is small, and reading it twice is
+/// cheaper than a cache that has to be kept correct.
 fn window_conf() -> Conf {
+    let saved = config::load();
     Conf {
         window_title: "STEEL FRONT / 钢铁前线".to_owned(),
-        window_width: 1280,
-        window_height: 720,
+        window_width: saved.width,
+        window_height: saved.height,
+        fullscreen: saved.fullscreen,
         high_dpi: true,
         sample_count: 4,
         window_resizable: true,
@@ -780,6 +1395,38 @@ fn pick_spawn(level: &Level, player: &Player, rng: &mut Rng) -> Vec3 {
     best
 }
 
+/// True when the cursor actually moved since the last frame.
+///
+/// Every menu here answers to both devices, and the keyboard has to win while
+/// it is in use: with the cursor parked over a row, an unguarded hover test
+/// drags the selection back on every frame and makes the arrow keys look
+/// broken. A pixel of slack keeps a jittering mouse from doing the same.
+/// Where `continue` picks up: the mission the player was in, held inside what
+/// they have actually unlocked and inside the campaign. A hand-edited file
+/// cannot send it anywhere that does not exist.
+fn resume_mission(unlocked: usize, last: usize) -> usize {
+    last.min(unlocked.saturating_sub(1))
+        .min(campaign::count().saturating_sub(1))
+}
+
+fn mouse_moved(last: &mut Vec2) -> bool {
+    let (mx, my) = mouse_position();
+    let now = vec2(mx, my);
+    let moved = (now - *last).length_squared() > 1.0;
+    *last = now;
+    moved
+}
+
+/// The row a hover should select: the one under the cursor when the mouse has
+/// just moved, otherwise whatever the keyboard had. Split out of the drawing
+/// loops so the rule can be tested without a window.
+fn hover_selection(current: usize, hover: Option<usize>, moved: bool) -> usize {
+    match hover {
+        Some(i) if moved => i,
+        _ => current,
+    }
+}
+
 fn menu_nav(sel: &mut usize, len: usize, audio: &audio::Audio) {
     if len == 0 {
         return;
@@ -806,11 +1453,6 @@ fn clicked_rect(rect: &(f32, f32, f32, f32)) -> bool {
     is_mouse_button_pressed(MouseButton::Left) && hovered_rect(rect)
 }
 
-/// Row `idx`, if it exists. Out-of-range rows are never hit.
-fn hovered(rects: &[(f32, f32, f32, f32)], idx: usize) -> bool {
-    rects.get(idx).is_some_and(hovered_rect)
-}
-
 fn clicked(rects: &[(f32, f32, f32, f32)], idx: usize) -> bool {
     rects.get(idx).is_some_and(clicked_rect)
 }
@@ -824,13 +1466,23 @@ async fn main() {
     // how Windows asks whether you want Sticky Keys.
     #[cfg(windows)]
     let _quiet_keys = win32::QuietKeys::new();
-    i18n::set_lang(i18n::Lang::Zh);
+    // The saved settings decide the language and the volume as well as the
+    // window, and both have to be in place before the first frame: the language
+    // before the fonts are asked for anything and the volume before an effect
+    // can play. The window itself was built from this same file by
+    // `window_conf`, before this body ran.
+    let saved = config::load();
+    i18n::set_lang(saved.lang);
 
     let fonts = hud::Fonts::load().await;
     let mut audio = audio::Audio::load().await;
-    audio.set_master(0.8);
+    audio.set_master(saved.volume);
 
-    let mut game = Game::new();
+    let mut game = Game::new(
+        Settings::from_config(&saved),
+        saved.unlocked,
+        saved.last_mission,
+    );
     let mut menu_rects: Vec<(f32, f32, f32, f32)>;
 
     loop {
@@ -844,54 +1496,88 @@ async fn main() {
             Phase::Menu => {
                 pointer::clip(false);
                 pointer::show(true);
-                let items = [
-                    hud::MenuItem {
-                        label: i18n::t(Key::NewCampaign),
-                        enabled: true,
-                    },
-                    hud::MenuItem {
-                        label: i18n::t(Key::SelectMission),
-                        enabled: true,
-                    },
-                    hud::MenuItem {
-                        label: i18n::t(Key::Settings),
-                        enabled: true,
-                    },
-                    hud::MenuItem {
-                        label: i18n::t(Key::Quit),
-                        enabled: true,
-                    },
-                ];
-                menu_nav(&mut game.menu_sel, items.len(), &audio);
+                // The manual, if it is up, is drawn over the menu and answers
+                // to its own keys: H and K open it on the controls and the
+                // codex, ← and → turn the pages, and Esc drops back to the menu
+                // — which never went anywhere, because the phase does not move
+                // while the manual is open over it (see `Game::menu_manual`).
                 clear_background(Color::new(0.03, 0.04, 0.06, 1.0));
                 draw_sky(Color::new(0.06, 0.07, 0.11, 1.0));
-                menu_rects = hud::draw_menu(
-                    &fonts,
-                    i18n::t(Key::Title),
-                    Some(i18n::t(Key::Subtitle)),
-                    &items,
-                    game.menu_sel,
-                );
-                for i in 0..menu_rects.len() {
-                    if hovered(&menu_rects, i) {
-                        game.menu_sel = i;
+                if handle_manual_keys(&mut game, &audio, true) {
+                    draw_manual(&game, &fonts);
+                } else {
+                    let items = [
+                        hud::MenuItem {
+                            label: i18n::t(Key::NewCampaign),
+                            enabled: true,
+                        },
+                        // Where the player left off. Disabled on a fresh save,
+                        // so a first run cannot offer a mission that has never
+                        // been reached.
+                        hud::MenuItem {
+                            label: i18n::t(Key::ContinueGame),
+                            enabled: game.unlocked > 1,
+                        },
+                        hud::MenuItem {
+                            label: i18n::t(Key::SelectMission),
+                            enabled: true,
+                        },
+                        hud::MenuItem {
+                            label: i18n::t(Key::HowToPlay),
+                            enabled: true,
+                        },
+                        hud::MenuItem {
+                            label: i18n::t(Key::Codex),
+                            enabled: true,
+                        },
+                        hud::MenuItem {
+                            label: i18n::t(Key::Settings),
+                            enabled: true,
+                        },
+                        hud::MenuItem {
+                            label: i18n::t(Key::Quit),
+                            enabled: true,
+                        },
+                    ];
+                    menu_nav(&mut game.menu_sel, items.len(), &audio);
+                    menu_rects = hud::draw_menu(
+                        &fonts,
+                        i18n::t(Key::Title),
+                        Some(i18n::t(Key::Subtitle)),
+                        &items,
+                        game.menu_sel,
+                    );
+                    let moved = mouse_moved(&mut game.menu_mouse);
+                    let hover = menu_rects.iter().position(hovered_rect);
+                    game.menu_sel = hover_selection(game.menu_sel, hover, moved);
+                    let enter = is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter);
+                    let choose =
+                        |i: usize| (enter && game.menu_sel == i) || clicked(&menu_rects, i);
+                    if choose(0) {
+                        audio.play(Sfx::UiClick);
+                        game.new_campaign();
+                    } else if choose(1) {
+                        // Continues where the player was, not where the menu
+                        // left the highlight.
+                        audio.play(Sfx::UiClick);
+                        game.start(resume_mission(game.unlocked, game.last_mission));
+                    } else if choose(2) {
+                        audio.play(Sfx::UiClick);
+                        game.phase = Phase::MissionSelect;
+                        game.menu_sel = 0;
+                    } else if choose(3) {
+                        audio.play(Sfx::UiClick);
+                        game.open_menu_manual(0);
+                    } else if choose(4) {
+                        audio.play(Sfx::UiClick);
+                        game.open_menu_manual(1);
+                    } else if choose(5) {
+                        audio.play(Sfx::UiClick);
+                        game.phase = Phase::Settings;
+                        game.settings_sel = 0;
+                    } else if choose(6) {
+                        break;
                     }
-                }
-                let enter = is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter);
-                let choose = |i: usize| (enter && game.menu_sel == i) || clicked(&menu_rects, i);
-                if choose(0) {
-                    audio.play(Sfx::UiClick);
-                    game.start(0);
-                } else if choose(1) {
-                    audio.play(Sfx::UiClick);
-                    game.phase = Phase::MissionSelect;
-                    game.menu_sel = 0;
-                } else if choose(2) {
-                    audio.play(Sfx::UiClick);
-                    game.phase = Phase::Settings;
-                    game.settings_sel = 0;
-                } else if choose(3) {
-                    break;
                 }
             }
 
@@ -933,11 +1619,12 @@ async fn main() {
                     &items,
                     game.menu_sel,
                 );
-                for (i, (rect, item)) in menu_rects.iter().zip(items.iter()).enumerate() {
-                    if item.enabled && hovered_rect(rect) {
-                        game.menu_sel = i;
-                    }
-                }
+                let moved = mouse_moved(&mut game.menu_mouse);
+                let hover = menu_rects
+                    .iter()
+                    .zip(items.iter())
+                    .position(|(rect, item)| item.enabled && hovered_rect(rect));
+                game.menu_sel = hover_selection(game.menu_sel, hover, moved);
                 let enter = is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter);
                 let n = items.len();
                 for (i, (rect, item)) in menu_rects.iter().zip(items.iter()).enumerate() {
@@ -965,6 +1652,9 @@ async fn main() {
                 } else {
                     i18n::t(Key::AimHold)
                 };
+                // Rows in the order the change handler below reads them:
+                // 0 sensitivity, 1 volume, 2 aim mode, 3 lean mode, 4 invert Y,
+                // 5 show FPS, 6 fullscreen, 7 resolution, 8 language, 9 back.
                 let rows = [
                     format!(
                         "{}  {:.2}",
@@ -996,14 +1686,31 @@ async fn main() {
                         i18n::t(Key::ShowFps),
                         if game.settings.show_fps { on } else { off }
                     ),
+                    format!(
+                        "{}  {}",
+                        i18n::t(Key::Fullscreen),
+                        if game.settings.fullscreen { on } else { off }
+                    ),
+                    format!(
+                        "{}  {} × {}",
+                        i18n::t(Key::Resolution),
+                        game.settings.width,
+                        game.settings.height
+                    ),
                     format!("{}  {}", i18n::t(Key::Language), i18n::lang().label()),
                     i18n::t(Key::Back).to_string(),
                 ];
+                let resolution_row = 7;
                 let items: Vec<hud::MenuItem> = rows
                     .iter()
-                    .map(|r| hud::MenuItem {
+                    .enumerate()
+                    .map(|(i, r)| hud::MenuItem {
                         label: r.as_str(),
-                        enabled: true,
+                        // The resolution row is dimmed while fullscreen: the mode
+                        // decides the size then, so a left/right press records
+                        // the choice — it is applied by the change that leaves
+                        // fullscreen — without anything moving now.
+                        enabled: i != resolution_row || !game.settings.fullscreen,
                     })
                     .collect();
 
@@ -1020,29 +1727,56 @@ async fn main() {
                     game.settings_sel,
                 );
 
-                if left || right {
-                    let d = if right { 1.0 } else { -1.0 };
+                // The mouse works here the way it works on the other menus:
+                // moving it selects the row under it, and clicking a row steps
+                // that row's value exactly as the right arrow does. There is no
+                // Apply button anywhere in this game, so a click means "change
+                // this" rather than "arm this" — and BACK is left to the code
+                // below, which is what a click on it is for.
+                let back = items.len() - 1;
+                let moved = mouse_moved(&mut game.menu_mouse);
+                let hover = menu_rects.iter().position(hovered_rect);
+                game.settings_sel = hover_selection(game.settings_sel, hover, moved);
+                let clicked_row = menu_rects.iter().position(clicked_rect);
+                if let Some(i) = clicked_row {
+                    game.settings_sel = i;
+                }
+                let step = if clicked_row == Some(back) {
+                    None
+                } else if right || clicked_row.is_some() {
+                    Some(1.0)
+                } else if left {
+                    Some(-1.0)
+                } else {
+                    None
+                };
+
+                if let Some(d) = step {
                     match game.settings_sel {
                         0 => {
                             game.settings.sensitivity =
                                 (game.settings.sensitivity + d * 0.10).clamp(0.30, 5.0)
                         }
                         1 => {
-                            game.settings.volume =
-                                (game.settings.volume + d * 0.05).clamp(0.0, 1.0);
-                            audio.set_master(game.settings.volume);
+                            game.settings.volume = (game.settings.volume + d * 0.05).clamp(0.0, 1.0)
                         }
                         2 => game.settings.aim_toggle = !game.settings.aim_toggle,
                         3 => game.settings.lean_toggle = !game.settings.lean_toggle,
                         4 => game.settings.invert_y = !game.settings.invert_y,
                         5 => game.settings.show_fps = !game.settings.show_fps,
-                        6 => i18n::set_lang(i18n::lang().next()),
+                        6 => game.settings.fullscreen = !game.settings.fullscreen,
+                        7 => step_resolution(&mut game.settings, right),
+                        8 => i18n::set_lang(i18n::lang().next()),
                         _ => {}
                     }
                     audio.play(Sfx::UiMove);
+                    // One exit for every row: the runtime side effects and the
+                    // file are both written from the finished settings, so a row
+                    // that forgets to save cannot exist.
+                    apply_settings(&mut game, &mut audio);
                 }
                 let enter = is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter);
-                if (enter && game.settings_sel == 7) || clicked(&menu_rects, 7) {
+                if (enter && game.settings_sel == back) || clicked(&menu_rects, back) {
                     audio.play(Sfx::UiBack);
                     game.phase = Phase::Menu;
                     game.menu_sel = 0;
@@ -1084,21 +1818,6 @@ async fn main() {
             Phase::Paused => {
                 pointer::clip(false);
                 pointer::show(true);
-                let items = [
-                    hud::MenuItem {
-                        label: i18n::t(Key::Resume),
-                        enabled: true,
-                    },
-                    hud::MenuItem {
-                        label: i18n::t(Key::Restart),
-                        enabled: true,
-                    },
-                    hud::MenuItem {
-                        label: i18n::t(Key::MainMenu),
-                        enabled: true,
-                    },
-                ];
-                menu_nav(&mut game.menu_sel, items.len(), &audio);
                 clear_background(Color::new(0.02, 0.03, 0.04, 1.0));
                 draw_rectangle(
                     0.0,
@@ -1107,26 +1826,55 @@ async fn main() {
                     screen_height(),
                     Color::new(0.0, 0.0, 0.0, 0.55),
                 );
-                menu_rects =
-                    hud::draw_menu(&fonts, i18n::t(Key::Paused), None, &items, game.menu_sel);
-                for i in 0..menu_rects.len() {
-                    if hovered(&menu_rects, i) {
-                        game.menu_sel = i;
-                    }
-                }
-                let enter = is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter);
-                for i in 0..3 {
-                    if (enter && game.menu_sel == i) || clicked(&menu_rects, i) {
-                        audio.play(Sfx::UiClick);
-                        match i {
-                            0 => game.resume_play(),
-                            1 => game.start(game.mission_index),
-                            _ => {
-                                game.phase = Phase::Menu;
-                                game.menu_sel = 0;
+                // The manual opens over the pause screen the same way it does
+                // over the main menu, and Esc puts the pause screen back.
+                if handle_manual_keys(&mut game, &audio, true) {
+                    draw_manual(&game, &fonts);
+                } else {
+                    let items = [
+                        hud::MenuItem {
+                            label: i18n::t(Key::Resume),
+                            enabled: true,
+                        },
+                        hud::MenuItem {
+                            label: i18n::t(Key::Restart),
+                            enabled: true,
+                        },
+                        hud::MenuItem {
+                            label: i18n::t(Key::HowToPlay),
+                            enabled: true,
+                        },
+                        hud::MenuItem {
+                            label: i18n::t(Key::Codex),
+                            enabled: true,
+                        },
+                        hud::MenuItem {
+                            label: i18n::t(Key::MainMenu),
+                            enabled: true,
+                        },
+                    ];
+                    menu_nav(&mut game.menu_sel, items.len(), &audio);
+                    menu_rects =
+                        hud::draw_menu(&fonts, i18n::t(Key::Paused), None, &items, game.menu_sel);
+                    let moved = mouse_moved(&mut game.menu_mouse);
+                    let hover = menu_rects.iter().position(hovered_rect);
+                    game.menu_sel = hover_selection(game.menu_sel, hover, moved);
+                    let enter = is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter);
+                    for i in 0..items.len() {
+                        if (enter && game.menu_sel == i) || clicked(&menu_rects, i) {
+                            audio.play(Sfx::UiClick);
+                            match i {
+                                0 => game.resume_play(),
+                                1 => game.start(game.mission_index),
+                                2 => game.open_menu_manual(0),
+                                3 => game.open_menu_manual(1),
+                                _ => {
+                                    game.phase = Phase::Menu;
+                                    game.menu_sel = 0;
+                                }
                             }
+                            break;
                         }
-                        break;
                     }
                 }
             }
@@ -1186,11 +1934,9 @@ async fn main() {
                 };
                 menu_rects =
                     hud::draw_result(&fonts, title, success, &rows, &labels, game.result_sel);
-                for i in 0..menu_rects.len() {
-                    if hovered(&menu_rects, i) {
-                        game.result_sel = i;
-                    }
-                }
+                let moved = mouse_moved(&mut game.menu_mouse);
+                let hover = menu_rects.iter().position(hovered_rect);
+                game.result_sel = hover_selection(game.result_sel, hover, moved);
                 let enter = is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter);
                 for i in 0..labels.len() {
                     if !((enter && game.result_sel == i) || clicked(&menu_rects, i)) {
@@ -1201,6 +1947,7 @@ async fn main() {
                     let is_retry = i == if has_next { 1 } else { 0 };
                     if is_next {
                         game.unlocked = game.unlocked.max(game.mission_index + 2);
+                        save_progress(&game);
                         game.start(game.mission_index + 1);
                     } else if is_retry {
                         game.start(game.mission_index);
@@ -1231,7 +1978,8 @@ fn format_time(secs: f32) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
-/// Tab / M / J and the Esc-to-close behaviour for the full-screen overlays.
+/// Tab / M / J / H / K, the manual's page keys, and the Esc-to-close behaviour
+/// for the full-screen overlays.
 fn handle_overlay_keys(game: &mut Game, audio: &audio::Audio) {
     let was_open = game.overlay != Overlay::None;
     if is_key_pressed(KeyCode::Tab) {
@@ -1258,15 +2006,68 @@ fn handle_overlay_keys(game: &mut Game, audio: &audio::Audio) {
         };
         audio.play(Sfx::UiClick);
     }
+    // The manual, on the same overlay slot as the other screens and on the
+    // same keys as it answers to over a menu. Esc is left to the line below,
+    // which closes whichever screen is up; this one has already cleared the
+    // overlay by then if the manual was the one showing.
+    handle_manual_keys(game, audio, false);
     if is_key_pressed(KeyCode::Escape) && game.overlay != Overlay::None {
         game.overlay = Overlay::None;
         audio.play(Sfx::UiBack);
+    }
+    // Only the manual has a built page to let go of, and only while it is the
+    // screen on top — one of the other keys above may just have taken the
+    // overlay from it. For the rest this is a no-op, and the rows are built
+    // again the next time it opens.
+    if game.overlay != Overlay::Manual {
+        game.close_manual();
     }
     // The pointer roamed free while the overlay was up; start a fresh baseline
     // so closing it does not snap the view.
     if was_open && game.overlay == Overlay::None {
         game.mouse_ready = false;
     }
+}
+
+/// The manual's own keys, in either place it opens.
+///
+/// `H` and `K` open it on the controls and the codex, `←`/`→` turn the page and
+/// Esc shuts it. Only the slot that keeps it up differs between the two places
+/// — the field's overlay, which is what holds the simulation still behind it,
+/// and `Game::menu_manual` over the menus, which have no world to hold still —
+/// so that is the one thing the caller passes in. Returns whether the manual is
+/// showing afterwards.
+fn handle_manual_keys(game: &mut Game, audio: &audio::Audio, over_menu: bool) -> bool {
+    let was_open = if over_menu {
+        game.menu_manual
+    } else {
+        game.overlay == Overlay::Manual
+    };
+    let jump = manual_jump_key();
+    let (open, page) = manual_after_keys(
+        was_open,
+        game.manual_page,
+        jump,
+        manual_turn_key(),
+        is_key_pressed(KeyCode::Escape),
+    );
+    if open {
+        // Jumping to the page that is already showing still answers the key
+        // with a move, rather than looking like the key did nothing.
+        if jump.is_some() || !was_open || page != game.manual_page {
+            game.show_manual_page(page);
+            audio.play(if was_open { Sfx::UiMove } else { Sfx::UiClick });
+        }
+    } else if was_open {
+        game.close_manual();
+        audio.play(Sfx::UiBack);
+    }
+    if over_menu {
+        game.menu_manual = open;
+    } else if open {
+        game.overlay = Overlay::Manual;
+    }
+    open
 }
 
 fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
@@ -1935,6 +2736,7 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
         game.score += mission.score_bonus;
         if game.mission_index + 1 < campaign::count() {
             game.unlocked = game.unlocked.max(game.mission_index + 2);
+            save_progress(game);
         }
         game.phase = Phase::Result;
         game.result_sel = 0;
@@ -2127,9 +2929,14 @@ fn render_world(game: &mut Game, fonts: &hud::Fonts) {
     fog::Fog::end();
     set_default_camera();
 
+    // The red edge is the "you are about to die" signal, not a per-hit flash.
+    // A hit already draws a bearing arc and moves the health bar, and a
+    // screen-wide wash on every one of them stacks into noise in a firefight —
+    // so the wash carries madness alone, and the vignette lights up on its own
+    // when health or sanity is nearly gone.
     let madness = (1.0 - game.player.sanity_ratio()) * 0.7;
     hud::draw_vignette(
-        game.player.hurt_flash.max(madness),
+        madness,
         game.player.health < 30.0 || game.player.sanity_ratio() < 0.25,
     );
     hud::draw_kill_flash(game.effects.kill_flash);
@@ -2156,6 +2963,7 @@ fn render_world(game: &mut Game, fonts: &hud::Fonts) {
         Overlay::Inventory => draw_inventory_overlay(game, fonts),
         Overlay::Map => draw_map_overlay(game, fonts),
         Overlay::Mission => draw_mission_overlay(game, fonts),
+        Overlay::Manual => draw_manual(game, fonts),
         Overlay::None => {}
     }
 }
@@ -2450,4 +3258,22 @@ fn draw_mission_overlay(game: &Game, fonts: &hud::Fonts) {
         &sections,
         &footer,
     );
+}
+
+/// The manual's page, as the field and the menus both draw it.
+///
+/// The rows come out of `Game`'s cache — built when the page was opened or
+/// turned to, never here — so this only draws. The pager counts pages from one,
+/// which is why the stored page is bumped on the way out.
+fn draw_manual(game: &Game, fonts: &hud::Fonts) {
+    let page = game.manual_page + 1;
+    match &game.manual_cache {
+        Some(ManualContent::Controls { sections, tips }) => {
+            hud::draw_manual_controls(fonts, page, MANUAL_PAGES, sections, tips);
+        }
+        Some(ManualContent::Cards { title, rows }) => {
+            hud::draw_manual_cards(fonts, page, MANUAL_PAGES, i18n::t(*title), rows);
+        }
+        None => {}
+    }
 }

@@ -1320,7 +1320,11 @@ pub fn draw_menu(
     backdrop(&ui);
 
     let cx = w * 0.5;
-    let ty = h * 0.20 + ui.s(30.0);
+    // A long list needs the header to move up: with ten rows the authored
+    // 20% title block would leave the last two rows off the bottom of a 720p
+    // window, and the settings screen is one row away from that already.
+    let head = if items.len() > 6 { h * 0.11 } else { h * 0.20 };
+    let ty = head + ui.s(30.0);
     tracked_c(f, title, cx, ty, ui.s(54.0), INK, ui.s(10.0));
 
     let mut rule_y = ty + ui.s(26.0);
@@ -1343,6 +1347,24 @@ pub fn draw_menu(
         rule_y + ui.s(46.0),
         (w * 0.42).clamp(ui.s(360.0), ui.s(520.0)),
     )
+}
+
+/// Row height and gutter for a menu list of `n` items given the room below
+/// `top`, in `Ui` units. The authored list is 50 units of row and 10 of gutter,
+/// which is what a short list always gets; a long one is squeezed until it
+/// fits, down to a floor that still holds the label.
+///
+/// Split out of the drawing so the fit can be asserted: the settings screen is
+/// one row away from the point where the old fixed pitch ran off a 720p window,
+/// and an eleventh setting must not quietly do it again.
+fn list_metrics(n: usize, room: f32, authored: f32) -> (f32, f32) {
+    let room = sane(room, 1.0).max(1.0);
+    let authored = sane(authored, 60.0).max(1.0);
+    let n = n.max(1) as f32;
+    let pitch = (room / n).min(authored);
+    let ih = (pitch * (50.0 / 60.0)).max(authored * (20.0 / 60.0));
+    let gap = (pitch - ih).max(0.0);
+    (ih, gap)
 }
 
 /// Full-screen mission result panel.
@@ -1481,8 +1503,16 @@ fn item_list(
     top: f32,
     iw: f32,
 ) -> Vec<(f32, f32, f32, f32)> {
-    let ih = ui.s(50.0);
-    let gap = ui.s(10.0);
+    // The list has to fit the window it lands in: four screens share this, the
+    // settings screen has ten rows, and `Ui` stops growing at 1.5 — so past
+    // 1080p the layout space stops growing with the screen while the authored
+    // pitch does not, and the last rows ran off the bottom. Rows shrink (down to
+    // a floor that still holds the label) rather than overflow; at 720p the
+    // authored pitch only binds when the list is short.
+    let (ih, gap) = list_metrics(items.len(), screen_height() - ui.s(26.0) - top, ui.s(60.0));
+    // The row's contents are authored against the full 50-unit row, so a
+    // squeezed row scales its type with itself.
+    let k = (ih / ui.s(50.0)).clamp(0.3, 1.0);
 
     let x = cx - iw * 0.5;
     let mut rects = Vec::with_capacity(items.len());
@@ -1517,24 +1547,25 @@ fn item_list(
         f.text(
             &format!("{:02}", i + 1),
             x + ui.s(20.0),
-            y + ih * 0.5 + ui.s(6.0),
-            ui.s(14.0),
+            y + ih * 0.5 + ui.s(6.0) * k,
+            ui.s(14.0) * k,
             fade(INK, 0.35 * a),
         );
+        let label_size = ui.s(20.0) * k;
         f.text(
-            &fit(f, item.label, ui.s(20.0), iw - ui.s(100.0)),
+            &fit(f, item.label, label_size, iw - ui.s(100.0)),
             x + ui.s(58.0),
-            y + ih * 0.5 + ui.s(7.0),
-            ui.s(20.0),
+            y + ih * 0.5 + ui.s(7.0) * k,
+            label_size,
             fade(INK, if sel { a } else { 0.72 * a }),
         );
         if sel {
             let mx = x + iw - ui.s(34.0);
             let my = y + ih * 0.5;
             draw_triangle(
-                vec2(mx, my - ui.s(7.0)),
-                vec2(mx, my + ui.s(7.0)),
-                vec2(mx + ui.s(11.0), my),
+                vec2(mx, my - ui.s(7.0) * k),
+                vec2(mx, my + ui.s(7.0) * k),
+                vec2(mx + ui.s(11.0) * k, my),
                 fade(accent(), a),
             );
         }
@@ -1662,6 +1693,33 @@ fn hint_line(f: &Fonts, ui: &Ui, text: &str, cx: f32, y: f32) {
     draw_rectangle_lines(bx, by, bw, bh, 1.0, fade(INK, 0.20));
     corner_marks(bx, by, bw, bh, ui.s(7.0), ui.s(2.0), fade(accent(), 0.55));
     tracked_c(f, text, cx, y + ui.s(2.0), size, fade(INK, 0.62), ui.s(2.0));
+}
+
+/// Separator between the hints of one footer, the same one the mission panel
+/// puts between its hints in `main.rs`.
+const HINT_SEP: &str = "   ·   ";
+
+thread_local! {
+    /// A footer's hints are joined into one reused buffer rather than formatted
+    /// into a fresh `String`: an overlay redraws its footer every frame it is
+    /// open, and the hints themselves never change.
+    static HINTS: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// Draws an overlay's footer: its own hints first, then whatever else the
+/// screen wants to advertise, joined into the one boxed line the module uses.
+fn overlay_hints(f: &Fonts, ui: &Ui, hints: &[&str], cx: f32, y: f32) {
+    HINTS.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        buf.clear();
+        for (i, hint) in hints.iter().enumerate() {
+            if i > 0 {
+                buf.push_str(HINT_SEP);
+            }
+            buf.push_str(hint);
+        }
+        hint_line(f, ui, buf.as_str(), cx, y);
+    });
 }
 
 /// Centres a `pw` x `ph` overlay panel on the screen. The width is clipped to
@@ -1979,10 +2037,10 @@ pub fn draw_inventory(f: &Fonts, s: &InventoryState) {
         CYAN,
     );
 
-    hint_line(
+    overlay_hints(
         f,
         &ui,
-        i18n::t(Key::HintClose),
+        &[i18n::t(Key::HintClose)],
         px + pw * 0.5,
         py + ph - ui.s(26.0),
     );
@@ -2300,7 +2358,7 @@ pub fn draw_map(
         fade(INK, 0.45),
     );
 
-    hint_line(f, &ui, i18n::t(Key::HintClose), w * 0.5, h - ui.s(24.0));
+    overlay_hints(f, &ui, &[i18n::t(Key::HintClose)], w * 0.5, h - ui.s(24.0));
 }
 
 // --- J: mission panel -----------------------------------------------------
@@ -2602,6 +2660,1048 @@ pub fn draw_wheel(
     }
 }
 
+// --- field manual ---------------------------------------------------------
+
+/// One row of the controls page: what to press, and what it does. Both strings
+/// arrive already localised, so the page is a pure function of its data.
+pub struct HelpRow {
+    pub keys: &'static str,
+    pub text: &'static str,
+}
+
+/// A titled group of control rows.
+pub struct HelpSection {
+    pub title: &'static str,
+    pub rows: &'static [HelpRow],
+}
+
+/// One card in the manual: an archetype, a weapon or a piece of kit.
+///
+/// `stats` is written by `codex` out of the same tables the simulation reads, so
+/// the manual cannot drift from the game. `portrait` is the archetype's own
+/// model in its local space with its feet on `y = 0`, drawn flat.
+pub struct CodexRow {
+    pub name: &'static str,
+    pub tag: &'static str,
+    pub note: &'static str,
+    pub stats: String,
+    pub swatch: Color,
+    pub portrait: Option<Mesh>,
+}
+
+// The manual's own measurements, in layout units. Its pages are authored
+// against the same 1280x720 the rest of the module is, but with more room per
+// item than the HUD gives its readouts: a page here exists to be read, and its
+// items are few enough (four groups of keys, a page of cards) to afford it.
+/// Padding inside the manual's panel.
+const MAN_PAD: f32 = 22.0;
+/// Top of the panel down to the top of the content: the band the heading and
+/// its rule live in.
+const MAN_HEAD: f32 = 74.0;
+/// The band at the foot of the panel the hint line and the pager live in.
+const MAN_FOOT: f32 = 46.0;
+/// A section's own heading, and the space that follows a section.
+const MAN_SEC_HEAD: f32 = 22.0;
+const MAN_SEC_GAP: f32 = 13.0;
+/// A control row: the height it is authored at, the floor it may be squeezed to
+/// on a short window, and the size of each of its two halves.
+const MAN_ROW_H: f32 = 19.0;
+const MAN_ROW_MIN: f32 = 14.0;
+const MAN_KEY_SIZE: f32 = 12.5;
+const MAN_TEXT_SIZE: f32 = 14.0;
+/// The narrowest the key column may be squeezed to before the bindings start
+/// truncating.
+const MAN_KEY_MIN: f32 = 52.0;
+/// Gutter between the controls page's two columns.
+const MAN_COL_GAP: f32 = 34.0;
+/// The goal paragraph: its label, its leading, and the most lines it may take
+/// before the key groups are the ones paying for it.
+const MAN_GOAL_LABEL: f32 = 26.0;
+const MAN_GOAL_LEAD: f32 = 17.0;
+const MAN_GOAL_SIZE: f32 = 14.0;
+const MAN_GOAL_MAX: usize = 2;
+/// The survival notes: the rule above them, and their type size.
+const MAN_TIPS_HEAD: f32 = 26.0;
+const MAN_TIP_SIZE: f32 = 13.5;
+/// The card grid: its gutter, the padding inside a card, the shortest card
+/// worth drawing, and the most columns a page may ever use.
+const MAN_CARD_GAP: f32 = 10.0;
+const MAN_CARD_PAD: f32 = 10.0;
+const MAN_CARD_MIN: f32 = 46.0;
+const MAN_CARD_MAX_COLS: usize = 3;
+/// A portrait: the width of the well it stands in, and the height it is drawn
+/// at when its card can afford one.
+const MAN_PORTRAIT_W: f32 = 62.0;
+const MAN_PORTRAIT_H: f32 = 90.0;
+/// Card type: the name, the tag, the stat line and the note, with the leading
+/// they share — the authored one, and the floor a short card squeezes to. A
+/// card offers all four lines and draws the ones it has room for.
+const MAN_CARD_LINES: usize = 4;
+const MAN_CARD_NAME: f32 = 16.0;
+const MAN_CARD_TAG: f32 = 12.0;
+const MAN_CARD_STATS: f32 = 12.0;
+const MAN_CARD_NOTE: f32 = 11.5;
+const MAN_CARD_LEAD: f32 = 20.0;
+const MAN_CARD_MIN_LEAD: f32 = 12.0;
+
+// Every rectangle on a manual page is worked out here, before a shape is drawn:
+// layout that can be exercised without a window or a font is layout that can be
+// checked, and the fit of a page is exactly the kind of thing that is otherwise
+// only found by looking at it.
+
+/// The manual's content area, in layout units: the panel with its padding off,
+/// from the rule under the title to the top of the footer. `uw` and `uh` are
+/// the window measured in layout units, which is what `Ui` scaling divides out.
+fn manual_body(uw: f32, uh: f32) -> (f32, f32, f32, f32) {
+    let x = MARGIN + MAN_PAD;
+    let top = MARGIN + MAN_HEAD;
+    let right = (sane(uw, 0.0) - MARGIN - MAN_PAD).max(x);
+    let bottom = (sane(uh, 0.0) - MARGIN - MAN_FOOT).max(top);
+    (x, top, right - x, bottom - top)
+}
+
+/// The baseline of an overlay's footer hints, in layout units: high enough in
+/// the panel that the box `hint_line` draws around them stays inside it.
+fn manual_footer_y(uh: f32) -> f32 {
+    sane(uh, 0.0) - MARGIN - 10.0
+}
+
+/// Height of one control section at `row_h` per row: its heading, its rows, and
+/// the gap that follows it.
+fn section_height(rows: usize, row_h: f32) -> f32 {
+    MAN_SEC_HEAD + rows as f32 * sane(row_h, 0.0).max(0.0) + MAN_SEC_GAP
+}
+
+/// Index of the section the second column starts at: sections join the first
+/// column until it holds at least half of the page's height. Groups of similar
+/// size split down the middle, and one long group keeps a column to itself
+/// instead of being cut in two.
+fn column_split(sections: &[HelpSection], row_h: f32) -> usize {
+    let n = sections.len();
+    // Fewer than two groups is nothing to balance, and they all go left: an
+    // empty first column reads as a broken layout rather than as a choice.
+    if n < 2 {
+        return n;
+    }
+    let total: f32 = sections
+        .iter()
+        .map(|s| section_height(s.rows.len(), row_h))
+        .sum();
+    let half = total * 0.5;
+    let mut split = 0;
+    let mut filled = 0.0;
+    while split + 1 < n && filled < half {
+        filled += section_height(sections[split].rows.len(), row_h);
+        split += 1;
+    }
+    split
+}
+
+/// Row height a page can afford: `rows` rows plus `fixed` units of headings
+/// have to fit into `avail`, and the answer is clamped to `min..=nominal`.
+///
+/// The height is only ever squeezed, never stretched — a page with room to
+/// spare keeps the spacing it was authored with — and a nonsense `avail` falls
+/// back to the authored height rather than to a negative one.
+fn fitted_row_h(rows: usize, fixed: f32, avail: f32, nominal: f32, min: f32) -> f32 {
+    let lo = sane(min, 1.0).max(0.1);
+    let hi = sane(nominal, lo).max(lo);
+    let fixed = sane(fixed, 0.0).max(0.0);
+    if rows == 0 {
+        return hi;
+    }
+    let avail = sane(avail, fixed + hi * rows as f32);
+    ((avail - fixed) / rows as f32).clamp(lo, hi)
+}
+
+/// Width of the controls page's key column: the widest binding plus the gap
+/// after it, capped so the description keeps the larger share of the row.
+fn key_column(widest: f32, col_w: f32, min_w: f32) -> f32 {
+    let col_w = sane(col_w, 0.0).max(0.0);
+    let min_w = sane(min_w, 0.0).max(0.0);
+    let cap = (col_w * 0.46).max(min_w);
+    (sane(widest, 0.0).max(0.0) + 12.0).clamp(min_w, cap)
+}
+
+/// How many columns a card page needs to show every card at least `min_h` units
+/// tall: as few as will do, capped at `max_cols` and at one column per card.
+fn card_columns(rows: usize, avail_h: f32, min_h: f32, max_cols: usize) -> usize {
+    let rows = rows.max(1);
+    let max_cols = max_cols.max(1);
+    let avail = sane(avail_h, 0.0).max(0.0);
+    let min_h = sane(min_h, 1.0).max(0.1);
+    let per_col = (avail / min_h).floor().max(1.0);
+    let need = (rows as f32 / per_col).ceil().max(1.0);
+    // The cap is what keeps a short window from turning a card page into a wall
+    // of slivers; a page always shows at least one card.
+    (need as usize).clamp(1, max_cols).min(rows)
+}
+
+/// Rect of card `i` in a grid `cols` wide, in layout units.
+///
+/// Cards fill down a column before the next column starts, so the order the
+/// rows arrive in is the order they are read in — a bestiary is ordered by the
+/// mission that introduces each archetype, and reading across would interleave
+/// two of them.
+fn card_rect(
+    i: usize,
+    rows: usize,
+    cols: usize,
+    area: (f32, f32, f32, f32),
+    gap: f32,
+) -> (f32, f32, f32, f32) {
+    let (ax, ay, aw, ah) = area;
+    let (ax, ay) = (sane(ax, 0.0), sane(ay, 0.0));
+    let (aw, ah) = (sane(aw, 0.0).max(0.0), sane(ah, 0.0).max(0.0));
+    let gap = sane(gap, 0.0).max(0.0);
+    if rows == 0 {
+        return (ax, ay, 0.0, 0.0);
+    }
+    let i = i.min(rows - 1);
+    let cols = cols.clamp(1, rows);
+    let per_col = rows.div_ceil(cols);
+    let cw = ((aw - gap * (cols as f32 - 1.0)) / cols as f32).max(0.0);
+    let ch = ((ah - gap * (per_col as f32 - 1.0)) / per_col as f32).max(0.0);
+    let (col, row) = (i / per_col, i % per_col);
+    (
+        ax + col as f32 * (cw + gap),
+        ay + row as f32 * (ch + gap),
+        cw,
+        ch,
+    )
+}
+
+/// Room inside a card, in layout units: what is left of its height once its
+/// padding is off. Never negative, whatever card it is handed.
+fn card_room(card_h: f32, pad: f32) -> f32 {
+    (sane(card_h, 0.0).max(0.0) - 2.0 * sane(pad, 0.0).max(0.0)).max(0.0)
+}
+
+/// Lines a card of `card_h` units has room for. The name, tag, stats and note
+/// are offered in that order and whatever does not fit is dropped, so a short
+/// card loses its prose and never its name; at least one line is always
+/// reported, because a card with no room at all still has to draw something.
+fn card_lines(card_h: f32, pad: f32, min_lead: f32, max_lines: usize) -> usize {
+    let lead = sane(min_lead, 1.0).max(0.1);
+    ((card_room(card_h, pad) / lead).floor() as usize).clamp(1, max_lines.max(1))
+}
+
+/// Leading between a card's lines: the room divided by the lines that fit,
+/// inside the range the four type sizes can live with.
+fn card_lead(card_h: f32, pad: f32, lines: usize, max_lead: f32, min_lead: f32) -> f32 {
+    let lo = sane(min_lead, 1.0).max(0.1);
+    let hi = sane(max_lead, lo).max(lo);
+    (card_room(card_h, pad) / lines.max(1) as f32).clamp(lo, hi)
+}
+
+/// The pager's label. A page number off either end is clamped into range rather
+/// than printed: "0 / 0" and "7 / 3" both read as a bug in the manual instead of
+/// as a page that is stuck, which is what they are.
+fn page_label(out: &mut String, page: usize, pages: usize) -> &str {
+    let last = pages.max(1);
+    put(out, format_args!("{} / {}", page.clamp(1, last), last));
+    out.as_str()
+}
+
+/// Greedy line breaks for a paragraph: `out` is filled with the byte ranges of
+/// the lines that fit `max_w` at `size`, breaking between words. `measure` is
+/// the font's width function, taken as a parameter so the breaking can be
+/// exercised without a font.
+///
+/// A word wider than a whole line is cut at the last character that fits rather
+/// than allowed to overflow, and every line takes at least one character, so a
+/// nonsense width can only produce one glyph per line — never a loop that does
+/// not end.
+fn wrap_ranges(
+    s: &str,
+    size: f32,
+    max_w: f32,
+    measure: &dyn Fn(&str, f32) -> f32,
+    out: &mut Vec<(usize, usize)>,
+) {
+    out.clear();
+    let max_w = sane(max_w, 0.0).max(0.0);
+    let n = s.len();
+    let mut start = 0usize;
+    while start < n {
+        // A line starts on a visible character: the space a break fell on is
+        // dropped rather than indenting the next line.
+        while start < n && s.as_bytes()[start] == b' ' {
+            start += 1;
+        }
+        if start >= n {
+            break;
+        }
+        let mut end = start;
+        let mut brk: Option<usize> = None;
+        for (i, ch) in s[start..].char_indices() {
+            let next = start + i + ch.len_utf8();
+            if measure(&s[start..next], size) > max_w {
+                break;
+            }
+            end = next;
+            if ch == ' ' {
+                brk = Some(next);
+            }
+        }
+        if end == start {
+            // Nothing fits: take one character anyway, so the loop advances.
+            end = start + s[start..].chars().next().map_or(1, char::len_utf8);
+        } else if end < n {
+            if let Some(b) = brk {
+                end = b;
+            }
+        }
+        let mut stop = end;
+        while stop > start && s.as_bytes()[stop - 1] == b' ' {
+            stop -= 1;
+        }
+        out.push((start, stop));
+        start = end;
+    }
+}
+
+thread_local! {
+    /// The manual's scratch, kept between frames: a page redraws every frame it
+    /// is open, so the strings that have to be fitted and the ranges the goal
+    /// wraps into may not be rebuilt from scratch each time.
+    static MAN_TEXT: RefCell<ManualText> = RefCell::new(ManualText::default());
+}
+
+#[derive(Default)]
+struct ManualText {
+    /// Byte ranges of the goal's wrapped lines, in order.
+    goal: Vec<(usize, usize)>,
+    /// One fitted line of text, drawn before the next is written into it: a
+    /// card writes four lines through it in a row and never needs two at once.
+    line: String,
+    /// The pager's label.
+    pager: String,
+}
+
+/// Fits `s` into `max_w` and draws it, through the manual's scratch buffer.
+///
+/// Every string on a manual page comes through here. The cards are a fixed
+/// size and their text is not — a name, a tag and a stat line are the codex's,
+/// and a longer localisation of any of them would otherwise run over the card
+/// beside it.
+fn manual_text(f: &Fonts, s: &str, x: f32, y: f32, size: f32, color: Color, max_w: f32) {
+    MAN_TEXT.with(|cell| {
+        let mut t = cell.borrow_mut();
+        let out = fit_into(&mut t.line, s, size, max_w.max(0.0), &|text, size| {
+            f.width(text, size)
+        });
+        f.text(out, x, y, size, color);
+    });
+}
+
+/// The controls page: the goal, then the key groups in two columns, with the
+/// survival notes at the foot of the second one.
+///
+/// `page` is one-based for the pager; `pages` is how many pages the manual has.
+pub fn draw_manual_controls(
+    f: &Fonts,
+    page: usize,
+    pages: usize,
+    sections: &[HelpSection],
+    tips: &[&str],
+) {
+    let ui = Ui::new();
+    let (w, h) = (screen_width(), screen_height());
+    scrim(0.60);
+    panel(
+        ui.s(MARGIN),
+        ui.s(MARGIN),
+        (w - ui.s(MARGIN * 2.0)).max(0.0),
+        (h - ui.s(MARGIN * 2.0)).max(0.0),
+    );
+    // Everything below is placed in layout units and scaled on the way out.
+    let (uw, uh) = (w / ui.scale, h / ui.scale);
+    heading(
+        f,
+        &ui,
+        i18n::t(Key::HowToPlay),
+        w * 0.5,
+        ui.s(MARGIN + 38.0),
+        ui.s(420.0),
+    );
+    let (bx, by, bw, bh) = manual_body(uw, uh);
+
+    // --- the goal ---------------------------------------------------------
+    tracked(
+        f,
+        i18n::t(Key::ManualGoal),
+        ui.s(bx),
+        ui.s(by + 12.0),
+        ui.s(12.0),
+        mix(INK, accent(), 0.55),
+        ui.s(2.2),
+    );
+
+    // The goal is the page's one piece of prose, so it is wrapped rather than
+    // truncated: a goal the player cannot finish reading is worse than a
+    // shorter list of keys. Lines past the cap end on `..`, from the same
+    // fitter the cards use.
+    let body = i18n::t(Key::ManualGoalBody);
+    let mut ranges = [(0usize, 0usize); MAN_GOAL_MAX];
+    let (drawn, cut) = MAN_TEXT.with(|cell| {
+        let mut t = cell.borrow_mut();
+        // Taken and put back so the buffer keeps its allocation while the
+        // ranges are being written — and so a second borrow of the cell is not
+        // needed to draw them.
+        let mut goal = std::mem::take(&mut t.goal);
+        wrap_ranges(
+            body,
+            ui.s(MAN_GOAL_SIZE),
+            ui.s(bw),
+            &|s, size| f.width(s, size),
+            &mut goal,
+        );
+        let total = goal.len();
+        for (k, r) in goal.iter().take(MAN_GOAL_MAX).enumerate() {
+            ranges[k] = *r;
+        }
+        t.goal = goal;
+        (total.min(MAN_GOAL_MAX), total > MAN_GOAL_MAX)
+    });
+    for (k, &(a, b)) in ranges.iter().take(drawn).enumerate() {
+        let y = ui.s(by + MAN_GOAL_LABEL + k as f32 * MAN_GOAL_LEAD + MAN_GOAL_SIZE * 0.78);
+        if cut && k + 1 == drawn {
+            manual_text(
+                f,
+                &body[a..],
+                ui.s(bx),
+                y,
+                ui.s(MAN_GOAL_SIZE),
+                fade(INK, 0.82),
+                ui.s(bw),
+            );
+        } else {
+            manual_text(
+                f,
+                &body[a..b],
+                ui.s(bx),
+                y,
+                ui.s(MAN_GOAL_SIZE),
+                fade(INK, 0.82),
+                ui.s(bw),
+            );
+        }
+    }
+    let col_top = by + MAN_GOAL_LABEL + drawn as f32 * MAN_GOAL_LEAD + MAN_SEC_GAP;
+
+    // --- the key groups ---------------------------------------------------
+    let col_h = (by + bh - col_top).max(0.0);
+    let col_w = ((bw - MAN_COL_GAP) * 0.5).max(0.0);
+    let split = column_split(sections, MAN_ROW_H).min(sections.len());
+    let (left, right) = sections.split_at(split);
+    let rows_left: usize = left.iter().map(|s| s.rows.len()).sum();
+    let rows_right: usize = right.iter().map(|s| s.rows.len()).sum::<usize>() + tips.len();
+    let fixed_left = left.len() as f32 * (MAN_SEC_HEAD + MAN_SEC_GAP);
+    let fixed_right = right.len() as f32 * (MAN_SEC_HEAD + MAN_SEC_GAP)
+        + if tips.is_empty() {
+            0.0
+        } else {
+            MAN_TIPS_HEAD + MAN_SEC_GAP
+        };
+    // The row height is set by whichever column is taller, both measured at the
+    // authored height: a column with few rows and many headings can still be
+    // the one that does not fit.
+    let (rows_max, fixed_max) = if fixed_left + rows_left as f32 * MAN_ROW_H
+        >= fixed_right + rows_right as f32 * MAN_ROW_H
+    {
+        (rows_left, fixed_left)
+    } else {
+        (rows_right, fixed_right)
+    };
+    let row_h = fitted_row_h(rows_max, fixed_max, col_h, MAN_ROW_H, MAN_ROW_MIN);
+
+    // The bindings are measured once for the whole page and the column is sized
+    // from the widest of them, which is what puts every description at the same
+    // x down the page.
+    let mut widest = 0.0f32;
+    for s in sections {
+        for r in s.rows {
+            widest = widest.max(f.width(r.keys, ui.s(MAN_KEY_SIZE)) / ui.scale);
+        }
+    }
+    let key_w = key_column(widest, col_w, MAN_KEY_MIN);
+
+    let bottom = by + bh;
+    let rx = bx + col_w + MAN_COL_GAP;
+    if sections.is_empty() && tips.is_empty() {
+        // Nothing to lay out: one dash in the middle of the page, which is how
+        // the empty lists elsewhere in this module say the same thing.
+        f.text_c(
+            NONE,
+            ui.s(bx + bw * 0.5),
+            ui.s(col_top + row_h),
+            ui.s(15.0),
+            fade(INK, 0.45),
+        );
+    } else {
+        control_column(f, &ui, left, bx, col_w, col_top, bottom, row_h, key_w);
+        let y = control_column(f, &ui, right, rx, col_w, col_top, bottom, row_h, key_w);
+        tips_block(
+            f,
+            &ui,
+            tips,
+            NotesBlock {
+                x: rx,
+                w: col_w,
+                y,
+                bottom,
+                row_h,
+            },
+        );
+    }
+
+    overlay_hints(
+        f,
+        &ui,
+        &[i18n::t(Key::HintClose), i18n::t(Key::ManualPages)],
+        w * 0.5,
+        ui.s(manual_footer_y(uh)),
+    );
+    pager(f, &ui, page, pages, uw, uh);
+}
+
+/// Draws a run of control sections down one column and returns the y it
+/// finished at. A row that would fall past `bottom` is dropped and marked with
+/// `..` — the degradation every other list in this module uses, and the reason
+/// a page can never draw outside itself.
+#[allow(clippy::too_many_arguments)] // one column of a two-column page
+fn control_column(
+    f: &Fonts,
+    ui: &Ui,
+    sections: &[HelpSection],
+    x: f32,
+    w: f32,
+    mut y: f32,
+    bottom: f32,
+    row_h: f32,
+    key_w: f32,
+) -> f32 {
+    for section in sections {
+        if y + MAN_SEC_HEAD > bottom {
+            break;
+        }
+        section_head(
+            f,
+            ui,
+            section.title,
+            ui.s(x),
+            ui.s(x + w),
+            ui.s(y + 13.0),
+            mix(INK, accent(), 0.55),
+        );
+        y += MAN_SEC_HEAD;
+        for (i, row) in section.rows.iter().enumerate() {
+            if y + row_h > bottom {
+                f.text(
+                    "..",
+                    ui.s(x),
+                    ui.s(y + row_h * 0.5),
+                    ui.s(13.0),
+                    fade(INK, 0.40),
+                );
+                return y;
+            }
+            control_row(f, ui, x, w, y, row_h, row, key_w, i % 2 == 0);
+            y += row_h;
+        }
+        y += MAN_SEC_GAP;
+    }
+    y
+}
+
+/// One control row: the binding in a dark keycap, and what it does beside it.
+///
+/// The keycap is what separates "what to press" from "what it does" without
+/// leaning on a hue — the column alone would leave the two halves of a row
+/// reading as one sentence, which is exactly the misreading left to a
+/// colour-blind player if the split were carried by colour.
+#[allow(clippy::too_many_arguments)] // one row of a key/description table
+fn control_row(
+    f: &Fonts,
+    ui: &Ui,
+    x: f32,
+    w: f32,
+    y: f32,
+    row_h: f32,
+    row: &HelpRow,
+    key_w: f32,
+    band: bool,
+) {
+    if band {
+        draw_rectangle(ui.s(x), ui.s(y), ui.s(w), ui.s(row_h), fade(INK, 0.035));
+    }
+    // The key cap column only exists for rows that split their binding out.
+    // The manual's own rows carry the keys inside the description ("W A S D
+    // move"), so for them the cap would be an empty box pretending to be a
+    // column — and the text starts at the row's left edge instead.
+    let text_x = if row.keys.is_empty() {
+        x
+    } else {
+        let cap_h = (row_h - 5.0).clamp(9.0, 18.0);
+        let cap_w = (key_w - 12.0).max(8.0);
+        let cap_y = y + (row_h - cap_h) * 0.5;
+        draw_rectangle(
+            ui.s(x),
+            ui.s(cap_y),
+            ui.s(cap_w),
+            ui.s(cap_h),
+            Color::new(0.05, 0.06, 0.08, 0.80),
+        );
+        draw_rectangle_lines(
+            ui.s(x),
+            ui.s(cap_y),
+            ui.s(cap_w),
+            ui.s(cap_h),
+            1.0,
+            fade(INK, 0.18),
+        );
+        manual_text(
+            f,
+            row.keys,
+            ui.s(x + 6.0),
+            ui.s(cap_y + cap_h * 0.5 + MAN_KEY_SIZE * 0.36),
+            ui.s(MAN_KEY_SIZE),
+            INK,
+            ui.s(cap_w - 12.0),
+        );
+        x + key_w
+    };
+    manual_text(
+        f,
+        row.text,
+        ui.s(text_x),
+        ui.s(y + row_h * 0.5 + MAN_TEXT_SIZE * 0.36),
+        ui.s(MAN_TEXT_SIZE),
+        fade(INK, 0.85),
+        ui.s(w - (text_x - x)),
+    );
+    draw_rectangle(ui.s(x), ui.s(y + row_h), ui.s(w), 1.0, fade(INK, 0.05));
+}
+
+/// The survival notes: a rule, then one bulleted line each, in the shadow of
+/// the key groups above them. Where the block goes is the caller's business, so
+/// the rectangle travels as one value rather than as four loose numbers.
+struct NotesBlock {
+    x: f32,
+    w: f32,
+    y: f32,
+    bottom: f32,
+    row_h: f32,
+}
+
+fn tips_block(f: &Fonts, ui: &Ui, tips: &[&str], at: NotesBlock) {
+    let NotesBlock {
+        x,
+        w,
+        mut y,
+        bottom,
+        row_h,
+    } = at;
+    if tips.is_empty() || y + MAN_TIPS_HEAD > bottom {
+        return;
+    }
+    draw_rectangle(ui.s(x), ui.s(y + 6.0), ui.s(w), 1.0, fade(INK, 0.14));
+    y += MAN_TIPS_HEAD;
+    for tip in tips {
+        if y + row_h > bottom {
+            f.text(
+                "..",
+                ui.s(x),
+                ui.s(y + row_h * 0.5),
+                ui.s(13.0),
+                fade(INK, 0.40),
+            );
+            return;
+        }
+        // The notes are the manual's opinions rather than its key bindings, and
+        // a square bullet is the cheapest way to say so without reaching for a
+        // second colour to say it with.
+        draw_rectangle(
+            ui.s(x + 1.0),
+            ui.s(y + row_h * 0.5 - 2.0),
+            ui.s(4.0),
+            ui.s(4.0),
+            fade(accent(), 0.85),
+        );
+        manual_text(
+            f,
+            tip,
+            ui.s(x + 14.0),
+            ui.s(y + row_h * 0.5 + MAN_TIP_SIZE * 0.36),
+            ui.s(MAN_TIP_SIZE),
+            fade(INK, 0.78),
+            ui.s(w - 14.0),
+        );
+        y += row_h;
+    }
+}
+
+/// A page of cards: every card on the page at once, in a grid that takes
+/// another column rather than a shorter card.
+pub fn draw_manual_cards(f: &Fonts, page: usize, pages: usize, title: &str, rows: &[CodexRow]) {
+    let ui = Ui::new();
+    let (w, h) = (screen_width(), screen_height());
+    scrim(0.60);
+    panel(
+        ui.s(MARGIN),
+        ui.s(MARGIN),
+        (w - ui.s(MARGIN * 2.0)).max(0.0),
+        (h - ui.s(MARGIN * 2.0)).max(0.0),
+    );
+    let (uw, uh) = (w / ui.scale, h / ui.scale);
+    heading(f, &ui, title, w * 0.5, ui.s(MARGIN + 38.0), ui.s(420.0));
+    let (bx, by, bw, bh) = manual_body(uw, uh);
+
+    if rows.is_empty() {
+        // An empty page says so and stops: there is nothing to lay out, and a
+        // page of nothing but a frame reads as a broken screen.
+        f.text_c(
+            NONE,
+            w * 0.5,
+            ui.s(by + bh * 0.5),
+            ui.s(15.0),
+            fade(INK, 0.45),
+        );
+    } else {
+        // A card the player has to squint at is worse than a longer page, so
+        // the grid grows a column before the cards go short — and an archetype
+        // card needs room for its portrait before anything else is drawn in it.
+        let min_h = if rows.iter().any(|r| r.portrait.is_some()) {
+            MAN_PORTRAIT_H + MAN_CARD_PAD * 2.0
+        } else {
+            MAN_CARD_MIN
+        };
+        let cols = card_columns(rows.len(), bh, min_h, MAN_CARD_MAX_COLS);
+        for (i, row) in rows.iter().enumerate() {
+            let (cx, cy, cw, ch) = card_rect(i, rows.len(), cols, (bx, by, bw, bh), MAN_CARD_GAP);
+            codex_card(f, &ui, row, cx, cy, cw, ch);
+        }
+    }
+
+    overlay_hints(
+        f,
+        &ui,
+        &[i18n::t(Key::HintClose), i18n::t(Key::ManualPages)],
+        w * 0.5,
+        ui.s(manual_footer_y(uh)),
+    );
+    pager(f, &ui, page, pages, uw, uh);
+}
+
+/// One card: the portrait well (archetypes only), the swatch, the name, the
+/// tag, the stat line and, when the card is tall enough to hold it, the note.
+///
+/// Everything here is measured in layout units and scaled on the way out, so a
+/// card keeps its proportions at every window size. Lines are dropped from the
+/// bottom up when the card is short: whatever else a card loses, it keeps the
+/// name it is filed under.
+fn codex_card(f: &Fonts, ui: &Ui, row: &CodexRow, x: f32, y: f32, w: f32, h: f32) {
+    // A card is a plate inside the panel, a shade darker than it, so a grid of
+    // short cards still reads as separate cards rather than as a slab of text.
+    draw_rectangle(
+        ui.s(x),
+        ui.s(y),
+        ui.s(w),
+        ui.s(h),
+        Color::new(0.06, 0.07, 0.09, 0.55),
+    );
+    draw_rectangle_lines(ui.s(x), ui.s(y), ui.s(w), ui.s(h), 1.0, fade(INK, 0.14));
+
+    let pad = MAN_CARD_PAD;
+    let mut tx = x + pad;
+    if let Some(mesh) = &row.portrait {
+        let well_w = MAN_PORTRAIT_W.min((w - pad * 2.0) * 0.45).max(14.0);
+        let well_h = (h - pad * 2.0).max(0.0);
+        // The well: a darker plate for the model to stand in, which is what
+        // keeps a dark silhouette off a dark card edge.
+        draw_rectangle(
+            ui.s(tx),
+            ui.s(y + pad),
+            ui.s(well_w),
+            ui.s(well_h),
+            Color::new(0.02, 0.025, 0.03, 0.60),
+        );
+        draw_rectangle_lines(
+            ui.s(tx),
+            ui.s(y + pad),
+            ui.s(well_w),
+            ui.s(well_h),
+            1.0,
+            fade(INK, 0.10),
+        );
+        let ph = MAN_PORTRAIT_H.min(well_h - 6.0).max(0.0);
+        draw_portrait(
+            mesh,
+            vec2(ui.s(tx + well_w * 0.5), ui.s(y + pad + well_h - 4.0)),
+            ui.s(ph),
+            ui.s((well_w - 6.0).max(0.0)),
+        );
+        tx += well_w + 10.0;
+    }
+
+    let right = x + w - pad;
+    let lines = card_lines(h, pad, MAN_CARD_MIN_LEAD, MAN_CARD_LINES);
+    let lead = card_lead(h, pad, lines, MAN_CARD_LEAD, MAN_CARD_MIN_LEAD);
+    let mut ly = y + pad + lead * 0.80;
+    let name_x = tx + 14.0;
+    let name_w = (right - name_x).max(0.0);
+
+    // The swatch: the one saturated colour on the card, ringed in the plate's
+    // own dark so it reads whatever colour the archetype wears. Everything else
+    // on the card is separated by brightness, so the hue is a label here and
+    // never the only thing that tells two cards apart.
+    let dot = vec2(tx + 5.0, ly - MAN_CARD_NAME * 0.30);
+    draw_circle(ui.s(dot.x), ui.s(dot.y), ui.s(4.2), row.swatch);
+    draw_circle_lines(
+        ui.s(dot.x),
+        ui.s(dot.y),
+        ui.s(4.2),
+        1.0,
+        Color::new(0.02, 0.02, 0.03, 0.90),
+    );
+
+    manual_text(
+        f,
+        row.name,
+        ui.s(name_x),
+        ui.s(ly),
+        ui.s(MAN_CARD_NAME),
+        INK,
+        ui.s(name_w),
+    );
+    if lines >= 2 {
+        ly += lead;
+        manual_text(
+            f,
+            row.tag,
+            ui.s(name_x),
+            ui.s(ly),
+            ui.s(MAN_CARD_TAG),
+            mix(INK, accent(), 0.55),
+            ui.s(name_w),
+        );
+    }
+    if lines >= 3 {
+        ly += lead;
+        manual_text(
+            f,
+            &row.stats,
+            ui.s(name_x),
+            ui.s(ly),
+            ui.s(MAN_CARD_STATS),
+            fade(INK, 0.60),
+            ui.s(name_w),
+        );
+    }
+    if lines >= 4 {
+        ly += lead;
+        manual_text(
+            f,
+            row.note,
+            ui.s(name_x),
+            ui.s(ly),
+            ui.s(MAN_CARD_NOTE),
+            fade(INK, 0.45),
+            ui.s(name_w),
+        );
+    }
+}
+
+/// The pager line, bottom right: which page of how many.
+fn pager(f: &Fonts, ui: &Ui, page: usize, pages: usize, uw: f32, uh: f32) {
+    MAN_TEXT.with(|cell| {
+        let mut t = cell.borrow_mut();
+        let label = page_label(&mut t.pager, page, pages);
+        let size = ui.s(14.0);
+        let x = ui.s(uw - MARGIN - MAN_PAD) - f.width(label, size);
+        f.text(
+            label,
+            x,
+            ui.s(manual_footer_y(uh) + 2.0),
+            size,
+            fade(INK, 0.80),
+        );
+    });
+}
+
+// --- portraits ------------------------------------------------------------
+//
+// The one piece of new geometry in the manual: an archetype's own model, in its
+// own local space with its feet on `y = 0`, drawn flat into its card.
+
+thread_local! {
+    /// Triangle order for the portrait being drawn, kept between frames: the
+    /// sort would otherwise allocate once per portrait per frame, and a card
+    /// page redraws every frame it is open.
+    static PORTRAIT_ORDER: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Screen position of a model-space point in a portrait whose feet stand on
+/// `anchor` (screen pixels).
+///
+/// Two signs are load-bearing here, and both come from the same camera: an
+/// orthographic view of the model's *front*, which is where the player meets
+/// the archetype, so the camera sits on `-z` looking towards `+z` — the model's
+/// own forward is `-z`, the direction `Player::forward` points at yaw 0.
+///
+/// The screen's `y` grows downwards while the model's grows up from its feet,
+/// so the height is *subtracted*: a point above the feet has to come out above
+/// the anchor. Adding it would hang the figure head-down below its own feet,
+/// which is the one error a portrait cannot hide. `x` is negated because that
+/// camera's right hand points along `-x`: the model's `+x` is its left, and its
+/// left belongs on the left of the card.
+fn portrait_point(p: Vec3, anchor: Vec2, scale: f32) -> Vec2 {
+    anchor + vec2(-sane(p.x, 0.0), -sane(p.y, 0.0)) * sane(scale, 0.0)
+}
+
+/// Scale and horizontal centre for a portrait of `mesh` that comes out `height`
+/// units tall and no wider than `max_w`: the scale that makes the model's own
+/// height `height`, and where the middle of its footprint is, so a model built
+/// off-centre is still centred in its card.
+///
+/// A mesh with nothing above the floor has no height to scale from and fits at
+/// zero, which the caller reads as "nothing to draw" — the alternative is a
+/// division by zero and a portrait made of NaNs.
+fn portrait_fit(mesh: &Mesh, height: f32, max_w: f32) -> (f32, f32) {
+    let height = sane(height, 0.0);
+    if height <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let mut top = f32::NEG_INFINITY;
+    let mut left = f32::INFINITY;
+    let mut right = f32::NEG_INFINITY;
+    for v in &mesh.vertices {
+        let p = v.position;
+        if !(p.x.is_finite() && p.y.is_finite()) {
+            continue;
+        }
+        top = top.max(p.y);
+        left = left.min(p.x);
+        right = right.max(p.x);
+    }
+    if !top.is_finite() || top <= 1.0e-3 {
+        return (0.0, 0.0);
+    }
+    // A wide model is held back by the well it has to stand in, even though the
+    // height is what the portrait is measured by.
+    let by_height = height / top;
+    let wide = (right - left).max(0.0);
+    let by_width = if wide > 1.0e-3 && sane(max_w, 0.0) > 0.0 {
+        sane(max_w, by_height) / wide
+    } else {
+        by_height
+    };
+    (by_height.min(by_width), (left + right) * 0.5)
+}
+
+/// Mean depth of triangle `t`: the `z` the painter's algorithm sorts on. An
+/// orthographic view along `z` leaves the depth of a face at the average of its
+/// three corners, and `+z` is *away* from the camera, so a larger depth is
+/// further.
+///
+/// A triangle whose indices point nowhere has no depth at all and sorts to the
+/// far end of the order, where it is drawn first and draws nothing.
+fn tri_depth(mesh: &Mesh, t: usize) -> f32 {
+    let start = t * 3;
+    let mut sum = 0.0;
+    let mut n = 0.0;
+    for k in 0..3 {
+        if let Some(v) = mesh
+            .indices
+            .get(start + k)
+            .and_then(|i| mesh.vertices.get(*i as usize))
+        {
+            sum += sane(v.position.z, 0.0);
+            n += 1.0;
+        }
+    }
+    if n > 0.0 { sum / n } else { f32::INFINITY }
+}
+
+/// Fills `out` with the triangle indices of `mesh`, ordered far to near.
+///
+/// This is the whole of the depth test: a portrait is drawn with the 2D pass
+/// and there is no depth buffer in it, so every triangle of the model — its
+/// back faces included — is filled flat, and this order is the only thing
+/// deciding which one wins. Drawn the other way round, the far side of a torso
+/// paints over the near side and the model reads as a broken box rather than as
+/// a silhouette.
+fn portrait_order(mesh: &Mesh, out: &mut Vec<usize>) {
+    out.clear();
+    out.extend(0..mesh.indices.len() / 3);
+    // `total_cmp` orders the NaN a broken vertex would produce instead of
+    // panicking the way `partial_cmp` would, and the sort is stable, so a mesh
+    // of equally deep triangles keeps the order it was built in.
+    out.sort_by(|a, b| tri_depth(mesh, *b).total_cmp(&tri_depth(mesh, *a)));
+}
+
+/// A vertex's colour as the 2D pass wants it. The models are flat-shaded when
+/// they are built and every corner of a face carries the same colour, so one
+/// triangle is one colour and `draw_triangle` is the whole of the fill.
+fn vertex_colour(v: &Vertex) -> Color {
+    Color::new(
+        v.color[0] as f32 / 255.0,
+        v.color[1] as f32 / 255.0,
+        v.color[2] as f32 / 255.0,
+        v.color[3] as f32 / 255.0,
+    )
+}
+
+/// Draws `mesh` as a portrait `height` pixels tall standing on `feet` (screen
+/// pixels), centred horizontally on it and held inside `max_w`.
+fn draw_portrait(mesh: &Mesh, feet: Vec2, height: f32, max_w: f32) {
+    let (scale, mid_x) = portrait_fit(mesh, height, max_w);
+    // A model with no height, or a nonsense fit, draws nothing rather than
+    // dividing by it. `is_finite` is what keeps a NaN out of the projection.
+    if !scale.is_finite() || scale <= 0.0 {
+        return;
+    }
+    let anchor = vec2(feet.x + mid_x * scale, feet.y);
+    // The contact shadow first, as the one cue that the figure stands in its
+    // well rather than floating over the card.
+    draw_ellipse(
+        anchor.x,
+        anchor.y,
+        (max_w * 0.30).min(height * 0.30).max(0.0),
+        (height * 0.05).max(0.0),
+        0.0,
+        Color::new(0.0, 0.0, 0.0, 0.35),
+    );
+    PORTRAIT_ORDER.with(|cell| {
+        let mut order = cell.borrow_mut();
+        portrait_order(mesh, &mut order);
+        for t in order.iter().copied() {
+            let i = t * 3;
+            let (Some(ia), Some(ib), Some(ic)) = (
+                mesh.indices.get(i),
+                mesh.indices.get(i + 1),
+                mesh.indices.get(i + 2),
+            ) else {
+                continue;
+            };
+            let (Some(va), Some(vb), Some(vc)) = (
+                mesh.vertices.get(*ia as usize),
+                mesh.vertices.get(*ib as usize),
+                mesh.vertices.get(*ic as usize),
+            ) else {
+                continue;
+            };
+            draw_triangle(
+                portrait_point(va.position, anchor, scale),
+                portrait_point(vb.position, anchor, scale),
+                portrait_point(vc.position, anchor, scale),
+                vertex_colour(va),
+            );
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2798,5 +3898,788 @@ mod tests {
         assert_eq!(damage_number_colour(false), INK);
         assert_eq!(damage_number_colour(true), head_colour());
         assert_ne!(damage_number_colour(true), damage_number_colour(false));
+    }
+
+    // --- the manual -------------------------------------------------------
+
+    /// Fixtures for the manual's layout: groups of one, three, six and twelve
+    /// rows, which is what it takes to exercise the split, the squeeze and the
+    /// drop. `HelpRow` borrows nothing, so these can be plain statics.
+    static ROWS1: [HelpRow; 1] = [HelpRow {
+        keys: "TAB",
+        text: "INVENTORY",
+    }];
+    static ROWS3: [HelpRow; 3] = [
+        HelpRow {
+            keys: "W",
+            text: "MOVE",
+        },
+        HelpRow {
+            keys: "SHIFT",
+            text: "SPRINT",
+        },
+        HelpRow {
+            keys: "CTRL",
+            text: "CROUCH",
+        },
+    ];
+    static ROWS6: [HelpRow; 6] = [
+        HelpRow {
+            keys: "W A S D",
+            text: "MOVE",
+        },
+        HelpRow {
+            keys: "SHIFT",
+            text: "SPRINT",
+        },
+        HelpRow {
+            keys: "CTRL",
+            text: "CROUCH",
+        },
+        HelpRow {
+            keys: "SPACE",
+            text: "JUMP",
+        },
+        HelpRow {
+            keys: "Q / E",
+            text: "LEAN",
+        },
+        HelpRow {
+            keys: "MOUSE 1",
+            text: "FIRE",
+        },
+    ];
+    static ROWS12: [HelpRow; 12] = [
+        HelpRow {
+            keys: "W A S D",
+            text: "MOVE",
+        },
+        HelpRow {
+            keys: "SHIFT",
+            text: "SPRINT",
+        },
+        HelpRow {
+            keys: "CTRL",
+            text: "CROUCH",
+        },
+        HelpRow {
+            keys: "SPACE",
+            text: "JUMP",
+        },
+        HelpRow {
+            keys: "Q / E",
+            text: "LEAN",
+        },
+        HelpRow {
+            keys: "MOUSE 1",
+            text: "FIRE",
+        },
+        HelpRow {
+            keys: "R",
+            text: "RELOAD",
+        },
+        HelpRow {
+            keys: "V",
+            text: "MELEE",
+        },
+        HelpRow {
+            keys: "G",
+            text: "GRENADE",
+        },
+        HelpRow {
+            keys: "F",
+            text: "PICK UP",
+        },
+        HelpRow {
+            keys: "1-4",
+            text: "WEAPONS",
+        },
+        HelpRow {
+            keys: "TAB",
+            text: "INVENTORY",
+        },
+    ];
+    /// Four groups of six: the shape a real controls page is expected to have.
+    static FOUR_TYPICAL: [HelpSection; 4] = [
+        HelpSection {
+            title: "MOVEMENT",
+            rows: &ROWS6,
+        },
+        HelpSection {
+            title: "COMBAT",
+            rows: &ROWS6,
+        },
+        HelpSection {
+            title: "INTERFACE",
+            rows: &ROWS6,
+        },
+        HelpSection {
+            title: "SURVIVAL",
+            rows: &ROWS6,
+        },
+    ];
+    static FOUR_EQUAL: [HelpSection; 4] = [
+        HelpSection {
+            title: "MOVEMENT",
+            rows: &ROWS3,
+        },
+        HelpSection {
+            title: "COMBAT",
+            rows: &ROWS3,
+        },
+        HelpSection {
+            title: "INTERFACE",
+            rows: &ROWS3,
+        },
+        HelpSection {
+            title: "SURVIVAL",
+            rows: &ROWS3,
+        },
+    ];
+    /// One group that is heavier than the other three put together.
+    static ONE_LONG: [HelpSection; 2] = [
+        HelpSection {
+            title: "MOVEMENT",
+            rows: &ROWS12,
+        },
+        HelpSection {
+            title: "INTERFACE",
+            rows: &ROWS1,
+        },
+    ];
+    static FOUR_LONG: [HelpSection; 4] = [
+        HelpSection {
+            title: "MOVEMENT",
+            rows: &ROWS12,
+        },
+        HelpSection {
+            title: "COMBAT",
+            rows: &ROWS12,
+        },
+        HelpSection {
+            title: "INTERFACE",
+            rows: &ROWS12,
+        },
+        HelpSection {
+            title: "SURVIVAL",
+            rows: &ROWS12,
+        },
+    ];
+
+    /// The card grid has to put every card on the page, in order, inside the
+    /// area it was given. The reading order is down a column and then across,
+    /// so the first column of the bestiary is the four archetypes the campaign
+    /// meets first.
+    #[test]
+    fn cards_fill_their_area_in_order() {
+        let area = (20.0f32, 30.0, 400.0, 200.0);
+        let (rows, cols, gap) = (8usize, 2usize, 10.0f32);
+        let first = card_rect(0, rows, cols, area, gap);
+        let second = card_rect(1, rows, cols, area, gap);
+        let fifth = card_rect(4, rows, cols, area, gap);
+
+        assert!((second.0 - first.0).abs() < 1e-4, "card 1 left its column");
+        assert!(second.1 > first.1, "card 1 is not below card 0");
+        assert!((fifth.1 - first.1).abs() < 1e-4, "card 4 is not at the top");
+        assert!(fifth.0 > first.0, "card 4 did not start a new column");
+
+        for i in 0..rows {
+            let (x, y, w, h) = card_rect(i, rows, cols, area, gap);
+            assert!(w > 0.0 && h > 0.0, "card {i} has no size: {w}x{h}");
+            assert!(
+                x >= area.0 - 1e-3
+                    && y >= area.1 - 1e-3
+                    && x + w <= area.0 + area.2 + 1e-3
+                    && y + h <= area.1 + area.3 + 1e-3,
+                "card {i} is outside the page: {x},{y} {w}x{h}"
+            );
+            for j in 0..i {
+                let other = card_rect(j, rows, cols, area, gap);
+                let apart = x + w <= other.0 + 1e-3
+                    || other.0 + other.2 <= x + 1e-3
+                    || y + h <= other.1 + 1e-3
+                    || other.1 + other.3 <= y + 1e-3;
+                assert!(apart, "cards {j} and {i} overlap");
+            }
+        }
+
+        // One card takes the whole width, and a nonsense area is empty rather
+        // than negative or NaN.
+        let (_, _, w1, h1) = card_rect(0, 1, 1, area, gap);
+        assert!((w1 - area.2).abs() < 1e-4 && (h1 - area.3).abs() < 1e-4);
+        for bad in [
+            (f32::NAN, f32::NAN, f32::NAN, f32::NAN),
+            (0.0, 0.0, -50.0, -50.0),
+        ] {
+            let (_, _, w, h) = card_rect(3, 8, 2, bad, gap);
+            assert!(w >= 0.0 && h >= 0.0, "a broken area gave {w}x{h}");
+        }
+    }
+
+    /// The grid grows a column before the cards go short: a card the player has
+    /// to squint at is worse than a longer page, and the cap is what stops a
+    /// short window from turning the page into a wall of slivers.
+    #[test]
+    fn card_columns_grows_before_the_cards_shrink() {
+        // Eight archetype cards, each needing room for a 90-unit portrait.
+        assert_eq!(card_columns(8, 490.0, 110.0, 3), 2);
+        // Fourteen kit rows, which are happy at the small card size.
+        assert_eq!(card_columns(14, 490.0, 46.0, 3), 2);
+        // A page that is short on cards keeps one column.
+        assert_eq!(card_columns(4, 490.0, 46.0, 3), 1);
+
+        for rows in [0usize, 1, 3, 40] {
+            let cols = card_columns(rows, 120.0, 60.0, 3);
+            assert!((1..=3).contains(&cols), "rows {rows} gave {cols} columns");
+            assert!(cols <= rows.max(1), "rows {rows} gave {cols} columns");
+        }
+        // Nothing to work with: the cap, and never a zero or a panic.
+        for avail in [0.0f32, -100.0, f32::NAN, f32::INFINITY] {
+            let cols = card_columns(9, avail, 60.0, 3);
+            assert!((1..=3).contains(&cols), "avail {avail} gave {cols} columns");
+        }
+        assert_eq!(
+            card_columns(9, 1000.0, 60.0, 0),
+            1,
+            "a zero cap means a panic"
+        );
+    }
+
+    /// A card loses its prose before it loses its name, and a card with no room
+    /// at all still reports one line and a usable leading rather than a
+    /// negative height.
+    #[test]
+    fn a_card_keeps_its_name_and_drops_its_lower_lines() {
+        // The enemy card at 640x360: four lines, packed into the room available.
+        let lines = card_lines(114.0, MAN_CARD_PAD, MAN_CARD_MIN_LEAD, 4);
+        assert_eq!(lines, 4);
+        let lead = card_lead(114.0, MAN_CARD_PAD, lines, MAN_CARD_LEAD, MAN_CARD_MIN_LEAD);
+        assert!(
+            lead * lines as f32 <= card_room(114.0, MAN_CARD_PAD) + 1e-3,
+            "four lines at {lead} do not fit a 114-unit card"
+        );
+
+        // The kit card at 640x360: three lines.
+        let short = card_lines(60.9, MAN_CARD_PAD, MAN_CARD_MIN_LEAD, 4);
+        assert!((2..4).contains(&short), "{short} lines in a kit card");
+
+        for h in [0.0f32, -20.0, f32::NAN, f32::INFINITY] {
+            let lines = card_lines(h, MAN_CARD_PAD, MAN_CARD_MIN_LEAD, 4);
+            let lead = card_lead(h, MAN_CARD_PAD, lines, MAN_CARD_LEAD, MAN_CARD_MIN_LEAD);
+            assert!(lines >= 1, "a {h}-unit card gave {lines} lines");
+            assert!(
+                lead.is_finite() && lead >= MAN_CARD_MIN_LEAD,
+                "a {h}-unit card gave a leading of {lead}"
+            );
+        }
+        assert_eq!(card_room(f32::NAN, MAN_CARD_PAD), 0.0);
+        assert_eq!(card_room(5.0, MAN_CARD_PAD), 0.0);
+    }
+
+    /// The portrait's projection: the model is y-up with its feet on zero while
+    /// the screen is y-down, so a point above the feet has to come out *above*
+    /// the anchor. Getting this sign wrong is a portrait hanging head-down
+    /// below its own feet, which no amount of shading covers up.
+    #[test]
+    fn a_portrait_stands_on_its_anchor_and_faces_the_viewer() {
+        let anchor = vec2(100.0, 200.0);
+        let scale = 50.0;
+
+        assert_eq!(portrait_point(Vec3::ZERO, anchor, scale), anchor);
+        let head = portrait_point(vec3(0.0, 1.8, 0.0), anchor, scale);
+        assert!(head.y < anchor.y, "the head is below the feet: {head:?}");
+        assert!((head.y - (anchor.y - 90.0)).abs() < 1e-3, "{head:?}");
+        assert!((head.x - anchor.x).abs() < 1e-3, "{head:?}");
+
+        // The front view: the camera is on the model's own `-z`, so the model's
+        // `+x` (its left) comes out on the left of the card.
+        let left = portrait_point(vec3(1.0, 0.0, 0.0), anchor, scale);
+        assert!((left.x - (anchor.x - 50.0)).abs() < 1e-3, "{left:?}");
+        // Depth is not a screen direction under an orthographic view.
+        assert_eq!(portrait_point(vec3(0.0, 0.0, 3.0), anchor, scale), anchor);
+        // A broken vertex must not become a NaN pixel.
+        assert_eq!(
+            portrait_point(vec3(f32::NAN, f32::NAN, 0.0), anchor, scale),
+            anchor
+        );
+    }
+
+    /// The fit: a model twice as tall wants half the scale, a model that stands
+    /// off-centre is centred by the fit rather than by its caller, and a model
+    /// with no height at all fits at zero instead of dividing by it.
+    #[test]
+    fn a_portrait_is_scaled_by_its_own_height() {
+        let mut mb = crate::mesh::MeshBuilder::new();
+        mb.add_box(vec3(-1.0, 0.0, -0.5), vec3(1.0, 2.0, 0.5), WHITE);
+        let mesh = mb.finish();
+        let (scale, mid) = portrait_fit(&mesh, 90.0, 1000.0);
+        assert!((scale - 45.0).abs() < 1e-3, "scale {scale}");
+        assert!(mid.abs() < 1e-3, "centre {mid}");
+
+        let mut mb = crate::mesh::MeshBuilder::new();
+        mb.add_box(vec3(1.0, 0.0, -0.5), vec3(3.0, 1.8, 0.5), WHITE);
+        let mesh = mb.finish();
+        let (scale, mid) = portrait_fit(&mesh, 90.0, 1000.0);
+        assert!((scale - 50.0).abs() < 1e-3, "scale {scale}");
+        assert!((mid - 2.0).abs() < 1e-3, "centre {mid}");
+
+        // The well holds a wide model back even though height is what a
+        // portrait is measured by.
+        let (scale, _) = portrait_fit(&mesh, 90.0, 20.0);
+        assert!((scale - 10.0).abs() < 1e-3, "width-limited scale {scale}");
+
+        let empty = crate::mesh::MeshBuilder::new().finish();
+        assert_eq!(portrait_fit(&empty, 90.0, 100.0), (0.0, 0.0));
+        let flat = {
+            let mut mb = crate::mesh::MeshBuilder::new();
+            mb.add_box(vec3(-1.0, 0.0, -1.0), vec3(1.0, 0.0, 1.0), WHITE);
+            mb.finish()
+        };
+        assert_eq!(portrait_fit(&flat, 90.0, 100.0), (0.0, 0.0));
+        assert_eq!(portrait_fit(&empty, 0.0, 100.0), (0.0, 0.0));
+        assert_eq!(portrait_fit(&empty, f32::NAN, 100.0), (0.0, 0.0));
+    }
+
+    /// The painter's algorithm, which is the whole of the depth test here: with
+    /// no depth buffer, the order *is* the depth test. The far side of a box has
+    /// to be drawn before the near side, or the near faces are painted over by
+    /// the ones behind them and the box reads as broken.
+    #[test]
+    fn a_portrait_draws_far_before_near() {
+        let mut mb = crate::mesh::MeshBuilder::new();
+        mb.add_box(vec3(-0.5, 0.0, -0.5), vec3(0.5, 1.8, 0.5), WHITE);
+        let mesh = mb.finish();
+
+        let mut order = Vec::new();
+        portrait_order(&mesh, &mut order);
+        assert_eq!(order.len(), mesh.indices.len() / 3);
+        assert_eq!(order.len(), 12, "a box is six quads");
+
+        let mut prev = f32::INFINITY;
+        for t in &order {
+            let d = tri_depth(&mesh, *t);
+            assert!(
+                d <= prev + 1e-5,
+                "triangle {t} at depth {d} came after {prev}"
+            );
+            prev = d;
+        }
+        // The camera is on `-z`, so the far face is the `+z` one and it is
+        // drawn first; the near face is drawn last, over it.
+        assert!(
+            tri_depth(&mesh, order[0]) > 0.4,
+            "the far face is not drawn first: {}",
+            tri_depth(&mesh, order[0])
+        );
+        assert!(
+            tri_depth(&mesh, order[order.len() - 1]) < -0.4,
+            "the near face is not drawn last: {}",
+            tri_depth(&mesh, order[order.len() - 1])
+        );
+
+        // Every triangle appears exactly once, whatever the sort does.
+        let mut seen = order.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), order.len());
+
+        // Two triangles drawn by hand, one in front of the other, come back in
+        // the order a painter would use.
+        let pair = Mesh {
+            vertices: vec![
+                Vertex {
+                    position: vec3(0.0, 1.0, -1.0),
+                    uv: Vec2::ZERO,
+                    color: [255, 255, 255, 255],
+                    normal: Vec4::ZERO,
+                },
+                Vertex {
+                    position: vec3(1.0, 0.0, -1.0),
+                    uv: Vec2::ZERO,
+                    color: [255, 255, 255, 255],
+                    normal: Vec4::ZERO,
+                },
+                Vertex {
+                    position: vec3(0.0, 0.0, -1.0),
+                    uv: Vec2::ZERO,
+                    color: [255, 255, 255, 255],
+                    normal: Vec4::ZERO,
+                },
+                Vertex {
+                    position: vec3(0.0, 1.0, 1.0),
+                    uv: Vec2::ZERO,
+                    color: [0, 0, 0, 255],
+                    normal: Vec4::ZERO,
+                },
+                Vertex {
+                    position: vec3(1.0, 0.0, 1.0),
+                    uv: Vec2::ZERO,
+                    color: [0, 0, 0, 255],
+                    normal: Vec4::ZERO,
+                },
+                Vertex {
+                    position: vec3(0.0, 0.0, 1.0),
+                    uv: Vec2::ZERO,
+                    color: [0, 0, 0, 255],
+                    normal: Vec4::ZERO,
+                },
+            ],
+            indices: vec![0, 1, 2, 3, 4, 5],
+            texture: None,
+        };
+        portrait_order(&pair, &mut order);
+        assert_eq!(order, vec![1, 0], "the far triangle is not drawn first");
+
+        // A mesh whose indices point nowhere still sorts and draws nothing,
+        // rather than panicking on the way to the screen.
+        let broken = Mesh {
+            vertices: Vec::new(),
+            indices: vec![0, 1, 2],
+            texture: None,
+        };
+        portrait_order(&broken, &mut order);
+        assert_eq!(order.len(), 1);
+        assert!(tri_depth(&broken, 0).is_infinite());
+    }
+
+    /// The pager is the one label on a page whose number the caller cannot see:
+    /// a page out of range is clamped rather than printed, because "0 / 0" and
+    /// "7 / 3" read as a bug in the manual rather than as a stuck page.
+    #[test]
+    fn the_pager_never_prints_a_page_that_cannot_exist() {
+        let mut buf = String::new();
+        assert_eq!(page_label(&mut buf, 2, 5), "2 / 5");
+        assert_eq!(page_label(&mut buf, 1, 1), "1 / 1");
+        assert_eq!(page_label(&mut buf, 0, 3), "1 / 3");
+        assert_eq!(page_label(&mut buf, 9, 3), "3 / 3");
+        assert_eq!(page_label(&mut buf, 1, 0), "1 / 1");
+        // A count at the end of the range is a caller bug rather than a stuck
+        // page, and all the pager owes it is not to panic.
+        assert!(page_label(&mut buf, usize::MAX, usize::MAX).ends_with(&usize::MAX.to_string()));
+        // The buffer keeps its allocation, so a second call reuses it.
+        let capacity = buf.capacity();
+        assert_eq!(page_label(&mut buf, 2, 2), "2 / 2");
+        assert_eq!(buf.capacity(), capacity);
+    }
+
+    /// Long text is cut to the width it has and never past it, and the cut is
+    /// visible. The measure here is a character count, so the arithmetic is
+    /// exact and the test needs no font.
+    #[test]
+    fn long_card_text_is_cut_to_its_width() {
+        let measure = |s: &str, _size: f32| s.chars().count() as f32;
+        let mut buf = String::new();
+        // Text that fits comes back whole.
+        assert_eq!(
+            fit_into(&mut buf, "JUGGERNAUT", 1.0, 12.0, &measure),
+            "JUGGERNAUT"
+        );
+        // Text that does not ends on `..`, stays inside the width, and is a
+        // prefix of what it was cut from.
+        for (text, w) in [
+            ("JUGGERNAUT", 8.0f32),
+            ("重装兵重装兵", 5.0),
+            ("BREACHER 12", 6.0),
+        ] {
+            let out = fit_into(&mut buf, text, 1.0, w, &measure);
+            assert!(
+                out.chars().count() as f32 <= w.max(2.0),
+                "{out:?} is wider than {w}"
+            );
+            assert!(out.ends_with(".."), "{out:?} is not marked as cut");
+            let kept = out.trim_end_matches('.');
+            assert!(
+                text.starts_with(kept),
+                "{out:?} is not a prefix of {text:?}"
+            );
+            assert!(!kept.is_empty(), "{out:?} kept nothing of a {w}-wide line");
+        }
+        // A width with no room for even the dots still terminates.
+        let out = fit_into(&mut buf, "W", 1.0, 0.0, &measure);
+        assert_eq!(out, "..");
+    }
+
+    /// Wrapping is what keeps the goal paragraph inside its column: no line is
+    /// wider than the room it was given, every line is a slice of the text, and
+    /// the lines are in order.
+    #[test]
+    fn the_goal_wraps_inside_its_column() {
+        let measure = |s: &str, _size: f32| s.chars().count() as f32;
+        let mut lines = Vec::new();
+        let text = "CLEAR THE SECTOR AND REACH THE EXTRACTION POINT";
+        wrap_ranges(text, 1.0, 12.0, &measure, &mut lines);
+        assert!(lines.len() > 1, "the text should not have fitted one line");
+
+        let mut end = 0usize;
+        for (a, b) in &lines {
+            let line = &text[*a..*b];
+            assert!(
+                line.chars().count() as f32 <= 12.0,
+                "{line:?} is wider than the column"
+            );
+            assert!(*a >= end && b > a, "lines ran backwards at {a}..{b}");
+            end = *b;
+        }
+        // Every word survives, once, in order.
+        let joined: String = lines
+            .iter()
+            .map(|(a, b)| &text[*a..*b])
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(joined, text);
+
+        // A word wider than a whole line is cut rather than dropped, and a
+        // nonsense width can only produce one character per line — never a loop
+        // that does not end.
+        wrap_ranges("SUPERCALIFRAGILISTIC", 1.0, 5.0, &measure, &mut lines);
+        assert_eq!(lines.len(), 4);
+        for (a, b) in &lines {
+            assert!(b > a, "a line made no progress: {a}..{b}");
+        }
+        wrap_ranges("ABC", 1.0, f32::NAN, &measure, &mut lines);
+        assert_eq!(lines.len(), 3);
+        wrap_ranges("", 1.0, 10.0, &measure, &mut lines);
+        assert!(lines.is_empty());
+    }
+
+    /// The two columns of the controls page are balanced by height: groups of
+    /// similar size split down the middle, and one long group keeps a column to
+    /// itself rather than being cut in two.
+    #[test]
+    fn the_controls_page_balances_its_two_columns() {
+        assert_eq!(column_split(&FOUR_EQUAL, MAN_ROW_H), 2);
+        assert_eq!(column_split(&ONE_LONG, MAN_ROW_H), 1);
+        // Nothing to balance: one group goes left, none at all does not panic.
+        assert_eq!(column_split(&FOUR_EQUAL[..1], MAN_ROW_H), 1);
+        assert_eq!(column_split(&[], MAN_ROW_H), 0);
+        // A taller row height makes the same groups heavier, and the split
+        // still has to leave both columns with something.
+        for row_h in [MAN_ROW_MIN, MAN_ROW_H, 40.0, f32::NAN] {
+            let split = column_split(&FOUR_EQUAL, row_h);
+            assert!((1..FOUR_EQUAL.len()).contains(&split), "row_h {row_h}");
+        }
+        // The heights the split is made from are the heights the page draws.
+        let tall = section_height(12, MAN_ROW_H);
+        let short = section_height(1, MAN_ROW_H);
+        assert!(tall > short && short > 0.0);
+        assert_eq!(section_height(0, MAN_ROW_H), MAN_SEC_HEAD + MAN_SEC_GAP);
+    }
+
+    /// A page with room to spare keeps the spacing it was authored with, a
+    /// tight one is squeezed to the floor but never past it, and a nonsense one
+    /// falls back to the authored height rather than to a negative one.
+    #[test]
+    fn a_short_page_squeezes_its_rows_without_escaping_its_bounds() {
+        assert_eq!(
+            fitted_row_h(4, 100.0, 900.0, MAN_ROW_H, MAN_ROW_MIN),
+            MAN_ROW_H
+        );
+        let tight = fitted_row_h(30, 100.0, 600.0, MAN_ROW_H, MAN_ROW_MIN);
+        assert!((tight - 500.0 / 30.0).abs() < 1e-3, "{tight}");
+        assert!(tight < MAN_ROW_H && tight > MAN_ROW_MIN, "{tight}");
+        // Tighter than the floor allows: the floor, and no further.
+        assert_eq!(
+            fitted_row_h(40, 100.0, 600.0, MAN_ROW_H, MAN_ROW_MIN),
+            MAN_ROW_MIN
+        );
+        assert_eq!(
+            fitted_row_h(0, 100.0, 600.0, MAN_ROW_H, MAN_ROW_MIN),
+            MAN_ROW_H
+        );
+        for avail in [f32::NAN, f32::INFINITY, -50.0, 0.0] {
+            let h = fitted_row_h(6, 100.0, avail, MAN_ROW_H, MAN_ROW_MIN);
+            assert!(
+                h.is_finite() && (MAN_ROW_MIN..=MAN_ROW_H).contains(&h),
+                "avail {avail} gave {h}"
+            );
+        }
+        // A caller that swaps the two bounds gets a height, not a panic.
+        let h = fitted_row_h(6, 0.0, 600.0, 10.0, 20.0);
+        assert!(h.is_finite() && h >= 20.0, "{h}");
+    }
+
+    /// The key column is sized from the widest binding on the page, and capped
+    /// so the description always keeps the larger share of the row.
+    #[test]
+    fn the_key_column_gives_the_description_the_wider_half() {
+        assert!((key_column(60.0, 600.0, MAN_KEY_MIN) - 72.0).abs() < 1e-3);
+        let capped = key_column(500.0, 400.0, MAN_KEY_MIN);
+        assert!(capped <= 400.0 * 0.46 + 1e-3, "{capped}");
+        assert!(capped >= MAN_KEY_MIN);
+        assert_eq!(key_column(f32::NAN, 0.0, MAN_KEY_MIN), MAN_KEY_MIN);
+        assert!(key_column(-5.0, 300.0, MAN_KEY_MIN) >= MAN_KEY_MIN);
+        assert!(key_column(10_000.0, 300.0, MAN_KEY_MIN) >= MAN_KEY_MIN);
+    }
+
+    /// The windows the manual is actually read in. 1280x720 is what the layout
+    /// is authored against; 640x360 is the smallest the game is played at, and
+    /// there `Ui` has already hit its own floor (0.55), so the layout units
+    /// available are *fewer* than at 1280x720 rather than merely smaller —
+    /// about 1164 x 655 against 1280 x 720. What fits at 640x360 fits anywhere
+    /// above it.
+    /// The settings screen is the long list, and the window sizes the game is
+    /// actually played in have to show every row of it: at 720p the layout
+    /// space is 720 units and at 1080p it is the same 720 (the `Ui` scale is
+    /// capped at 1.5), so the honest thing to check is the units.
+    #[test]
+    fn a_long_menu_fits_the_window_it_is_played_in() {
+        // 720 units of layout space, minus the header and the bottom margin:
+        // roughly what the settings screen gets at 1280x720 and at 1920x1080.
+        let room = 720.0 - 342.0 - 26.0;
+        for n in 1..=12usize {
+            let (ih, gap) = list_metrics(n, room, 60.0);
+            assert!(ih >= 20.0 && gap >= 0.0, "n={n}: {ih} / {gap}");
+            let bottom = n as f32 * (ih + gap);
+            assert!(
+                bottom <= room + 0.001,
+                "n={n}: the list needs {bottom} of {room} units"
+            );
+            assert!(ih.is_finite() && gap.is_finite());
+        }
+
+        // A short list keeps the authored pitch exactly.
+        let (ih, gap) = list_metrics(4, room, 60.0);
+        assert_eq!(ih, 50.0);
+        assert_eq!(gap, 10.0);
+
+        // Nonsense in, sane out: no NaN, no negative row.
+        for (n, room) in [(0usize, 0.0f32), (10, f32::NAN), (10, -50.0)] {
+            let (ih, gap) = list_metrics(n, room, 60.0);
+            assert!(ih > 0.0 && ih.is_finite(), "n={n} room={room}: {ih}");
+            assert!(gap >= 0.0 && gap.is_finite(), "n={n} room={room}: {gap}");
+        }
+    }
+
+    #[test]
+    fn the_manual_fits_the_windows_it_is_played_in() {
+        let tips = [
+            "RELOAD BEHIND COVER",
+            "WATCH THE FLANKS",
+            "MOVE AFTER FIRING",
+            "SAVE THE MEDKITS",
+        ];
+        for (w, h) in [(1280.0f32, 720.0f32), (640.0, 360.0)] {
+            let scale = (h / REF_H).clamp(0.55, 1.5);
+            let (uw, uh) = (w / scale, h / scale);
+            let (bx, by, bw, bh) = manual_body(uw, uh);
+            assert!(bw > 0.0 && bh > 0.0, "{w}x{h}: no body: {bw}x{bh}");
+
+            // The bestiary: eight cards, and every card wants a portrait.
+            let ecols = card_columns(
+                8,
+                bh,
+                MAN_PORTRAIT_H + MAN_CARD_PAD * 2.0,
+                MAN_CARD_MAX_COLS,
+            );
+            let (_, _, ecw, ech) = card_rect(7, 8, ecols, (bx, by, bw, bh), MAN_CARD_GAP);
+            let elines = card_lines(ech, MAN_CARD_PAD, MAN_CARD_MIN_LEAD, 4);
+            assert_eq!(ecols, 2, "{w}x{h}: the bestiary wanted {ecols} columns");
+            assert!(
+                ech >= MAN_PORTRAIT_H + MAN_CARD_PAD * 2.0 - 1e-3,
+                "{w}x{h}: an enemy card is {ech} tall, too short for a portrait"
+            );
+            assert!(elines >= 3, "{w}x{h}: an enemy card holds {elines} lines");
+
+            // The armoury: fourteen rows, no portraits.
+            let kcols = card_columns(14, bh, MAN_CARD_MIN, MAN_CARD_MAX_COLS);
+            let (_, _, kcw, kch) = card_rect(13, 14, kcols, (bx, by, bw, bh), MAN_CARD_GAP);
+            let klines = card_lines(kch, MAN_CARD_PAD, MAN_CARD_MIN_LEAD, 4);
+            assert_eq!(kcols, 2, "{w}x{h}: the kit page wanted {kcols} columns");
+            assert!(kch >= MAN_CARD_MIN - 1e-3, "{w}x{h}: a kit card is {kch}");
+            assert!(klines >= 2, "{w}x{h}: a kit card holds {klines} lines");
+            assert!(
+                ecw > 0.0 && kcw > 0.0 && kcw + MAN_CARD_GAP + ecw <= bw + 1e-3,
+                "{w}x{h}: the two columns do not fit side by side"
+            );
+
+            // The controls page: four groups of six keys, plus four notes.
+            let split = column_split(&FOUR_TYPICAL, MAN_ROW_H);
+            let (left, right) = FOUR_TYPICAL.split_at(split);
+            let rows_left: usize = left.iter().map(|s| s.rows.len()).sum();
+            let rows_right: usize = right.iter().map(|s| s.rows.len()).sum::<usize>() + tips.len();
+            let fixed_left = left.len() as f32 * (MAN_SEC_HEAD + MAN_SEC_GAP);
+            let fixed_right =
+                right.len() as f32 * (MAN_SEC_HEAD + MAN_SEC_GAP) + MAN_TIPS_HEAD + MAN_SEC_GAP;
+            let tall_left = fixed_left + rows_left as f32 * MAN_ROW_H;
+            let tall_right = fixed_right + rows_right as f32 * MAN_ROW_H;
+            let (rows_max, fixed_max) = if tall_left >= tall_right {
+                (rows_left, fixed_left)
+            } else {
+                (rows_right, fixed_right)
+            };
+            let goal = MAN_GOAL_LABEL + MAN_GOAL_MAX as f32 * MAN_GOAL_LEAD + MAN_SEC_GAP;
+            let avail = (bh - goal).max(0.0);
+            let row_h = fitted_row_h(rows_max, fixed_max, avail, MAN_ROW_H, MAN_ROW_MIN);
+            let used = fixed_max + rows_max as f32 * row_h;
+            assert_eq!(
+                split,
+                2,
+                "{w}x{h}: four equal groups split {split}/{}",
+                FOUR_TYPICAL.len() - split
+            );
+            assert!(
+                used <= avail + 1e-3,
+                "{w}x{h}: the controls page overflows by {} units",
+                used - avail
+            );
+            assert!(
+                row_h >= MAN_ROW_MIN,
+                "{w}x{h}: rows squeezed to {row_h}, under the {MAN_ROW_MIN} floor"
+            );
+
+            println!(
+                "{w}x{h}: units {uw:.0}x{uh:.0} | body {bw:.0}x{bh:.0} | \
+                 bestiary {ecols} cols, card {ecw:.0}x{ech:.0}, {elines} lines | \
+                 kit {kcols} cols, card {kcw:.0}x{kch:.0}, {klines} lines | \
+                 controls {split}+{} groups, rows {rows_left}/{rows_right}, \
+                 row_h {row_h:.1}, column {used:.0}/{avail:.0}",
+                FOUR_TYPICAL.len() - split
+            );
+        }
+
+        // Below anything the game is played at, and above it: nothing may come
+        // out negative, NaN or off the page. 320x200 is where `Ui`'s 0.55 floor
+        // squeezes the whole layout into 582x364 units; 4K is where the 1.5
+        // ceiling stops the layout growing.
+        for (w, h) in [(320.0f32, 200.0f32), (4000.0, 2400.0)] {
+            let scale = (h / REF_H).clamp(0.55, 1.5);
+            let (uw, uh) = (w / scale, h / scale);
+            let (bx, by, bw, bh) = manual_body(uw, uh);
+            assert!(bw > 0.0 && bh > 0.0, "{w}x{h}: body {bw}x{bh}");
+            assert!(uw / scale >= 0.0 && uh.is_finite());
+            let cols = card_columns(
+                8,
+                bh,
+                MAN_PORTRAIT_H + MAN_CARD_PAD * 2.0,
+                MAN_CARD_MAX_COLS,
+            );
+            for i in 0..8 {
+                let (x, y, cw, ch) = card_rect(i, 8, cols, (bx, by, bw, bh), MAN_CARD_GAP);
+                assert!(cw > 0.0 && ch > 0.0 && x.is_finite() && y.is_finite());
+                assert!(
+                    x >= bx - 1e-3
+                        && y >= by - 1e-3
+                        && x + cw <= bx + bw + 1e-3
+                        && y + ch <= by + bh + 1e-3,
+                    "{w}x{h}: card {i} is off the page"
+                );
+                let lines = card_lines(ch, MAN_CARD_PAD, MAN_CARD_MIN_LEAD, 4);
+                let lead = card_lead(ch, MAN_CARD_PAD, lines, MAN_CARD_LEAD, MAN_CARD_MIN_LEAD);
+                assert!(lines >= 1 && lead.is_finite() && lead > 0.0, "{w}x{h}");
+            }
+            // The portrait's well is never a negative height, whatever the card
+            // shrinks to.
+            let (_, _, _, ch) = card_rect(0, 8, cols, (bx, by, bw, bh), MAN_CARD_GAP);
+            let ph = MAN_PORTRAIT_H.min((ch - MAN_CARD_PAD * 2.0).max(0.0) - 6.0);
+            assert!(ph.is_finite());
+            let row_h = fitted_row_h(
+                FOUR_LONG.len() * 12,
+                100.0,
+                (bh * 0.5).max(0.0),
+                MAN_ROW_H,
+                MAN_ROW_MIN,
+            );
+            assert!(row_h.is_finite() && (MAN_ROW_MIN..=MAN_ROW_H).contains(&row_h));
+        }
     }
 }

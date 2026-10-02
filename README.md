@@ -37,16 +37,23 @@ weapon sway and spread; and it changes how far away enemies can spot you
 You cannot stand up under a low ceiling — the game checks headroom and keeps you
 down until there is room.
 
-Movement runs on the Quake/Source model rather than on an acceleration cap.
-Ground acceleration is a rate (12 /s) that can only add speed along the
-direction you are pushing, ground friction (12 /s) bleeds speed off whenever you
-are over the cap the stance and weapon allow, and air control is deliberately
-weak (2.6 /s) — releasing the keys slides you about 0.77 m at sprint speed. The
-model is integrated in fixed 1/120 s substeps, at most eight per frame, so a
-frame that stalls degrades the step instead of spiralling, because these
-constants stop meaning the same thing at a different step length. One tick after
-touchdown is exempt from friction, which is the classic window a bunny hop needs
-to survive a landing.
+Movement keeps the Quake/Source shape — an acceleration rate rather than an
+acceleration cap, so one second of held input adds a fixed fraction of the speed
+cap to the velocity's projection on the wish direction — but the cap itself
+binds everywhere: on the ground, in the air, and along the way. Ground
+acceleration is 15 /s (the old 95 m/s², at walking speed), air control is
+deliberately weak (2.6 /s), and the speed a stance and weapon allow is a
+ceiling, not a suggestion: the velocity is clamped after the acceleration, so a
+hop cannot bank speed the legs never had and holding the jump key is not a
+faster way to travel. Letting go of the keys brakes through friction (20 /s on
+the ground, 6 /s in the air) and `STOP_SPEED` keeps the last two metres per
+second from turning the stop into a crawl: a released run at walking speed
+slides 0.23 m and is over in a tenth of a second, a sprint 0.34 m. The model is
+integrated in fixed 1/120 s substeps, at most eight per frame, so a frame that
+stalls degrades the step instead of spiralling, because these constants stop
+meaning the same thing at a different step length. Setting `AIR_FRICTION` to
+zero re-opens the air — a strafe jump then accelerates past the cap again, which
+is the one thing this game deliberately does not want.
 
 ### Looking
 
@@ -116,11 +123,116 @@ or by moving faster than a walk — you cannot patch up mid-sprint.
 | Inventory | `Tab` |
 | Map | `M` |
 | Mission panel | `J` |
+| How to play (the manual's first page) | `H` |
+| Codex — hostiles, weapons and kit | `K` |
+| Next / previous manual page | `Left` / `Right` |
 | Close a screen | `Esc` or the same key again |
 | Pause | `Esc` |
+| Settings — mouse, volume, fullscreen, resolution, language | Main menu |
 
 The map only plots hostiles that are currently aware of you, so it does not
 double as a wallhack.
+
+Settings are the one screen that is not reached by a key: they hang off the main
+menu, and every row saves itself the moment it changes — see *Settings* below.
+
+### The field manual
+
+`H` and `K` open a three-page manual, and both are also on the main menu, which
+is where a new player meets them before ever holding a gun. Page one is how the
+game is played: the objective (clear the arena, then reach extraction — there is
+no mid-mission save), every binding grouped by what it is for, and the survival
+notes that are not obvious from a key list (armour soaks 65% of a hit, nothing
+shoots you without line of sight, sanity is drained by what you look at rather
+than by what hits you, sprint is a tap rather than a hold).
+
+Page two is the bestiary: one card per archetype, carrying its own model as a
+portrait and the numbers the simulation actually uses — health, speed, damage,
+range and rate are read out of `enemy::stats` when the page is built, so a
+balance change cannot leave the manual lying. The tactic line under each card is
+derived from those numbers rather than invented. Page three does the same for
+the seven weapons (damage, rate in rounds per minute, magazine, reload, spread
+and recoil) and the kit.
+
+The whole thing is built when a page is opened and dropped when it closes, so
+the drawing path allocates nothing, and the world is frozen behind it like the
+other screens.
+
+---
+
+## Settings
+
+The settings screen is on the main menu, and every row saves itself the moment it
+changes: there is no Apply button and nothing to confirm.
+
+| Row | Values |
+| --- | --- |
+| MOUSE SENSITIVITY | 0.30 – 5.00 in steps of 0.10 |
+| MASTER VOLUME | 0 – 100% in steps of 5% |
+| AIM MODE | Toggle or hold, for aiming down the sights |
+| LEAN MODE | Toggle or hold, for leaning on `Q` / `E` |
+| INVERT MOUSE Y | On / off |
+| SHOW FPS | On / off |
+| FULLSCREEN | On / off — borderless fullscreen, applied immediately |
+| RESOLUTION | 1280 × 720, 1600 × 900, 1920 × 1080, 2560 × 1440 |
+| LANGUAGE | 中文 / English |
+
+`←` and `→` change the selected row, `↑` and `↓` move between rows, and the last
+row, BACK, returns to the menu on `Enter` or a click. The mouse works on every
+menu in the game and does not fight the keyboard: moving the cursor onto a row
+selects that row, but a cursor that is merely *parked* over one leaves the
+selection to the arrow keys — otherwise the highlight would snap back under the
+pointer on the next frame. Clicking a settings row steps its value, exactly as
+`→` does; there is no Apply button anywhere, so a click means "change this".
+
+The resolution row walks its presets and wraps at both ends, and it only touches
+the window while the game is windowed: in fullscreen the display decides the
+size, so the row is dimmed and the choice is kept for the moment the game returns
+to a window. A size in the settings file that is not one of the presets — a
+hand-edit, or one written by an older build — is carried in the list as an extra
+entry rather than snapped to the nearest preset, so nothing quietly rewrites it.
+
+### The settings file
+
+Settings persist between runs, in one small text file per user:
+
+| Platform | Path |
+| --- | --- |
+| Windows | `%APPDATA%\steel-front\config` |
+| Linux | `$XDG_CONFIG_HOME/steel-front/config`, or `~/.config/steel-front/config` when `XDG_CONFIG_HOME` is unset |
+
+The format is `key = value`, one per line, with `#` comments — the file is meant
+to be readable and editable by hand:
+
+```text
+# STEEL FRONT settings. Delete this file to go back to the defaults.
+fullscreen = false
+width = 1280
+height = 720
+sensitivity = 1.6
+volume = 0.8
+aim_toggle = true
+lean_toggle = true
+invert_y = false
+show_fps = false
+lang = zh
+unlocked = 1
+last_mission = 0
+```
+
+Unknown keys are ignored, so a file written by a newer build still loads, and a
+line that cannot be read costs its own setting and nothing else: the rest of the
+file is kept. **Delete the file and the next launch is a fresh install** —
+defaults everywhere, with no other state to clear. Nothing is ever written next
+to the executable, because a game that ships as one file has to run from
+anywhere; on a machine with none of the directories above it runs on its defaults
+and saves nothing rather than guessing at a location.
+
+The last two keys are the campaign: `unlocked` is how many missions the player
+has reached and `last_mission` is the one they were in. Every mission start
+writes them, so **continue** on the main menu resumes exactly where the game was
+left rather than at the chapter select; deleting the file starts the campaign
+over. `unlocked = 400` in a hand-edited file is clamped rather than believed.
 
 ---
 
@@ -288,10 +400,12 @@ src/
   weapon.rs     weapon defs and build resolver, arsenal, damage falloff
   grenade.rs    thrown physics, bouncing, fuses, frag blasts and smoke clouds
   combat.rs     hitscan resolution against level and enemies
+  config.rs     the settings file: path, format, and its failure behaviour
   viewmodel.rs  first-person weapon, projected to 2D
   pickup.rs     health / ammo / armor drops
   effects.rs    particles, tracers, hit markers, damage readouts
-  hud.rs        text, HUD, menus, combat feedback overlays
+  hud.rs        text, HUD, menus, combat feedback overlays, the manual's pages
+  codex.rs      the manual's content: controls, bestiary, armoury and kit
   audio.rs      25 procedurally synthesised effects with file override
   assets.rs     the embedded-asset table, the one place a path is named
   surface.rs    the six world textures and their sampling
@@ -551,7 +665,10 @@ harness problem, not a game bug — but it is worth knowing before concluding
 ## Known limitations
 
 - Audio is absent from the cross-compiled Linux build (see above).
-- No save file: campaign progress resets when the process exits.
+- A run in progress is not saved: quitting mid-mission loses the bodies, the
+  score and the wave the mission had reached. The campaign position is kept
+  (`unlocked` / `last_mission` in the settings file), so **continue** puts the
+  player back at the start of the mission they were in.
 - Enemies cannot climb the raised structures, only step over crates under 0.62 m.
   This is deliberate — it gives the player a vertical advantage — but it also means
   a player who camps somewhere unreachable is only threatened by ranged enemies.

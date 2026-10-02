@@ -30,24 +30,33 @@ const MAX_STEPS: f32 = 8.0;
 /// seconds from a standstill whatever the stance, and the rate is what the old
 /// m/s² cap worked out to across the stances — 95 m/s² against 6.6 to 9.2 m/s
 /// of target is 10 to 14 per second.
-const GROUND_ACCEL_RATE: f32 = 12.0;
-/// Air control, deliberately weak: the old 17 m/s² at standing speed. Keeping
-/// it small is what gives the projection rule its character, because the
-/// largest gain comes where the wish direction is perpendicular to the
-/// velocity — the whole mathematics of a strafe jump.
+const GROUND_ACCEL_RATE: f32 = 15.0;
+/// Air control, deliberately weak: the old 17 m/s² at standing speed.
 const AIR_ACCEL_RATE: f32 = 2.6;
 /// Ground friction: speed falls by `1 - FRICTION * dt` per step, so a released
-/// player slides roughly `speed / FRICTION` metres. 12 puts the slide at
-/// sprint speed (0.77 m) where the old 58 m/s² braking accel had it (0.73 m);
-/// Quake's own 4 would be an ice rink at this game's speeds. It runs whenever
-/// the ground speed is over the cap for the moment — which is the released-key
-/// case, and also what brings a player down to the cap after a sprint, a
-/// crouch, a prone drop or the sights coming up.
-const FRICTION: f32 = 12.0;
+/// player slides roughly `speed / FRICTION` metres. 20 is what the old model's
+/// braking worked out to at walking speed — it stopped in 0.37 m and a tenth of
+/// a second — and it is also what brings a player down to the cap after a
+/// sprint, a crouch, a prone drop or the sights coming up. Friction only ever
+/// bites *above* the cap, so holding a key still settles exactly on it.
+const FRICTION: f32 = 20.0;
+/// The speed below which friction stops scaling with speed and becomes a flat
+/// deceleration. Without it the last metre of a slide takes several times as
+/// long as the first, because a proportional drop shrinks with the speed it is
+/// removing — the player feels a slow crawl to a halt with no key held. Quake
+/// and Source both carry this as `stopspeed`; two metres per second is the
+/// point below which a body is close enough to stopped to just stop.
+const STOP_SPEED: f32 = 2.0;
+/// Friction in the air, where the cap binds just as hard. Holding a key down
+/// still steers and still accelerates up to the cap, but the air is not allowed
+/// to carry more speed than the legs would have: a hop cannot be chained into a
+/// faster mode of travel, and letting go of the keys in mid-air slows the body
+/// down instead of leaving it to sail on. Set this to 0 to give the air its
+/// momentum back (a strafe jump then accelerates past the cap again).
+const AIR_FRICTION: f32 = 6.0;
 /// Physics ticks after touchdown that are exempt from friction. One keeps the
-/// classic window open — the tick a body lands on cannot scrub the speed it
-/// arrived with, which is what a bunny hop needs to survive a landing. Set it
-/// to 0 to make landings bite immediately.
+/// hard landing tick from scrubbing the speed the body arrived with. Set it to
+/// 0 to make landings bite immediately.
 const LANDING_FRICTION_GRACE_TICKS: u32 = 1;
 
 /// How far the head swings sideways when leaning around cover.
@@ -606,22 +615,30 @@ impl Player {
             // which is how the engine this model comes from reads it too.
             let grounded = self.on_ground;
 
-            // Friction bites whenever the body is over the cap it is allowed on
-            // the ground. With no wish input that cap is zero, so this is the
-            // released-key case the model is specified around; with input it is
-            // the balance: a player who sprinted, crouched, dropped prone or
-            // raised their sights is brought back down to the new cap, where
-            // holding a key without it would leave them at the speed they
-            // happened to have and make every one of those values meaningless.
-            // Pushing below the cap is untouched, so speed still settles
-            // exactly on the cap rather than on a fraction of it.
-            let h_speed = vec2(self.vel.x, self.vel.z).length();
-            if grounded && self.ground_ticks > LANDING_FRICTION_GRACE_TICKS && h_speed > max_speed {
-                let v = apply_friction(vec2(self.vel.x, self.vel.z), FRICTION, h);
-                self.vel.x = v.x;
-                self.vel.z = v.y;
+            // Two rules, for the two jobs the old model did with one step
+            // ("move the whole velocity toward the target velocity"):
+            //
+            // * Released — the cap is zero — friction brings the body to rest,
+            //   crisp at the end thanks to `STOP_SPEED`, which is what the old
+            //   linear brake did and a proportional drop does not.
+            // * Held, the projection rule accelerates, and the *total* is then
+            //   held to the cap. The projection rule alone only limits the
+            //   speed along the wish direction, so a body already moving across
+            //   it ends the step above the cap — which is the whole trick a
+            //   strafe jump is built on, and not something this game wants: a
+            //   hop must not bank speed the legs never had. Clamping after the
+            //   acceleration rather than before it is what makes the cap a
+            //   ceiling instead of something the step ends above.
+            //
+            // The landing grace is a ground-only window: airborne ticks never
+            // take it, or a hop would keep every metre per second it left the
+            // floor with.
+            let landing_grace = grounded && self.ground_ticks <= LANDING_FRICTION_GRACE_TICKS;
+            let mut vel_h = vec2(self.vel.x, self.vel.z);
+            if !landing_grace && vel_h.length() > max_speed && wishdir == Vec2::ZERO {
+                let rate = if grounded { FRICTION } else { AIR_FRICTION };
+                vel_h = apply_friction(vel_h, rate, h);
             }
-
             if wishdir != Vec2::ZERO {
                 let rate = if !grounded {
                     AIR_ACCEL_RATE
@@ -630,10 +647,14 @@ impl Player {
                 } else {
                     GROUND_ACCEL_RATE
                 };
-                let v = accelerate(vec2(self.vel.x, self.vel.z), wishdir, max_speed, rate, h);
-                self.vel.x = v.x;
-                self.vel.z = v.y;
+                vel_h = accelerate(vel_h, wishdir, max_speed, rate, h);
+                let over = vel_h.length();
+                if over > max_speed {
+                    vel_h *= max_speed / over;
+                }
             }
+            self.vel.x = vel_h.x;
+            self.vel.z = vel_h.y;
 
             // A held jump relaunches the body on the tick it touches down,
             // which is the other half of the friction grace above.
@@ -775,9 +796,10 @@ fn accelerate(vel_h: Vec2, wishdir: Vec2, max_speed: f32, accel_rate: f32, dt: f
     vel_h + wishdir * add
 }
 
-/// Ground friction. The velocity keeps its direction and loses `FRICTION` of
-/// its speed per second, so a stop happens along the line the body was already
-/// travelling.
+/// Ground friction. The velocity keeps its direction and loses `friction` of
+/// its speed per second, except that the drop is never taken from below
+/// `STOP_SPEED` — there it becomes flat, so the body arrives at a stop instead
+/// of crawling the last metre.
 fn apply_friction(vel_h: Vec2, friction: f32, dt: f32) -> Vec2 {
     let speed = vel_h.length();
     if speed <= 0.0 {
@@ -785,7 +807,7 @@ fn apply_friction(vel_h: Vec2, friction: f32, dt: f32) -> Vec2 {
         // velocity that no later frame could clear.
         return Vec2::ZERO;
     }
-    let drop = speed * friction * dt;
+    let drop = speed.max(STOP_SPEED) * friction * dt;
     // A step long enough to eat the whole speed stops the body rather than
     // turning it around: frames hitch.
     vel_h * ((speed - drop).max(0.0) / speed)
@@ -1012,7 +1034,13 @@ mod tests {
         run(&mut fast, &level, &idle, dt_fast, 86);
         let slide_slow = (flat(slow.pos) - before_slow).length();
         let slide_fast = (flat(fast.pos) - before_fast).length();
-        assert!(slide_slow > 0.3, "the slide was nothing: {slide_slow}");
+        // A quarter of a metre from the cap: long enough to read as a slide,
+        // short enough that the body is not still drifting when the player has
+        // already stopped pushing.
+        assert!(
+            (0.1..0.4).contains(&slide_slow),
+            "the slide left its band: {slide_slow}"
+        );
         assert!(
             (slide_slow - slide_fast).abs() / slide_slow < 0.05,
             "slide: {slide_slow} vs {slide_fast}"
@@ -1252,11 +1280,11 @@ mod tests {
         }
     }
 
-    /// The grace tick is the bunny hop's window, and the cap still has teeth:
-    /// a body landing over the cap keeps its landing speed for exactly one
-    /// physics tick, and the tick after that friction takes it away.
+    /// A landing must not scrub the speed the body arrives with. The cap binds
+    /// in the air as well as on the ground, so a body that comes down at the cap
+    /// is already inside it — the touchdown itself has to leave that alone.
     #[test]
-    fn a_landing_keeps_its_speed_for_one_tick() {
+    fn a_landing_does_not_scrub_speed() {
         let level = test_level();
         let forward = MoveInput {
             forward: 1.0,
@@ -1264,10 +1292,10 @@ mod tests {
         };
         let cap = Stance::Stand.speed();
         let mut p = spawn();
-        // Drop in from three metres up, already at sprint speed and pushing
-        // forward with it.
+        // Drop in from three metres up, already at the cap and pushing forward
+        // with it.
         p.pos.y = 3.0;
-        p.vel = vec3(0.0, -2.0, -SPRINT_SPEED);
+        p.vel = vec3(0.0, -2.0, -cap);
 
         let mut landed = None;
         for frame in 0..600 {
@@ -1282,30 +1310,23 @@ mod tests {
         assert!(landed.is_some(), "the body never landed");
         let speed = p.horizontal_speed();
         assert!(
-            (speed - SPRINT_SPEED).abs() < 1e-3,
+            (speed - cap).abs() < 1e-3,
             "the landing scrubbed speed: {speed}"
         );
-        assert!(speed > cap);
 
-        // The next tick is the grace: it survives, which is the whole hop.
-        p.update(&level, TARGET_STEP, &forward);
-        assert_eq!(p.horizontal_speed(), speed, "the grace tick took speed");
-
-        // And on the tick after that the cap is back in charge.
-        p.update(&level, TARGET_STEP, &forward);
-        assert!(
-            p.horizontal_speed() < speed - 0.5,
-            "friction never bit: {}",
-            p.horizontal_speed()
-        );
+        // And it holds while the key stays down.
+        run(&mut p, &level, &forward, TARGET_STEP, 60);
+        let after = p.horizontal_speed();
+        assert!((after - cap).abs() < 1e-3, "the run decayed: {after}");
     }
 
-    /// What the projection rule is for: a hop with the view turning against a
-    /// strafe builds speed past the cap the ground holds. The old model could
-    /// not do this — it dragged the whole velocity vector toward the target, so
-    /// the sideways speed a strafe built was exactly what it deleted.
+    /// The cap binds in the air too, so the classic strafe jump banks nothing.
+    /// That is the point: a hop is a way over something, not a faster way to
+    /// travel, and a held jump key must not turn into free speed. The air still
+    /// steers — the velocity turns toward the view while the strafe is held —
+    /// it just cannot come out of the hop faster than it went in.
     #[test]
-    fn a_turning_strafe_gains_speed_in_the_air() {
+    fn the_air_cannot_bank_speed() {
         let level = test_level();
         let forward = MoveInput {
             forward: 1.0,
@@ -1321,8 +1342,8 @@ mod tests {
             "the run-up did not reach the cap: {grounded}"
         );
 
-        // Jump, and hold forward and right while the view turns: the classic
-        // strafe jump.
+        // Jump, and hold forward and right while the view turns: the input that
+        // used to compound.
         let input = MoveInput {
             forward: 1.0,
             right: 1.0,
@@ -1330,19 +1351,213 @@ mod tests {
             ..Default::default()
         };
         let turn = 90.0f32.to_radians() / 240.0;
+        let heading = |p: &Player| vec2(p.vel.x, p.vel.z).normalize_or_zero();
         let mut best = grounded;
+        let mut steered = false;
+        let mut last = heading(&p);
         for _ in 0..240 {
             p.yaw += turn;
             p.update(&level, TARGET_STEP, &input);
             best = best.max(p.horizontal_speed());
+            let now = heading(&p);
+            if now != Vec2::ZERO && now.dot(last) < 0.9999 {
+                steered = true;
+            }
+            last = now;
             if p.on_ground {
                 // Back on the floor: one hop is over.
                 break;
             }
         }
         assert!(
-            best > grounded + 0.5,
-            "the strafe gained nothing: {grounded} -> {best}"
+            best <= grounded + 1e-3,
+            "the hop banked speed: {grounded} -> {best}"
         );
+        assert!(steered, "the air stopped steering");
+    }
+
+    /// The other half of "a hop is not a way to travel": letting go of the keys
+    /// in mid-air slows the body down instead of leaving it to sail on. The
+    /// model brakes in the air on the same rule it uses on the ground, only
+    /// gentler.
+    #[test]
+    fn letting_go_in_the_air_brakes() {
+        let level = test_level();
+        let forward = MoveInput {
+            forward: 1.0,
+            ..Default::default()
+        };
+        let jump = MoveInput {
+            forward: 1.0,
+            jump: true,
+            ..Default::default()
+        };
+        let idle = MoveInput::default();
+        let mut p = spawn();
+        run(&mut p, &level, &forward, TARGET_STEP, 120);
+        p.update(&level, TARGET_STEP, &jump);
+        let from = flat(p.pos);
+        let mut frames = 0;
+        while !p.on_ground && frames < 300 {
+            p.update(&level, TARGET_STEP, &idle);
+            frames += 1;
+        }
+        let drift = (flat(p.pos) - from).length();
+        assert!(
+            p.horizontal_speed() < 0.05,
+            "still moving in the air: {} after {frames} frames",
+            p.horizontal_speed()
+        );
+        assert!(drift < 1.5, "the body sailed {drift} m with no key held");
+    }
+
+    /// Not an assertion: the movement model's actual numbers — the steady speed
+    /// on each kind of input, the stop distance after letting go, what a hop
+    /// does to a held key. The constants are tuned against this table.
+    /// `cargo test -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "prints the movement model's numbers; run with --ignored --nocapture"]
+    fn show_the_movement_numbers() {
+        let level = test_level();
+        let dt = 1.0 / 60.0;
+        let cap = Stance::Stand.speed();
+        let go = MoveInput {
+            forward: 1.0,
+            ..Default::default()
+        };
+        let sprint = MoveInput {
+            forward: 1.0,
+            sprint: true,
+            ..Default::default()
+        };
+        let idle = MoveInput::default();
+        println!("standing cap = {cap:.4}, sprint cap = {SPRINT_SPEED:.4}");
+
+        // Straight run: peak and mean over the last second.
+        let mut p = spawn();
+        run(&mut p, &level, &idle, dt, 30);
+        let (mut peak, mut sum) = (0.0f32, 0.0f32);
+        for i in 0..90 {
+            p.update(&level, dt, &go);
+            let s = p.horizontal_speed();
+            peak = peak.max(s);
+            if i >= 30 {
+                sum += s;
+            }
+        }
+        println!("straight W    : peak={peak:.4}  mean={:.4}", sum / 60.0);
+
+        // Diagonal.
+        let mut p = spawn();
+        let diag = MoveInput {
+            forward: 1.0,
+            right: -1.0,
+            ..Default::default()
+        };
+        run(&mut p, &level, &diag, dt, 90);
+        {
+            let v = vec2(p.vel.x, p.vel.z);
+            let fwd = vec2(-p.yaw.sin(), -p.yaw.cos());
+            let right = vec2(p.yaw.cos(), -p.yaw.sin());
+            let wish = (fwd - right).normalize();
+            let lag = v
+                .normalize_or_zero()
+                .dot(wish)
+                .clamp(-1.0, 1.0)
+                .acos()
+                .to_degrees();
+            println!(
+                "diagonal W+D  : speed={:.4} lag={lag:.1}deg pos=({:.2},{:.2})",
+                p.horizontal_speed(),
+                p.pos.x,
+                p.pos.z
+            );
+        }
+
+        // Turning while holding W, at three rates.
+        for deg in [30.0f32, 60.0, 120.0] {
+            let mut p = spawn();
+            let (mut peak, mut sum) = (0.0f32, 0.0f32);
+            for i in 0..90 {
+                p.yaw += deg.to_radians() * dt;
+                p.update(&level, dt, &go);
+                let s = p.horizontal_speed();
+                peak = peak.max(s);
+                if i >= 30 {
+                    sum += s;
+                }
+            }
+            let v = vec2(p.vel.x, p.vel.z);
+            let fwd = vec2(-p.yaw.sin(), -p.yaw.cos());
+            let lag = v
+                .normalize_or_zero()
+                .dot(fwd)
+                .clamp(-1.0, 1.0)
+                .acos()
+                .to_degrees();
+            println!(
+                "turn {deg:>5.0} deg/s: peak={peak:.4}  mean={:.4} lag={lag:.1}deg",
+                sum / 60.0
+            );
+        }
+
+        // Stop distance after a released run-up.
+        for (label, input, frames) in [("walk", &go, 60u32), ("sprint", &sprint, 48)] {
+            let mut p = spawn();
+            run(&mut p, &level, input, dt, frames);
+            let v0 = p.horizontal_speed();
+            let from = flat(p.pos);
+            let mut t = 0.0;
+            while p.horizontal_speed() > 0.05 && t < 5.0 {
+                p.update(&level, dt, &idle);
+                t += dt;
+            }
+            println!(
+                "{label}: release at {v0:.3} -> stop after {:.3} m / {t:.2} s",
+                flat(p.pos).distance(from)
+            );
+        }
+
+        // Airborne with everything released.
+        let mut p = spawn();
+        run(&mut p, &level, &go, dt, 60);
+        let jump = MoveInput {
+            forward: 1.0,
+            jump: true,
+            ..Default::default()
+        };
+        p.update(&level, dt, &jump);
+        let from = flat(p.pos);
+        let start = p.horizontal_speed();
+        let mut steps = 0;
+        while !p.on_ground && steps < 200 {
+            p.update(&level, dt, &idle);
+            steps += 1;
+        }
+        println!(
+            "air, released : {start:.3} -> {:.3} after {} frames, drift {:.2} m, grounded={}",
+            p.horizontal_speed(),
+            steps,
+            flat(p.pos).distance(from),
+            p.on_ground
+        );
+
+        // Holding jump (the game reads it as held, so it auto-hops) while
+        // turning: the bunny-hop chain.
+        let mut p = spawn();
+        let hop = MoveInput {
+            forward: 1.0,
+            jump: true,
+            ..Default::default()
+        };
+        run(&mut p, &level, &hop, dt, 60);
+        println!("hop+turn start: {:.3}", p.horizontal_speed());
+        for second in 1..=4 {
+            for _ in 0..60 {
+                p.yaw += 60.0f32.to_radians() * dt;
+                p.update(&level, dt, &hop);
+            }
+            println!("   after {second}s: {:.3}", p.horizontal_speed());
+        }
     }
 }
