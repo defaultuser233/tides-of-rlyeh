@@ -258,7 +258,7 @@ fn enemy_row(kind: Kind) -> CodexRow {
         name: i18n::t(name),
         tag: i18n::t(tag),
         note: i18n::t(note),
-        stats: enemy_stats(&s),
+        stats: enemy_stats(kind, &s),
         swatch: s.body,
         portrait: Some(portrait(kind)),
     }
@@ -300,7 +300,7 @@ fn enemy_keys(kind: Kind) -> (Key, Key, Key) {
 /// `reach` is what a melee archetype can actually hit with — the shooters are
 /// the ones with a reach of zero — so the range field reports whichever of the
 /// two the archetype fights at.
-fn enemy_stats(s: &KindStats) -> String {
+fn enemy_stats(kind: Kind, s: &KindStats) -> String {
     let mut fields = vec![
         field(Key::StatHealth, num(s.health)),
         field(Key::StatSpeed, format!("{} m/s", num(s.speed))),
@@ -319,6 +319,13 @@ fn enemy_stats(s: &KindStats) -> String {
         ),
         field(Key::StatRate, format!("{} RPM", rate(s.interval))),
     ];
+    // Only the plated archetypes show the line, so its presence is itself
+    // the warning (reference §17.2③: the player needs to be able to read
+    // "bring something that pierces" off the card).
+    let armor = enemy::armor(kind);
+    if armor > 0.0 {
+        fields.push(field(Key::StatArmor, format!("{:.0}%", armor * 100.0)));
+    }
     if s.sanity_drain > 0.0 {
         fields.push(field(Key::Sanity, format!("-{}/s", num(s.sanity_drain))));
     }
@@ -346,7 +353,7 @@ fn weapon_row(kind: WeaponKind) -> CodexRow {
         name: i18n::t(kind.name()),
         tag: weapon_tag(kind),
         note: i18n::t(weapon_keys(kind).1),
-        stats: weapon_stats(&s),
+        stats: weapon_stats(&s, kind),
         swatch: class_swatch(s.class),
         portrait: None,
     }
@@ -398,7 +405,7 @@ fn weapon_keys(kind: WeaponKind) -> (Key, Key) {
 ///
 /// Spread and recoil are angles in the table and are printed as degrees: 0.0042
 /// rad is a fact a player cannot picture, and 0.24° is one they can.
-fn weapon_stats(s: &WeaponStats) -> String {
+fn weapon_stats(s: &WeaponStats, kind: WeaponKind) -> String {
     let mut fields = vec![
         field(Key::StatClass, i18n::t(class_label(s.class)).to_string()),
         field(Key::StatDamage, num(s.damage)),
@@ -435,6 +442,13 @@ fn weapon_stats(s: &WeaponStats) -> String {
         let modes: Vec<&str> = s.fire_modes.iter().map(|m| i18n::t(m.label())).collect();
         fields.push(field(Key::StatModes, modes.join("/")));
     }
+    // The share of a hit this weapon carries through plate — the one number
+    // that answers "how does this do against a Juggernaut" (reference
+    // §17.2③). Every weapon names it, so it can be compared at a glance.
+    fields.push(field(
+        Key::StatArmorPen,
+        format!("{:.0}%", kind.armor_pen() * 100.0),
+    ));
     fields.join(" · ")
 }
 

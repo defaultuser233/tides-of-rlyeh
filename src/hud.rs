@@ -362,11 +362,18 @@ pub struct HudState<'a> {
     pub kills: u32,
     pub elapsed: f32,
     pub enemies_left: usize,
+    /// The wave in progress and how many the mission has (both one-based on
+    /// the incoming side, as a scoreboard reads).
+    pub wave: u32,
+    pub waves: u32,
     pub objective: &'a str,
     pub objective_sub: &'a str,
     pub weapon_name: &'a str,
     pub mag: u32,
     pub mag_size: u32,
+    /// Rounds carried outside the magazine; `None` for weapons that do not
+    /// feed from one.
+    pub reserve: Option<u32>,
     /// `Some(0.0..=1.0)` while reloading, else `None`.
     pub reload_progress: Option<f32>,
     /// Short labels for each carried weapon plus which one is active.
@@ -396,8 +403,10 @@ struct HudText {
     armor: String,
     mag: String,
     mag_size: String,
+    reserve: String,
     slot_keys: Vec<String>,
     hostiles: String,
+    wave: String,
     score: String,
     kills: String,
     time: String,
@@ -432,6 +441,7 @@ impl HudText {
             put(key, format_args!("{}", i + 1));
         }
         put(&mut self.hostiles, format_args!("{}", s.enemies_left));
+        put(&mut self.wave, format_args!("{} / {}", s.wave, s.waves));
         put(&mut self.score, format_args!("{}", s.score));
         put(&mut self.kills, format_args!("{}", s.kills));
         let secs = s.elapsed.max(0.0) as u32;
@@ -650,6 +660,16 @@ fn draw_ammo(f: &Fonts, s: &HudState, t: &mut HudText, ui: &Ui, w: f32, h: f32) 
             let sw = f.width(small, ui.s(16.0));
             f.text_r(small, right, y + ui.s(74.0), ui.s(16.0), fade(INK, 0.45));
 
+            // What is left outside the magazine, on the left of the same line:
+            // the number a player checks before deciding to spray.
+            if let Some(rounds) = s.reserve {
+                put(
+                    &mut t.reserve,
+                    format_args!("{} {}", i18n::t(Key::Spare), rounds),
+                );
+                f.text(&t.reserve, ix, y + ui.s(72.0), ui.s(15.0), fade(INK, 0.45));
+            }
+
             let nearly_empty =
                 s.mag_size > 0 && s.mag as f32 <= (s.mag_size as f32 * 0.25).max(1.0);
             let col = if s.mag == 0 {
@@ -832,11 +852,15 @@ fn draw_stats(f: &Fonts, t: &HudText, ui: &Ui, w: f32) {
     let pw = ui.s(250.0);
     let x = w - ui.s(MARGIN) - pw;
     let y = ui.s(MARGIN);
-    panel(x, y, pw, ui.s(BLOCK_H));
+    // One row taller than the objective panel: the wave line joined the
+    // score, kills and clock (reference §19.4-6 — the HUD has to say where
+    // in the mission you are, and how strong the mission's hostiles are).
+    panel(x, y, pw, ui.s(BLOCK_H + 32.0));
 
     let ix = x + ui.s(PAD);
     let right = x + pw - ui.s(PAD);
     let rows = [
+        (i18n::t(Key::Wave), t.wave.as_str(), INK),
         (i18n::t(Key::Score), t.score.as_str(), INK),
         (i18n::t(Key::Kills), t.kills.as_str(), INK),
         (i18n::t(Key::Time), t.time.as_str(), CYAN),
@@ -1355,8 +1379,9 @@ pub fn draw_menu(
 /// fits, down to a floor that still holds the label.
 ///
 /// Split out of the drawing so the fit can be asserted: the settings screen is
-/// one row away from the point where the old fixed pitch ran off a 720p window,
-/// and an eleventh setting must not quietly do it again.
+/// the long list, and every setting it gains — it holds eleven now — must keep
+/// the last row on a 720p window. Rows shrink rather than run off, and this is
+/// the math that says so.
 fn list_metrics(n: usize, room: f32, authored: f32) -> (f32, f32) {
     let room = sane(room, 1.0).max(1.0);
     let authored = sane(authored, 60.0).max(1.0);
@@ -1504,7 +1529,7 @@ fn item_list(
     iw: f32,
 ) -> Vec<(f32, f32, f32, f32)> {
     // The list has to fit the window it lands in: four screens share this, the
-    // settings screen has ten rows, and `Ui` stops growing at 1.5 — so past
+    // settings screen has eleven rows, and `Ui` stops growing at 1.5 — so past
     // 1080p the layout space stops growing with the screen while the authored
     // pitch does not, and the last rows ran off the bottom. Rows shrink (down to
     // a floor that still holds the label) rather than overflow; at 720p the
@@ -3673,6 +3698,12 @@ fn draw_portrait(mesh: &Mesh, feet: Vec2, height: f32, max_w: f32) {
         0.0,
         Color::new(0.0, 0.0, 0.0, 0.35),
     );
+    draw_model(mesh, anchor, scale);
+}
+
+/// The flat-triangle pass every portrait-style draw goes through: sorted
+/// back-to-front, projected through [`portrait_point`], one colour per face.
+fn draw_model(mesh: &Mesh, anchor: Vec2, scale: f32) {
     PORTRAIT_ORDER.with(|cell| {
         let mut order = cell.borrow_mut();
         portrait_order(mesh, &mut order);
@@ -3700,6 +3731,428 @@ fn draw_portrait(mesh: &Mesh, feet: Vec2, height: f32, max_w: f32) {
             );
         }
     });
+}
+
+/// Scale and centre for a model drawn into a `max_w × max_h` well, measured on
+/// the whole bounding box — a model that lies down (the armory's weapon) has
+/// no "height" to fit by the way a standing figure does. `(0, origo)` means
+/// nothing to draw.
+fn fit_model(mesh: &Mesh, max_w: f32, max_h: f32) -> (f32, Vec2) {
+    let (mut lo_x, mut hi_x) = (f32::INFINITY, f32::NEG_INFINITY);
+    let (mut lo_y, mut hi_y) = (f32::INFINITY, f32::NEG_INFINITY);
+    for v in &mesh.vertices {
+        let p = v.position;
+        if !(p.x.is_finite() && p.y.is_finite()) {
+            continue;
+        }
+        lo_x = lo_x.min(p.x);
+        hi_x = hi_x.max(p.x);
+        lo_y = lo_y.min(p.y);
+        hi_y = hi_y.max(p.y);
+    }
+    if !lo_x.is_finite() || !lo_y.is_finite() {
+        return (0.0, Vec2::ZERO);
+    }
+    let wide = (hi_x - lo_x).max(1e-3);
+    let tall = (hi_y - lo_y).max(1e-3);
+    let scale = (sane(max_w, 0.0) / wide).min(sane(max_h, 0.0) / tall);
+    if !scale.is_finite() || scale <= 0.0 {
+        return (0.0, Vec2::ZERO);
+    }
+    (scale, vec2((lo_x + hi_x) * 0.5, (lo_y + hi_y) * 0.5))
+}
+
+// --- the armory -------------------------------------------------------------
+
+/// One stat line on the armory's right panel.
+pub struct ArmoryStat {
+    pub label: String,
+    pub text: String,
+    /// The number the line moves from while a part is being weighed, printed
+    /// beside [`ArmoryStat::text`] as "old → new". `None` when the line is a
+    /// verdict on the gun in hand rather than a trade the bench is offering.
+    pub was: Option<String>,
+    /// -1 worse than the build it is measured against, 0 the same, 1 better;
+    /// colours the line.
+    pub good: i8,
+}
+
+/// One candidate in the bench's middle column: a part that fits the focused
+/// slot, or "none" for taking the slot's part off.
+pub struct ArmoryPart<'a> {
+    pub label: &'a str,
+    /// Whether this is what the slot already holds.
+    pub fitted: bool,
+}
+
+/// Which of the bench's two columns the keyboard is working in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ArmoryColumn {
+    /// The left column: the section, the weapon, the slots — and the exit.
+    Slots,
+    /// The focused slot's candidates.
+    Parts,
+}
+
+/// The bench's middle column and the state that goes with it.
+pub struct ArmoryBench<'a> {
+    /// The candidates for the focused slot, "none" first.
+    pub parts: &'a [ArmoryPart<'a>],
+    /// The candidate the numbers describe — the one under the pointer, or the
+    /// one under the keyboard's caret. `None` leaves the panel on the build in
+    /// hand.
+    pub cursor: Option<usize>,
+    /// Where the caret is, so the middle column can show it even while the
+    /// pointer is somewhere else.
+    pub column: ArmoryColumn,
+}
+
+/// Everything the armory screen draws, assembled by `main` from the live kit.
+pub struct ArmoryView<'a> {
+    pub weapon: &'a str,
+    pub rows: &'a [MenuItem<'a>],
+    /// The bench, on the tab that edits a weapon's parts. `None` on the paint
+    /// and loadout tabs, which are row lists and nothing more.
+    pub bench: Option<&'a ArmoryBench<'a>>,
+    pub stats: &'a [ArmoryStat],
+    /// The weapon as the armory draws it; `None` draws the panel without it.
+    pub preview: Option<&'a Mesh>,
+    /// A line under the numbers: the wear tier, or the bench's hint.
+    pub note: &'a str,
+}
+
+/// Where the armory's pieces landed, grouped by the question a click on them
+/// answers: a row of the left column (the exit is the last of them), or a
+/// candidate in the bench's middle column. Handing back one flat list is what
+/// forced every click to mean "step the row under the cursor".
+pub struct ArmoryRects {
+    pub rows: Vec<(f32, f32, f32, f32)>,
+    pub parts: Vec<(f32, f32, f32, f32)>,
+}
+
+/// The armory: on the parts tab a bench of three columns — the slots and what
+/// they hold, the focused slot's candidates, and the weapon with the numbers a
+/// candidate would move — and on the other tabs the single list of rows they
+/// were built around.
+pub fn draw_armory(f: &Fonts, view: &ArmoryView<'_>, selected: usize) -> ArmoryRects {
+    let w = screen_width();
+    let h = screen_height();
+    let ui = Ui::new();
+    backdrop(&ui);
+
+    // The screen's heading sits over the left column on every tab, so the
+    // bench grows a middle column to the right of it rather than moving it.
+    let head = h * 0.10;
+    let ty = head + ui.s(26.0);
+    let cx = w * 0.285;
+    tracked_c(f, i18n::t(Key::Armory), cx, ty, ui.s(36.0), INK, ui.s(8.0));
+    let rule_y = ty + ui.s(18.0);
+    let rw = (w * 0.34).clamp(ui.s(260.0), ui.s(430.0));
+    draw_rectangle(cx - rw * 0.5, rule_y, rw, ui.s(2.0), fade(accent(), 0.85));
+
+    match view.bench {
+        Some(bench) => draw_bench(
+            f,
+            view,
+            bench,
+            selected,
+            &ui,
+            &BenchLayout::new(&ui, cx, rule_y, head),
+        ),
+        None => {
+            let rows = item_list(f, view.rows, selected, &ui, cx, rule_y + ui.s(40.0), rw);
+            armory_panel(f, view, &ui, w * 0.52, w * 0.43, head);
+            ArmoryRects {
+                rows,
+                parts: Vec::new(),
+            }
+        }
+    }
+}
+
+/// The bench's layout in pixels: the three columns and the room their rows
+/// have. Passed around as one value, because the pieces that draw the columns
+/// each need most of it and none of them needs to redo the arithmetic.
+struct BenchLayout {
+    /// Left edge and width of the slot column, the candidate column, and the
+    /// panel.
+    slots: (f32, f32),
+    parts: (f32, f32),
+    panel: (f32, f32),
+    /// y of the first row, and the vertical room a column has for its rows.
+    top: f32,
+    room: f32,
+    /// The height of the screen's heading block, which the panel's name line
+    /// hangs from.
+    head: f32,
+}
+
+impl BenchLayout {
+    /// Three columns where the other tabs need two: the slot column keeps the
+    /// heading's centre line and the panel keeps the armory's right edge, so
+    /// the tab still reads as the same bench; the candidates take what is left
+    /// between them. The slot column is the wider of the two, because its rows
+    /// carry a fitted part's name beside the slot's — "MUZZLE COMPENSATOR" is
+    /// the longest line the armory prints.
+    fn new(ui: &Ui, cx: f32, rule_y: f32, head: f32) -> BenchLayout {
+        let w = screen_width();
+        let sw = (w * 0.32).clamp(ui.s(260.0), ui.s(470.0));
+        let pw = (w * 0.21).clamp(ui.s(200.0), ui.s(340.0));
+        let gap = ui.s(22.0);
+        let lx = cx - sw * 0.5;
+        let px = lx + sw + gap;
+        let panel_x = px + pw + gap;
+        let top = rule_y + ui.s(52.0);
+        BenchLayout {
+            slots: (lx, sw),
+            parts: (px, pw),
+            panel: (panel_x, (w - panel_x - ui.s(26.0)).max(ui.s(180.0))),
+            top,
+            room: screen_height() - ui.s(26.0) - top,
+            head,
+        }
+    }
+}
+
+/// The bench's three columns: the slots and what they hold, the focused slot's
+/// candidates, and the panel with the weapon and the numbers a candidate would
+/// move.
+fn draw_bench(
+    f: &Fonts,
+    view: &ArmoryView<'_>,
+    bench: &ArmoryBench<'_>,
+    selected: usize,
+    ui: &Ui,
+    layout: &BenchLayout,
+) -> ArmoryRects {
+    let (lx, sw) = layout.slots;
+    let (px, _) = layout.parts;
+    let caption_y = layout.top - ui.s(26.0);
+    let cap = ui.s(13.0);
+    tracked(
+        f,
+        i18n::t(Key::ArmoryColSlots),
+        lx + ui.s(2.0),
+        caption_y,
+        cap,
+        fade(
+            INK,
+            if bench.column == ArmoryColumn::Slots {
+                0.72
+            } else {
+                0.38
+            },
+        ),
+        ui.s(2.0),
+    );
+    tracked(
+        f,
+        i18n::t(Key::ArmoryColParts),
+        px + ui.s(2.0),
+        caption_y,
+        cap,
+        fade(
+            accent(),
+            if bench.column == ArmoryColumn::Parts {
+                0.95
+            } else {
+                0.55
+            },
+        ),
+        ui.s(2.0),
+    );
+
+    let rows = item_list(f, view.rows, selected, ui, lx + sw * 0.5, layout.top, sw);
+    let parts = part_column(
+        f,
+        bench.parts,
+        bench.cursor,
+        bench.column == ArmoryColumn::Parts,
+        ui,
+        layout,
+    );
+    armory_panel(f, view, ui, layout.panel.0, layout.panel.1, layout.head);
+    ArmoryRects { rows, parts }
+}
+
+/// The bench's middle column: one row per candidate for the focused slot,
+/// drawn in the same language as the list on its left. The row the numbers
+/// belong to is lit, a caret marks the keyboard's row when it has one, and the
+/// part the slot already holds is marked — the three things the cycle this
+/// replaced could never show.
+fn part_column(
+    f: &Fonts,
+    parts: &[ArmoryPart],
+    cursor: Option<usize>,
+    caret: bool,
+    ui: &Ui,
+    layout: &BenchLayout,
+) -> Vec<(f32, f32, f32, f32)> {
+    let (x, w) = layout.parts;
+    let (top, room) = (layout.top, layout.room);
+    let (ih, gap) = list_metrics(parts.len(), room, ui.s(60.0));
+    let k = (ih / ui.s(50.0)).clamp(0.3, 1.0);
+    let mut rects = Vec::with_capacity(parts.len());
+    for (i, part) in parts.iter().enumerate() {
+        let y = top + i as f32 * (ih + gap);
+        let lit = cursor == Some(i);
+        let fill = if lit {
+            Color::new(0.17, 0.12, 0.08, 0.92)
+        } else {
+            Color::new(0.06, 0.07, 0.09, 0.80)
+        };
+        draw_rectangle(x, y, w, ih, fill);
+        if lit {
+            draw_rectangle(x, y, ui.s(4.0), ih, fade(accent(), 1.0));
+        }
+        draw_rectangle_lines(
+            x,
+            y,
+            w,
+            ih,
+            1.0,
+            if lit {
+                fade(accent(), 0.85)
+            } else {
+                fade(INK, 0.18)
+            },
+        );
+
+        // The row's number makes the size of the list readable at a glance;
+        // the fitted row wears a dot in its place, because it is not one of
+        // the choices so much as the answer to "what is on the gun".
+        if part.fitted {
+            draw_circle(
+                x + ui.s(20.0),
+                y + ih * 0.5,
+                (ui.s(3.2) * k).max(1.5),
+                fade(accent(), if lit { 1.0 } else { 0.8 }),
+            );
+        } else {
+            f.text(
+                &format!("{:02}", i + 1),
+                x + ui.s(14.0),
+                y + ih * 0.5 + ui.s(6.0) * k,
+                ui.s(14.0) * k,
+                fade(INK, 0.35),
+            );
+        }
+
+        let tag = if part.fitted {
+            i18n::t(Key::PartFitted)
+        } else {
+            ""
+        };
+        let tag_size = ui.s(12.0) * k;
+        // The caret lives at the row's right edge, so the tag it shares the row
+        // with keeps its distance — the two are on the same line whenever the
+        // caret is on the part the slot already holds, which is where it starts.
+        let caret_w = if caret && lit { ui.s(13.0) } else { 0.0 };
+        let tag_w = if tag.is_empty() {
+            0.0
+        } else {
+            f.width(tag, tag_size) + ui.s(10.0) + caret_w
+        };
+        let label = fit(f, part.label, ui.s(19.0) * k, w - ui.s(50.0) - tag_w);
+        f.text(
+            &label,
+            x + ui.s(38.0),
+            y + ih * 0.5 + ui.s(7.0) * k,
+            ui.s(19.0) * k,
+            fade(INK, if lit { 1.0 } else { 0.72 }),
+        );
+        if !tag.is_empty() {
+            f.text_r(
+                tag,
+                x + w - ui.s(14.0) - caret_w,
+                y + ih * 0.5 + ui.s(5.0) * k,
+                tag_size,
+                fade(accent(), 0.7),
+            );
+        }
+        if caret && lit {
+            let mx = x + w - ui.s(12.0);
+            let my = y + ih * 0.5;
+            draw_triangle(
+                vec2(mx, my - ui.s(6.0) * k),
+                vec2(mx, my + ui.s(6.0) * k),
+                vec2(mx + ui.s(9.0) * k, my),
+                fade(accent(), 1.0),
+            );
+        }
+        rects.push((x, y, w, ih));
+    }
+    rects
+}
+
+/// The armory's right-hand panel: the weapon's name, its portrait in the well,
+/// and one line per stat under it — the number, and, while a candidate is being
+/// weighed, the number it would move from, so the panel answers "what would
+/// this part do" and not only "what is it now".
+fn armory_panel(f: &Fonts, view: &ArmoryView<'_>, ui: &Ui, x: f32, w: f32, head: f32) {
+    let name_y = head + ui.s(44.0);
+    f.text_c(view.weapon, x + w * 0.5, name_y, ui.s(26.0), INK);
+
+    let well_top = name_y + ui.s(22.0);
+    let well_h = screen_height() * 0.32;
+    if let Some(mesh) = view.preview {
+        let (scale, mid) = fit_model(mesh, w * 0.96, well_h * 0.86);
+        if scale > 0.0 {
+            let centre = vec2(x + w * 0.5, well_top + well_h * 0.5);
+            draw_model(mesh, centre + mid * scale, scale);
+        }
+    }
+
+    // A hairline, then one line per stat, the value right-aligned and coloured
+    // by which way it moved.
+    let stats_top = well_top + well_h + ui.s(4.0);
+    draw_rectangle(x, stats_top, w, ui.s(1.0), fade(INK, 0.15));
+    let line = ui.s(21.0);
+    let size = ui.s(15.0);
+    for (i, s) in view.stats.iter().enumerate() {
+        let y = stats_top + ui.s(20.0) + i as f32 * line;
+        let col = match s.good {
+            1 => CYAN,
+            -1 => DANGER,
+            _ => fade(INK, 0.72),
+        };
+        f.text(&s.label, x, y, size, fade(INK, 0.55));
+        let arrow = match s.good {
+            1 => "  ▲",
+            -1 => "  ▼",
+            _ => "",
+        };
+        let now = format!("{}{arrow}", s.text);
+        let now_w = f.width(&now, size);
+        // Both numbers where there is room for both, and the new one alone
+        // where there is not: a narrow panel must not run the two together
+        // with the label.
+        match &s.was {
+            Some(was) if f.width(was, size) + now_w < w * 0.62 => {
+                let mark = "  →  ";
+                let at = x + w - f.width(was, size) - f.width(mark, size) - now_w;
+                f.text(was, at, y, size, fade(INK, 0.42));
+                f.text(mark, at + f.width(was, size), y, size, fade(INK, 0.42));
+                f.text(
+                    &now,
+                    at + f.width(was, size) + f.width(mark, size),
+                    y,
+                    size,
+                    col,
+                );
+            }
+            _ => f.text(&now, x + w - now_w, y, size, col),
+        }
+    }
+    if !view.note.is_empty() {
+        f.text_c(
+            view.note,
+            x + w * 0.5,
+            stats_top + ui.s(22.0) + view.stats.len() as f32 * line + ui.s(12.0),
+            ui.s(14.0),
+            fade(accent(), 0.85),
+        );
+    }
 }
 
 #[cfg(test)]

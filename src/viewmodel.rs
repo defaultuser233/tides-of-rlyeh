@@ -21,7 +21,7 @@
 
 use crate::player::{Player, Stance};
 use crate::util::approach;
-use crate::weapon::{ALL_KINDS, Arsenal, Weapon, WeaponKind};
+use crate::weapon::{ALL_KINDS, Arsenal, Weapon, WeaponBuild, WeaponKind};
 use macroquad::prelude::*;
 use std::f32::consts::TAU;
 
@@ -70,6 +70,232 @@ const OLIVE: Color = Color::new(0.28, 0.30, 0.22, 1.0);
 const GLOVE: Color = Color::new(0.30, 0.25, 0.19, 1.0);
 const GLOVE_DARK: Color = Color::new(0.19, 0.16, 0.12, 1.0);
 const SLEEVE: Color = Color::new(0.31, 0.33, 0.26, 1.0);
+
+/// A finish: the colour each paintable role is drawn in.
+///
+/// The roles are the consts above, one name each, so a finish is a table of
+/// substitutions and no geometry changes. `BLACK` and the gloves are
+/// deliberately absent — sights stay black under every finish, and hands are
+/// gear, not weapon.
+#[derive(Clone, Copy)]
+pub struct Finish {
+    pub id: &'static str,
+    pub name_en: &'static str,
+    pub name_zh: &'static str,
+    pub metal: Color,
+    pub metal_dark: Color,
+    pub poly: Color,
+    pub rail: Color,
+    pub wood: Color,
+    pub wood_dark: Color,
+    pub olive: Color,
+}
+
+/// The finishes the game ships, in the order the bench walks them. The first
+/// is the factory paint: the exact consts above, so an unpainted weapon looks
+/// the way it always has.
+pub const FINISHES: [Finish; 6] = [
+    Finish {
+        id: "factory",
+        name_en: "FACTORY",
+        name_zh: "原厂",
+        metal: STEEL,
+        metal_dark: STEEL_DARK,
+        poly: POLY,
+        rail: RAIL,
+        wood: WOOD,
+        wood_dark: WOOD_DARK,
+        olive: OLIVE,
+    },
+    Finish {
+        id: "driftwood",
+        name_en: "DRIFTWOOD",
+        name_zh: "沉木",
+        metal: Color::new(0.34, 0.33, 0.30, 1.0),
+        metal_dark: Color::new(0.22, 0.21, 0.19, 1.0),
+        poly: Color::new(0.26, 0.25, 0.23, 1.0),
+        rail: Color::new(0.42, 0.40, 0.36, 1.0),
+        wood: Color::new(0.45, 0.43, 0.38, 1.0),
+        wood_dark: Color::new(0.32, 0.30, 0.26, 1.0),
+        olive: Color::new(0.36, 0.36, 0.30, 1.0),
+    },
+    Finish {
+        id: "desert",
+        name_en: "DESERT",
+        name_zh: "荒漠",
+        metal: Color::new(0.62, 0.54, 0.38, 1.0),
+        metal_dark: Color::new(0.44, 0.38, 0.27, 1.0),
+        poly: Color::new(0.72, 0.65, 0.48, 1.0),
+        rail: Color::new(0.50, 0.44, 0.32, 1.0),
+        wood: Color::new(0.55, 0.44, 0.28, 1.0),
+        wood_dark: Color::new(0.40, 0.31, 0.19, 1.0),
+        olive: Color::new(0.58, 0.55, 0.38, 1.0),
+    },
+    Finish {
+        id: "abyss",
+        name_en: "ABYSS",
+        name_zh: "深渊",
+        metal: Color::new(0.10, 0.16, 0.17, 1.0),
+        metal_dark: Color::new(0.05, 0.09, 0.10, 1.0),
+        poly: Color::new(0.08, 0.12, 0.13, 1.0),
+        rail: Color::new(0.45, 0.68, 0.64, 1.0),
+        wood: Color::new(0.16, 0.22, 0.20, 1.0),
+        wood_dark: Color::new(0.10, 0.15, 0.14, 1.0),
+        olive: Color::new(0.14, 0.20, 0.18, 1.0),
+    },
+    Finish {
+        id: "blight",
+        name_en: "BLIGHT",
+        name_zh: "腐化",
+        metal: Color::new(0.30, 0.42, 0.26, 1.0),
+        metal_dark: Color::new(0.20, 0.28, 0.17, 1.0),
+        poly: Color::new(0.24, 0.20, 0.28, 1.0),
+        rail: Color::new(0.52, 0.72, 0.34, 1.0),
+        wood: Color::new(0.42, 0.29, 0.40, 1.0),
+        wood_dark: Color::new(0.28, 0.19, 0.27, 1.0),
+        olive: Color::new(0.36, 0.46, 0.24, 1.0),
+    },
+    Finish {
+        id: "ashen",
+        name_en: "ASHEN",
+        name_zh: "灰烬",
+        metal: Color::new(0.16, 0.16, 0.17, 1.0),
+        metal_dark: Color::new(0.09, 0.09, 0.10, 1.0),
+        poly: Color::new(0.12, 0.12, 0.13, 1.0),
+        rail: Color::new(0.72, 0.70, 0.62, 1.0),
+        wood: Color::new(0.64, 0.60, 0.50, 1.0),
+        wood_dark: Color::new(0.45, 0.42, 0.35, 1.0),
+        olive: Color::new(0.30, 0.30, 0.27, 1.0),
+    },
+];
+
+/// A finish and the wear it has taken: what the armory edits and every mission
+/// carries.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Paint {
+    /// Index into [`FINISHES`], clamped on read.
+    pub finish: usize,
+    /// 0 brand new, 1 fully worn. Blends each face towards `WORN` by this much,
+    /// jittered per face, so wear reads as a pattern rather than a flat fade.
+    pub wear: f32,
+    /// The wear pattern's seed.
+    pub seed: u32,
+}
+
+impl Paint {
+    /// The weapon as it comes from the crate: factory paint, no wear.
+    pub const fn factory() -> Self {
+        Self {
+            finish: 0,
+            wear: 0.0,
+            seed: 0,
+        }
+    }
+
+    pub fn finish(self) -> &'static Finish {
+        &FINISHES[self.finish.min(FINISHES.len() - 1)]
+    }
+
+    /// The settings-file spelling: `id@wear:seed` — or empty for the weapon as
+    /// it came, because a factory finish with no wear is exactly what an
+    /// absent line means, and writing it out would turn every save into seven
+    /// lines about nothing.
+    pub fn to_text(self) -> String {
+        if self == Self::factory() {
+            return String::new();
+        }
+        format!("{}@{:.2}:{}", self.finish().id, self.wear, self.seed)
+    }
+
+    /// Parse [`Paint::to_text`]. Anything unreadable falls back to the factory
+    /// paint rather than failing: the file is user-editable text.
+    pub fn from_text(text: &str) -> Self {
+        let Some((head, seed)) = text.trim().split_once(':') else {
+            return Self::factory();
+        };
+        let (id, wear) = head.split_once('@').unwrap_or((head, "0.0"));
+        Self {
+            finish: FINISHES.iter().position(|f| f.id == id.trim()).unwrap_or(0),
+            wear: wear.trim().parse::<f32>().unwrap_or(0.0).clamp(0.0, 1.0),
+            seed: seed.trim().parse::<u32>().unwrap_or(0),
+        }
+    }
+}
+
+/// Where wear takes a face. Scuffed metal and greyed wood are both this colour,
+/// which is what makes one `WORN` enough for every finish.
+const WORN: Color = Color::new(0.30, 0.28, 0.25, 1.0);
+
+/// The finish colour a factory colour becomes, by exact match: the consts
+/// above are what the builders emit, so this is the whole substitution table.
+fn refinished(c: Color, f: &Finish) -> Color {
+    if c == STEEL {
+        f.metal
+    } else if c == STEEL_DARK {
+        f.metal_dark
+    } else if c == POLY {
+        f.poly
+    } else if c == RAIL {
+        f.rail
+    } else if c == WOOD {
+        f.wood
+    } else if c == WOOD_DARK {
+        f.wood_dark
+    } else if c == OLIVE {
+        f.olive
+    } else {
+        c
+    }
+}
+
+/// A stable 0..1 from a position and a seed, quantised to four centimetres so
+/// wear reads as patches rather than as per-pixel noise.
+fn wear_hash(at: Vec3, seed: u32) -> f32 {
+    let mut h = seed ^ 0x9E37_79B9;
+    for v in [at.x, at.y, at.z] {
+        h ^= ((v * 25.0) as i32 as u32).wrapping_mul(0x85EB_CA6B);
+        h = h.rotate_left(13).wrapping_mul(0xC2B2_AE35);
+        h ^= h >> 15;
+    }
+    (h >> 8) as f32 / (1u32 << 24) as f32
+}
+
+/// A triangle's centroid, what wear is hashed on.
+fn centroid(t: Tri) -> Vec3 {
+    (t.a + t.b + t.c) / 3.0
+}
+
+/// One factory-coloured face as the finish and its wear leave it.
+fn painted(c: Color, paint: Paint, at: Vec3) -> Color {
+    let c = refinished(c, paint.finish());
+    if paint.wear <= 0.0 {
+        return c;
+    }
+    // Some patches wear harder than the rest, so a worn weapon reads as
+    // handled rather than as globally faded.
+    let t = (paint.wear * (0.35 + 0.65 * wear_hash(at, paint.seed))).clamp(0.0, 1.0);
+    Color::new(
+        c.r + (WORN.r - c.r) * t,
+        c.g + (WORN.g - c.g) * t,
+        c.b + (WORN.b - c.b) * t,
+        c.a,
+    )
+}
+
+/// Repaint and weather a batch of weapon triangles, in whichever local space
+/// they were built. Hands and the muzzle flash never pass through this: gear
+/// and light do not take the finish.
+fn paint_tris(tris: &mut [Tri], paint: Paint) {
+    for t in tris.iter_mut() {
+        t.color = painted(t.color, paint, centroid(*t));
+    }
+}
+
+/// [`paint_tris`] for one triangle, on the way into the per-frame draw list.
+fn painted_tri(t: Tri, paint: Paint) -> Tri {
+    Tri::new(t.a, t.b, t.c, painted(t.color, paint, centroid(t)))
+}
+
 /// How much of the weapon's sway the hands do not follow. A hand that tracked
 /// the weapon exactly would make the two read as one rigid object; a little
 /// lag is what makes an arm look like it is holding something.
@@ -850,6 +1076,13 @@ struct Def {
     /// Where the support hand closes on the fore-end. `None` for the weapons
     /// that are held in one hand, where a second hand would have nowhere to be.
     support: Option<Vec3>,
+    /// Where an optic is bolted on: the centre of the sight it adds.
+    optic: Vec3,
+    /// Where a magazine extension grows from — the centre of the box an
+    /// extended magazine adds — and its half-extents. Authored per weapon,
+    /// because a box magazine, a tube and a drum do not extend alike.
+    mag: Vec3,
+    mag_ext: Vec3,
 }
 
 fn def(kind: WeaponKind) -> Def {
@@ -861,6 +1094,9 @@ fn def(kind: WeaponKind) -> Def {
             muzzle: vec3(0.0, -0.074, 0.872),
             grip: vec3(0.0, -0.166, -0.114),
             support: Some(vec3(0.0, -0.150, 0.190)),
+            optic: vec3(0.0, -0.010, 0.080),
+            mag: vec3(0.0, -0.256, 0.045),
+            mag_ext: vec3(0.016, 0.050, 0.030),
         },
         WeaponKind::Shotgun => Def {
             hip: vec3(0.165, -0.112, 0.420),
@@ -869,6 +1105,11 @@ fn def(kind: WeaponKind) -> Def {
             muzzle: vec3(0.0, -0.094, 0.746),
             grip: vec3(0.0, -0.176, -0.076),
             support: Some(vec3(0.0, -0.164, 0.120)),
+            optic: vec3(0.0, -0.018, 0.070),
+            // The tube runs the whole barrel; the extension is a collar past
+            // its front end.
+            mag: vec3(0.0, -0.096, 0.800),
+            mag_ext: vec3(0.018, 0.018, 0.055),
         },
         WeaponKind::Smg => Def {
             hip: vec3(0.130, -0.077, 0.360),
@@ -877,6 +1118,9 @@ fn def(kind: WeaponKind) -> Def {
             muzzle: vec3(0.0, -0.076, 0.406),
             grip: vec3(0.0, -0.155, -0.096),
             support: Some(vec3(0.0, -0.148, 0.158)),
+            optic: vec3(0.0, -0.016, 0.060),
+            mag: vec3(0.0, -0.300, 0.022),
+            mag_ext: vec3(0.015, 0.052, 0.026),
         },
         WeaponKind::Sniper => Def {
             hip: vec3(0.170, -0.102, 0.440),
@@ -885,6 +1129,10 @@ fn def(kind: WeaponKind) -> Def {
             muzzle: vec3(0.0, -0.085, 1.006),
             grip: vec3(0.0, -0.158, -0.130),
             support: Some(vec3(0.0, -0.146, 0.215)),
+            // The sniper carries its own scope; an optic rides above it.
+            optic: vec3(0.0, 0.052, 0.080),
+            mag: vec3(0.0, -0.245, -0.030),
+            mag_ext: vec3(0.017, 0.055, 0.028),
         },
         WeaponKind::Lmg => Def {
             hip: vec3(0.175, -0.117, 0.430),
@@ -893,6 +1141,9 @@ fn def(kind: WeaponKind) -> Def {
             muzzle: vec3(0.0, -0.095, 0.891),
             grip: vec3(0.0, -0.190, -0.138),
             support: Some(vec3(0.0, -0.172, 0.300)),
+            optic: vec3(0.0, -0.008, 0.070),
+            mag: vec3(0.0, -0.278, -0.020),
+            mag_ext: vec3(0.048, 0.040, 0.055),
         },
         WeaponKind::Pistol => Def {
             hip: vec3(0.140, -0.047, 0.355),
@@ -901,6 +1152,9 @@ fn def(kind: WeaponKind) -> Def {
             muzzle: vec3(0.0, -0.036, 0.132),
             grip: vec3(0.0, -0.118, -0.066),
             support: None,
+            optic: vec3(0.0, -0.010, 0.045),
+            mag: vec3(0.0, -0.172, -0.090),
+            mag_ext: vec3(0.013, 0.032, 0.022),
         },
         WeaponKind::Knife => Def {
             hip: vec3(0.150, -0.057, 0.350),
@@ -909,19 +1163,129 @@ fn def(kind: WeaponKind) -> Def {
             muzzle: vec3(0.0, 0.0, 0.212),
             grip: vec3(0.0, -0.072, -0.074),
             support: None,
+            // The knife takes no parts; the anchors are never read.
+            optic: Vec3::ZERO,
+            mag: Vec3::ZERO,
+            mag_ext: Vec3::ZERO,
         },
     }
 }
 
-fn slot(kind: WeaponKind) -> usize {
-    match kind {
-        WeaponKind::Rifle => 0,
-        WeaponKind::Shotgun => 1,
-        WeaponKind::Smg => 2,
-        WeaponKind::Sniper => 3,
-        WeaponKind::Lmg => 4,
-        WeaponKind::Pistol => 5,
-        WeaponKind::Knife => 6,
+/// One box of kit geometry: centred on `at`, half-extents `half`.
+fn kit_box(out: &mut Vec<Tri>, at: Vec3, half: Vec3, color: Color) {
+    box3(out, at - half, at + half, color);
+}
+
+/// A muzzle device: a sleeve growing forward from the barrel tip.
+fn muzzle_kit(out: &mut Vec<Tri>, at: Vec3, len: f32, half: f32) {
+    kit_box(
+        out,
+        at + vec3(0.0, 0.0, len * 0.5 - 0.010),
+        vec3(half, half, len * 0.5),
+        STEEL_DARK,
+    );
+}
+
+/// The attachment geometry a build adds to a weapon's own, in local space and
+/// factory colours — the paint pass recolours it with everything else.
+///
+/// The shape is keyed on the part id, the one name both the bench and the
+/// in-hand draw read; a part this build does not know draws nothing, which is
+/// exactly what it resolves to as well.
+fn kit_into(out: &mut Vec<Tri>, kind: WeaponKind, build: &WeaponBuild) {
+    let d = def(kind);
+    for entry in &build.entries {
+        match entry.part.0 {
+            "micro_dot" => {
+                kit_box(out, d.optic, vec3(0.015, 0.016, 0.028), RAIL);
+                kit_box(
+                    out,
+                    d.optic + vec3(0.0, 0.0, 0.028),
+                    vec3(0.011, 0.011, 0.002),
+                    BLACK,
+                );
+            }
+            "marksman_scope" => {
+                kit_box(out, d.optic, vec3(0.017, 0.018, 0.080), RAIL);
+                kit_box(
+                    out,
+                    d.optic + vec3(0.0, 0.0, 0.082),
+                    vec3(0.019, 0.019, 0.006),
+                    BLACK,
+                );
+            }
+            "compensator" => muzzle_kit(out, d.muzzle, 0.065, 0.020),
+            "flash_hider" => muzzle_kit(out, d.muzzle, 0.048, 0.017),
+            "heavy_barrel" => muzzle_kit(out, d.muzzle, 0.130, 0.012),
+            "extended_mag" => kit_box(out, d.mag, d.mag_ext, POLY),
+            "quick_mag" => {
+                kit_box(out, d.mag, d.mag_ext * 0.8, POLY);
+                kit_box(
+                    out,
+                    d.mag + vec3(0.0, d.mag_ext.y * 0.65, 0.0),
+                    vec3(d.mag_ext.x * 0.9, 0.006, d.mag_ext.z * 0.9),
+                    RAIL,
+                );
+            }
+            // The lot is ammunition, not hardware: its mark is a band across
+            // the well the magazine sits in.
+            "surplus_lot" => kit_box(
+                out,
+                d.mag + vec3(0.0, d.mag_ext.y, 0.0),
+                vec3(d.mag_ext.x * 0.9, 0.008, d.mag_ext.z * 0.9),
+                OLIVE,
+            ),
+            _ => {}
+        }
+    }
+}
+
+/// The weapon as the armory shows it: the model with its attachments, painted
+/// and worn, turned to a left profile with a touch of top and front so the
+/// optic and the muzzle read — centred on the origin, ready for an
+/// orthographic, portrait-style draw.
+pub fn preview_mesh(kind: WeaponKind, fitted: &WeaponBuild, paint: Paint) -> Mesh {
+    let mut tris = build(kind);
+    kit_into(&mut tris, kind, fitted);
+    paint_tris(&mut tris, paint);
+    let pose = Mat4::from_rotation_y(-1.32) * Mat4::from_rotation_x(0.10);
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    for t in &mut tris {
+        *t = t.map(pose);
+        for p in [t.a, t.b, t.c] {
+            lo = lo.min(p);
+            hi = hi.max(p);
+        }
+    }
+    let mid = (lo + hi) * 0.5;
+    for t in &mut tris {
+        *t = Tri::new(t.a - mid, t.b - mid, t.c - mid, t.color);
+    }
+    tris_to_mesh(&tris)
+}
+
+/// Flat triangles as a `Mesh`, for the portrait draw: the colours ride on the
+/// vertices, and the uvs and normals are never read by it.
+fn tris_to_mesh(tris: &[Tri]) -> Mesh {
+    let mut vertices = Vec::with_capacity(tris.len() * 3);
+    let mut indices = Vec::with_capacity(tris.len() * 3);
+    for (i, t) in tris.iter().enumerate() {
+        for p in [t.a, t.b, t.c] {
+            vertices.push(Vertex {
+                position: p,
+                uv: Vec2::ZERO,
+                color: crate::mesh::rgba(t.color),
+                normal: Vec4::new(0.0, 0.0, 1.0, 0.0),
+            });
+        }
+        let base = (i * 3) as u16;
+        indices.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+    Mesh {
+        vertices,
+        indices,
+        texture: None,
     }
 }
 
@@ -962,6 +1326,9 @@ pub struct ViewModel {
     /// of allocations a frame for geometry that never changes size.
     body: Vec<Tri>,
     flash: Vec<Tri>,
+    /// Scratch for the attachments of whatever is in hand, rebuilt per frame
+    /// like the body and for the same reason.
+    kit: Vec<Tri>,
 }
 
 impl ViewModel {
@@ -972,11 +1339,12 @@ impl ViewModel {
             crouch: 0.0,
             prone: 0.0,
             grenade_t: 0.0,
-            // One entry per kind, in `slot` order.
+            // One entry per kind, in `WeaponKind::index` order.
             parts: ALL_KINDS.map(build),
             hands: ALL_KINDS.map(hands_for),
             body: Vec::new(),
             flash: Vec::new(),
+            kit: Vec::new(),
         }
     }
 
@@ -1013,8 +1381,9 @@ impl ViewModel {
         self.grenade_t = GRENADE_TIME;
     }
 
-    /// Call in the 2D pass, after `set_default_camera()`.
-    pub fn draw(&mut self, player: &Player, arsenal: &Arsenal) {
+    /// Call in the 2D pass, after `set_default_camera()`. `paints` is the
+    /// armory's finish per weapon kind.
+    pub fn draw(&mut self, player: &Player, arsenal: &Arsenal, paints: &[Paint; 7]) {
         let viewport = vec2(screen_width(), screen_height());
         let fovy = player.fovy();
         if viewport.x < 1.0 || viewport.y < 1.0 || fovy <= 0.0 {
@@ -1024,14 +1393,27 @@ impl ViewModel {
         let f = (viewport.y * 0.5) / (fovy * 0.5).tan();
 
         let weapon = arsenal.active_weapon();
+        let paint = paints[weapon.kind.index()];
         let pose = self.pose(player, weapon);
         let mat = pose.matrix();
 
-        let parts = &self.parts[slot(weapon.kind)];
-        let hand_parts = &self.hands[slot(weapon.kind)];
+        let parts = &self.parts[weapon.kind.index()];
+        let hand_parts = &self.hands[weapon.kind.index()];
+        let kit = &mut self.kit;
+        kit.clear();
+        kit_into(kit, weapon.kind, weapon.build());
         let body = &mut self.body;
         body.clear();
-        body.extend(parts.iter().map(|t| t.map(mat)).filter(Tri::finite));
+        // The finish is applied in local space, before the pose: the wear
+        // pattern hashes to the weapon, not to the world it is moving through.
+        body.extend(
+            parts
+                .iter()
+                .chain(kit.iter())
+                .map(|t| painted_tri(*t, paint))
+                .map(|t| t.map(mat))
+                .filter(Tri::finite),
+        );
         // The hands are held slightly back from the weapon's sway, so a weapon
         // being swung around does not read as one rigid object with arms welded
         // to it.
@@ -1224,4 +1606,93 @@ fn project_point(v: Vec3, viewport: Vec2, f: f32) -> Option<Vec2> {
         viewport.x * 0.5 + (v.x / v.z) * f,
         viewport.y * 0.5 - (v.y / v.z) * f,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::weapon::{BuildEntry, PartId, SlotId};
+
+    /// The factory finish is the weapon as shipped: every role maps to the
+    /// const it has always been, and the parts of a weapon that are not the
+    /// weapon — sights, gloves — are outside the table.
+    #[test]
+    fn the_factory_finish_changes_nothing() {
+        let f = &FINISHES[0];
+        for c in [STEEL, STEEL_DARK, POLY, RAIL, WOOD, WOOD_DARK, OLIVE] {
+            assert_eq!(refinished(c, f), c);
+        }
+        assert_eq!(refinished(BLACK, &FINISHES[4]), BLACK);
+        assert_eq!(refinished(GLOVE, &FINISHES[4]), GLOVE);
+    }
+
+    /// Wear at zero is the finish itself; more wear is strictly further from
+    /// it; the pattern is deterministic for one seed and not for another.
+    #[test]
+    fn wear_blends_towards_the_worn_colour() {
+        let at = vec3(0.1, -0.2, 0.3);
+        let paint = |wear: f32, seed: u32| Paint {
+            finish: 0,
+            wear,
+            seed,
+        };
+        assert_eq!(painted(STEEL, paint(0.0, 7), at), STEEL);
+
+        let light = painted(STEEL, paint(0.2, 7), at);
+        let heavy = painted(STEEL, paint(0.8, 7), at);
+        assert!(light.r > STEEL.r && light.r < WORN.r, "{light:?}");
+        assert!(heavy.r > light.r, "{heavy:?} vs {light:?}");
+        assert_eq!(heavy, painted(STEEL, paint(0.8, 7), at));
+        assert_ne!(
+            heavy,
+            painted(STEEL, paint(0.8, 8), at),
+            "the seed did nothing"
+        );
+    }
+
+    /// A paint survives the settings spelling; junk falls back to the factory
+    /// finish rather than failing, one field at a time.
+    #[test]
+    fn a_paint_round_trips_through_text() {
+        for (i, f) in FINISHES.iter().enumerate() {
+            let p = Paint {
+                finish: i,
+                wear: 0.35,
+                seed: 12345,
+            };
+            assert_eq!(Paint::from_text(&p.to_text()), p, "{}", f.id);
+        }
+        assert_eq!(Paint::from_text(""), Paint::factory());
+        assert_eq!(Paint::from_text("nonsense"), Paint::factory());
+        let rough = Paint::from_text("abyss@oops:7");
+        assert_eq!(rough.finish, 3, "the finish name still read");
+        assert_eq!(rough.wear, 0.0, "a broken number falls back");
+        assert_eq!(rough.seed, 7);
+    }
+
+    /// The preview builds real geometry for every gun, and fitting a part
+    /// adds to it — which is what the bench's panel shows.
+    #[test]
+    fn the_preview_builds_a_mesh() {
+        let plain = preview_mesh(WeaponKind::Rifle, &WeaponBuild::empty(), Paint::factory());
+        assert!(!plain.vertices.is_empty());
+        assert_eq!(plain.vertices.len() % 3, 0);
+        assert_eq!(plain.indices.len(), plain.vertices.len());
+
+        let fitted = preview_mesh(
+            WeaponKind::Rifle,
+            &WeaponBuild {
+                entries: vec![BuildEntry {
+                    slot: SlotId("optic"),
+                    part: PartId("micro_dot"),
+                    roll: 0.5,
+                }],
+            },
+            Paint::factory(),
+        );
+        assert!(
+            fitted.vertices.len() > plain.vertices.len(),
+            "the optic added no geometry"
+        );
+    }
 }

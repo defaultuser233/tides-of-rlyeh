@@ -60,6 +60,12 @@ pub const ALL_KINDS: [WeaponKind; 7] = [
     WeaponKind::Knife,
 ];
 
+/// The kind a settings key names — the inverse of [`WeaponKind::key`] — or
+/// `None` when nothing matches.
+pub fn kind_named(name: &str) -> Option<WeaponKind> {
+    ALL_KINDS.iter().copied().find(|k| k.key() == name.trim())
+}
+
 const SEMI: &[FireMode] = &[FireMode::Single];
 const AUTO_SEMI: &[FireMode] = &[FireMode::Auto, FireMode::Single];
 const RIFLE_MODES: &[FireMode] = &[FireMode::Auto, FireMode::Burst, FireMode::Single];
@@ -110,10 +116,8 @@ pub struct WeaponStats {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Value {
     Static(f32),
-    // No shipping data is ranged yet — the part catalogue stays empty until
-    // the gunsmith UI can install something — so only the tests construct one.
-    // It is the point of the model, not a leftover.
-    #[allow(dead_code)]
+    /// A number that differs between two copies of one part, sampled by the
+    /// build entry's roll. The shipping catalogue uses one: surplus ammo.
     Range {
         min: f32,
         max: f32,
@@ -268,10 +272,6 @@ pub enum Modifier {
 /// The two are separate because a `Modifier` carries a number while a `StatMod`
 /// carries a `Value`, whose number is only rolled when an instance is built.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-// Nothing in a shipping build writes a part spec, so nothing picks a stage yet:
-// the catalogue is empty until the gunsmith UI has something to install, and
-// the tests are what build `StatMod`s today.
-#[allow(dead_code)]
 pub enum ModKind {
     Add,
     MulPre,
@@ -380,6 +380,60 @@ impl WeaponBuild {
             entries: Vec::new(),
         }
     }
+
+    /// The build as the settings file spells it: `slot=part@roll`, one per
+    /// comma, empty when nothing is installed. Rolls are written to two
+    /// decimals — the file reads back into the same build, not a new one.
+    pub fn to_text(&self) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        for (i, entry) in self.entries.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            let _ = write!(out, "{}={}@{:.2}", entry.slot.0, entry.part.0, entry.roll);
+        }
+        out
+    }
+
+    /// Parse [`WeaponBuild::to_text`]'s spelling. Junk is skipped rather than
+    /// reported: this reads a hand-editable file. An entry naming a slot or a
+    /// part this build does not know is skipped too — ids are `&'static str`
+    /// here, so a name that is not in the tables could not be carried anyway —
+    /// and the rest of the line still reads.
+    pub fn from_text(text: &str) -> Self {
+        let mut entries = Vec::new();
+        for item in text.split(',') {
+            let Some((slot, rest)) = item.trim().split_once('=') else {
+                continue;
+            };
+            let (part, roll) = rest.split_once('@').unwrap_or((rest, "0.5"));
+            let (Some(slot), Some(part)) = (slot_named(slot.trim()), part_named(part.trim()))
+            else {
+                continue;
+            };
+            entries.push(BuildEntry {
+                slot,
+                part,
+                roll: roll.trim().parse::<f32>().unwrap_or(0.5).clamp(0.0, 1.0),
+            });
+        }
+        Self { entries }
+    }
+
+    /// The build with everything a def cannot hold removed: entries are kept in
+    /// order, each only if it validates against what is already kept. A
+    /// hand-edited file degrades to the parts that fit, not to nonsense.
+    pub fn screened(self, def: &WeaponDef) -> Self {
+        let mut kept = Self::empty();
+        for entry in self.entries {
+            kept.entries.push(entry);
+            if validate(def, &kept).is_err() {
+                kept.entries.pop();
+            }
+        }
+        kept
+    }
 }
 
 /// One choice: a part in a slot, at a roll.
@@ -448,22 +502,214 @@ fn part_def(id: PartId) -> Option<&'static PartDef> {
     CATALOG.iter().find(|p| p.id == id)
 }
 
-/// The parts this build of the game knows about.
-///
-/// Shipping builds have none: nothing in the game can install a part yet, so
-/// one here would be content with no way to reach it. The tests swap in a
-/// catalogue of their own (`demo_parts`, at the bottom of the file), which keeps
-/// `resolve` and `validate` honest against real part data without inventing an
-/// inventory that no screen can open.
-#[cfg(not(test))]
-static CATALOG: &[PartDef] = &[];
+/// The static slot id a settings string names, or `None`. Ids are
+/// `&'static str` by design, so text read back from a file is matched to the
+/// table rather than carried as itself; the subslots a part can open are
+/// deliberately not nameable this way.
+fn slot_named(name: &str) -> Option<SlotId> {
+    GUN_SLOTS.iter().map(|s| s.id).find(|id| id.0 == name)
+}
 
+/// The static part id a settings string names, or `None`.
+fn part_named(name: &str) -> Option<PartId> {
+    CATALOG.iter().map(|p| p.id).find(|id| id.0 == name)
+}
+
+/// The parts the game ships, as the armory installs them.
+///
+/// Every one of them has to be a choice rather than a rung: within a slot the
+/// parts trade different stats against each other, or the "best" build picks
+/// itself and the bench is a formality.
+mod parts {
+    use super::*;
+
+    pub const MICRO_DOT: PartDef = PartDef {
+        id: PartId("micro_dot"),
+        slot: SlotId("optic"),
+        interface: InterfaceId("rail"),
+        subslots: &[],
+        mods: &[StatMod {
+            stat: StatId::AdsFov,
+            kind: ModKind::Add,
+            amount: Value::Static(-4.0),
+        }],
+    };
+
+    /// Magnified: it trades field of view for a slower walk.
+    pub const MARKSMAN_SCOPE: PartDef = PartDef {
+        id: PartId("marksman_scope"),
+        slot: SlotId("optic"),
+        interface: InterfaceId("rail"),
+        subslots: &[],
+        mods: &[
+            StatMod {
+                stat: StatId::AdsFov,
+                kind: ModKind::Add,
+                amount: Value::Static(-10.0),
+            },
+            StatMod {
+                stat: StatId::MoveScale,
+                kind: ModKind::MulPre,
+                amount: Value::Static(0.94),
+            },
+        ],
+    };
+
+    pub const COMPENSATOR: PartDef = PartDef {
+        id: PartId("compensator"),
+        slot: SlotId("muzzle"),
+        interface: InterfaceId("threaded_muzzle"),
+        subslots: &[],
+        mods: &[
+            StatMod {
+                stat: StatId::RecoilPitch,
+                kind: ModKind::MulPre,
+                amount: Value::Static(0.75),
+            },
+            StatMod {
+                stat: StatId::RecoilYaw,
+                kind: ModKind::MulPre,
+                amount: Value::Static(0.75),
+            },
+        ],
+    };
+
+    /// Tames the walk at full auto less than the compensator, but keeps the
+    /// burst tight.
+    pub const FLASH_HIDER: PartDef = PartDef {
+        id: PartId("flash_hider"),
+        slot: SlotId("muzzle"),
+        interface: InterfaceId("threaded_muzzle"),
+        subslots: &[],
+        mods: &[
+            StatMod {
+                stat: StatId::BaseSpread,
+                kind: ModKind::MulPre,
+                amount: Value::Static(0.88),
+            },
+            StatMod {
+                stat: StatId::RecoilYaw,
+                kind: ModKind::MulPre,
+                amount: Value::Static(0.90),
+            },
+        ],
+    };
+
+    /// Longer reach, and a barrel that pulls harder for it.
+    pub const HEAVY_BARREL: PartDef = PartDef {
+        id: PartId("heavy_barrel"),
+        slot: SlotId("muzzle"),
+        interface: InterfaceId("threaded_muzzle"),
+        subslots: &[],
+        mods: &[
+            StatMod {
+                stat: StatId::FalloffStart,
+                kind: ModKind::MulPre,
+                amount: Value::Static(1.35),
+            },
+            StatMod {
+                stat: StatId::FalloffEnd,
+                kind: ModKind::MulPre,
+                amount: Value::Static(1.25),
+            },
+            StatMod {
+                stat: StatId::RecoilPitch,
+                kind: ModKind::MulPre,
+                amount: Value::Static(1.10),
+            },
+        ],
+    };
+
+    pub const EXTENDED_MAG: PartDef = PartDef {
+        id: PartId("extended_mag"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell"),
+        subslots: &[],
+        mods: &[
+            StatMod {
+                stat: StatId::MagSize,
+                kind: ModKind::Add,
+                amount: Value::Static(10.0),
+            },
+            StatMod {
+                stat: StatId::ReloadTime,
+                kind: ModKind::Add,
+                amount: Value::Static(0.15),
+            },
+        ],
+    };
+
+    /// A magazine that comes out faster, for a magazine that holds less.
+    pub const QUICK_MAG: PartDef = PartDef {
+        id: PartId("quick_mag"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell"),
+        subslots: &[],
+        mods: &[
+            StatMod {
+                stat: StatId::ReloadTime,
+                // `MulPost`: the reload time is snapped into its envelope and
+                // rounded first, then shortened — the stage that reads "after
+                // the design bounds, this is what handling buys".
+                kind: ModKind::MulPost,
+                amount: Value::Static(0.72),
+            },
+            StatMod {
+                stat: StatId::MagSize,
+                kind: ModKind::MulPre,
+                amount: Value::Static(0.85),
+            },
+        ],
+    };
+
+    /// Surplus ammunition: the same crate, a different lot. A range is what
+    /// makes two copies of one part feel different without a second part, and
+    /// this is the one shipping part whose numbers are rolled per copy.
+    pub const SURPLUS_LOT: PartDef = PartDef {
+        id: PartId("surplus_lot"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell"),
+        subslots: &[],
+        mods: &[StatMod {
+            stat: StatId::Damage,
+            kind: ModKind::Add,
+            amount: Value::Range {
+                min: -2.0,
+                max: 6.0,
+            },
+        }],
+    };
+
+    /// The shipping catalogue, as one list: what the game resolves against
+    /// before the tests add their own parts to the copy they build.
+    pub const SHIPPED: &[PartDef] = &[
+        MICRO_DOT,
+        MARKSMAN_SCOPE,
+        COMPENSATOR,
+        FLASH_HIDER,
+        HEAVY_BARREL,
+        EXTENDED_MAG,
+        QUICK_MAG,
+        SURPLUS_LOT,
+    ];
+}
+
+/// The catalogue: what the armory installs, and what a saved build may name.
+#[cfg(not(test))]
+static CATALOG: &[PartDef] = parts::SHIPPED;
+
+/// The catalogue the tests resolve against: the shipping parts plus the demo
+/// and probe parts `demo_parts` keeps for exercising the model itself.
 #[cfg(test)]
 static CATALOG: &[PartDef] = &[
-    demo_parts::MICRO_DOT,
-    demo_parts::COMPENSATOR,
-    demo_parts::EXTENDED_MAG,
-    demo_parts::SURPLUS_LOT,
+    parts::MICRO_DOT,
+    parts::MARKSMAN_SCOPE,
+    parts::COMPENSATOR,
+    parts::FLASH_HIDER,
+    parts::HEAVY_BARREL,
+    parts::EXTENDED_MAG,
+    parts::QUICK_MAG,
+    parts::SURPLUS_LOT,
     demo_parts::RISER,
     demo_parts::SCOPE,
     demo_parts::PROBE_FLAT,
@@ -472,6 +718,38 @@ static CATALOG: &[PartDef] = &[
     demo_parts::PROBE_HEAVY,
     demo_parts::PROBE_PELLETS,
 ];
+
+/// Every part the game knows, for the armory to offer.
+pub fn catalogue() -> &'static [PartDef] {
+    CATALOG
+}
+
+/// A part's name for the bench, in both languages. `None` for an id this build
+/// does not know — the armory prints the raw id for such a line rather than
+/// hiding it, because a save from another version is worth seeing.
+pub fn part_label(id: PartId) -> Option<(&'static str, &'static str)> {
+    Some(match id.0 {
+        "micro_dot" => ("MICRO DOT", "微型红点"),
+        "marksman_scope" => ("MARKSMAN SCOPE", "射手瞄准镜"),
+        "compensator" => ("COMPENSATOR", "补偿器"),
+        "flash_hider" => ("FLASH HIDER", "消焰器"),
+        "heavy_barrel" => ("HEAVY BARREL", "重枪管"),
+        "extended_mag" => ("EXTENDED MAG", "扩容弹匣"),
+        "quick_mag" => ("QUICK MAG", "快拔弹匣"),
+        "surplus_lot" => ("SURPLUS LOT", "库存弹药"),
+        _ => return None,
+    })
+}
+
+/// A slot's name for the bench, in both languages.
+pub fn slot_label(id: SlotId) -> Option<(&'static str, &'static str)> {
+    match id.0 {
+        "optic" => Some(("OPTIC", "瞄具")),
+        "muzzle" => Some(("MUZZLE", "枪口")),
+        "magazine" => Some(("MAGAZINE", "弹匣")),
+        _ => None,
+    }
+}
 
 /// Roll a def's own base value is sampled with; see `WeaponDef::base`.
 const DEF_BASE_ROLL: f32 = 0.5;
@@ -482,7 +760,7 @@ const DEF_BASE_ROLL: f32 = 0.5;
 /// Walked to a fixpoint rather than in list order, so a part may be listed
 /// before the part that opened its slot. A build is a set of choices, not a
 /// sequence of assembly steps.
-fn reachable_slots(def: &WeaponDef, build: &WeaponBuild) -> Vec<SlotDef> {
+pub fn reachable_slots(def: &WeaponDef, build: &WeaponBuild) -> Vec<SlotDef> {
     let mut slots = def.slots.to_vec();
     let mut changed = true;
     while changed {
@@ -906,6 +1184,27 @@ impl WeaponKind {
         }
     }
 
+    /// The share of a hit this weapon's fire carries through physical plate
+    /// (reference §17.2③ — "one visible armour-penetration number per
+    /// weapon", so "how does this gun do against a Juggernaut" is a decision
+    /// the player can make).
+    ///
+    /// Anchored on CS2's published values (AK-47 77.5%, M4A4 70%, Glock-18
+    /// 47%, Tec-9 90.6%, SG 553 100%, AWP 97.5%): rifles pierce, buckshot
+    /// and pistol rounds mostly do not, and a knife does not care about
+    /// plate at all. The enemy side of the exchange is `enemy::armor`.
+    pub fn armor_pen(self) -> f32 {
+        match self {
+            WeaponKind::Rifle => 0.78,
+            WeaponKind::Shotgun => 0.30,
+            WeaponKind::Smg => 0.55,
+            WeaponKind::Sniper => 0.97,
+            WeaponKind::Lmg => 0.85,
+            WeaponKind::Pistol => 0.45,
+            WeaponKind::Knife => 1.0,
+        }
+    }
+
     /// Short tag for the HUD slot strip.
     pub fn tag(self) -> &'static str {
         match self {
@@ -916,6 +1215,33 @@ impl WeaponKind {
             WeaponKind::Lmg => "LMG",
             WeaponKind::Pistol => "PST",
             WeaponKind::Knife => "KNF",
+        }
+    }
+
+    /// Position in `ALL_KINDS`: the index of every per-kind table the game
+    /// keeps — the armory's kit, the viewmodel's model cache.
+    pub fn index(self) -> usize {
+        match self {
+            WeaponKind::Rifle => 0,
+            WeaponKind::Shotgun => 1,
+            WeaponKind::Smg => 2,
+            WeaponKind::Sniper => 3,
+            WeaponKind::Lmg => 4,
+            WeaponKind::Pistol => 5,
+            WeaponKind::Knife => 6,
+        }
+    }
+
+    /// The name a settings key is built from: `build_rifle`, `paint_rifle`.
+    pub fn key(self) -> &'static str {
+        match self {
+            WeaponKind::Rifle => "rifle",
+            WeaponKind::Shotgun => "shotgun",
+            WeaponKind::Smg => "smg",
+            WeaponKind::Sniper => "sniper",
+            WeaponKind::Lmg => "lmg",
+            WeaponKind::Pistol => "pistol",
+            WeaponKind::Knife => "knife",
         }
     }
 
@@ -935,6 +1261,10 @@ impl WeaponKind {
 pub struct Weapon {
     pub kind: WeaponKind,
     pub mag: u32,
+    /// Rounds carried outside the magazine — what a reload draws on. The stash
+    /// decides how much a weapon goes into a mission with; ammo pickups top it
+    /// up.
+    pub reserve: u32,
     pub cooldown: f32,
     pub reload_t: f32,
     pub bloom: f32,
@@ -956,6 +1286,9 @@ pub struct Weapon {
 impl Weapon {
     /// The weapon as it comes out of the crate: its def resolved against an
     /// empty build.
+    // The game reaches every carried weapon through the kit, so nothing in the
+    // shipping path calls this; the tests and any kit-less reader use it.
+    #[allow(dead_code)]
     pub fn new(kind: WeaponKind) -> Self {
         Self::with_build(kind, WeaponBuild::empty())
     }
@@ -967,6 +1300,7 @@ impl Weapon {
         Self {
             kind,
             mag: resolved.as_stats().mag_size,
+            reserve: 0,
             cooldown: 0.0,
             reload_t: 0.0,
             bloom: 0.0,
@@ -1044,13 +1378,18 @@ impl Weapon {
         }
     }
 
+    /// Rounds found in the field: the magazine fills first and the rest goes
+    /// into the reserve, so a pickup is never wasted on a full magazine.
+    /// Returns how many were taken.
     pub fn add_ammo(&mut self, rounds: u32) -> u32 {
         if self.stats().infinite_ammo {
             return 0;
         }
-        let want = self.stats().mag_size.saturating_sub(self.mag).min(rounds);
-        self.mag += want;
-        want
+        let into_mag = self.stats().mag_size.saturating_sub(self.mag).min(rounds);
+        self.mag += into_mag;
+        let into_reserve = rounds - into_mag;
+        self.reserve += into_reserve;
+        into_mag + into_reserve
     }
 
     /// Spread in radians for the next shot.
@@ -1110,7 +1449,13 @@ impl Weapon {
     }
 
     pub fn start_reload(&mut self) -> bool {
-        if self.stats().infinite_ammo || self.is_reloading() || self.mag >= self.stats().mag_size {
+        // A reload moves rounds *from the reserve into the magazine*: with an
+        // empty reserve there is nothing to move, and the click is dry.
+        if self.stats().infinite_ammo
+            || self.is_reloading()
+            || self.mag >= self.stats().mag_size
+            || self.reserve == 0
+        {
             return false;
         }
         self.reload_t = self.stats().reload_time;
@@ -1132,7 +1477,13 @@ impl Weapon {
             self.reload_t -= dt;
             if self.reload_t <= 0.0 {
                 self.reload_t = 0.0;
-                self.mag = s.mag_size;
+                // The magazine takes what the reserve has: a reload out of a
+                // short reserve loads a partial magazine, which is what a
+                // finite reserve means.
+                let want = s.mag_size.saturating_sub(self.mag);
+                let take = want.min(self.reserve);
+                self.mag += take;
+                self.reserve -= take;
                 self.bloom = 0.0;
             }
         }
@@ -1164,7 +1515,18 @@ impl Arsenal {
     /// this used to take was walked with a `continue` past anything that did
     /// not fit, which is how mission 5 shipped declaring five weapons and
     /// carrying two without a word to anyone.
+    // The game always carries the kit, so this is the kit-less path the tests
+    // (and any future "plain loadout" reader) use.
+    #[allow(dead_code)]
     pub fn new(loadout: [Option<WeaponKind>; 2]) -> Self {
+        Self::with_builds(loadout, &std::array::from_fn(|_| WeaponBuild::empty()))
+    }
+
+    /// [`Arsenal::new`] with the player's kit: each weapon is carried with the
+    /// build the armory gave its kind, kept on the instance so no kind-mate
+    /// sees it. `Kit` screens the builds before they get here; `carry` checks
+    /// them again on the way in.
+    pub fn with_builds(loadout: [Option<WeaponKind>; 2], builds: &[WeaponBuild; 7]) -> Self {
         let mut ars = Self {
             slots: [None, None, None, None],
             active: 0,
@@ -1174,23 +1536,25 @@ impl Arsenal {
             // A melee weapon never takes a long-gun slot — that is what slot 4
             // is for — and the sidearm is always carried.
             if let Some(k) = k.filter(|k| k.class() != SlotClass::Melee) {
-                ars.slots[i] = Some(Self::carry(k));
+                ars.slots[i] = Some(Self::carry(k, builds[k.index()].clone()));
             }
         }
-        ars.slots[2] = Some(Self::carry(WeaponKind::Pistol));
-        ars.slots[3] = Some(Self::carry(WeaponKind::Knife));
+        let pistol = WeaponKind::Pistol.index();
+        let knife = WeaponKind::Knife.index();
+        ars.slots[2] = Some(Self::carry(WeaponKind::Pistol, builds[pistol].clone()));
+        ars.slots[3] = Some(Self::carry(WeaponKind::Knife, builds[knife].clone()));
         ars
     }
 
     /// One carried weapon, checked against its def before it is handed out.
     ///
     /// A build that breaks the gunsmith rules is reported and carried anyway:
-    /// the only builds in the game today are empty ones, so a violation here
-    /// means a loadout table somewhere is wrong, and a mission that refuses to
-    /// start is a worse answer to a typo than a log line and the weapon as
-    /// issued.
-    fn carry(kind: WeaponKind) -> Weapon {
-        let w = Weapon::new(kind);
+    /// the loadout a mission issues and the armory screening both aim at clean
+    /// builds, so a violation here means a table somewhere is wrong, and a
+    /// mission that refuses to start is a worse answer to a typo than a log
+    /// line and the weapon as issued.
+    fn carry(kind: WeaponKind, build: WeaponBuild) -> Weapon {
+        let w = Weapon::with_build(kind, build);
         if let Err(bad) = validate(def(kind), w.build()) {
             eprintln!("{kind:?} does not build cleanly: {bad:?}");
         }
@@ -1199,6 +1563,12 @@ impl Arsenal {
 
     pub fn slot(&self, i: usize) -> Option<&Weapon> {
         self.slots.get(i).and_then(|w| w.as_ref())
+    }
+
+    /// The weapon in slot `i`, for the few things that stock it directly —
+    /// the stash's spare magazines, at mission start.
+    pub fn slot_mut(&mut self, i: usize) -> Option<&mut Weapon> {
+        self.slots.get_mut(i).and_then(|w| w.as_mut())
     }
 
     /// The active weapon, falling back to the first occupied slot.
@@ -1210,12 +1580,19 @@ impl Arsenal {
             .expect("arsenal always carries at least a sidearm")
     }
 
-    pub fn active_weapon_mut(&mut self) -> &mut Weapon {
-        let i = if self.slots[self.active].is_some() {
+    /// The slot the weapon in hand really lives in: `active` when that slot is
+    /// occupied, and the first occupied slot otherwise — the fallback
+    /// [`Arsenal::active_weapon`] reads through, in index form.
+    fn held_index(&self) -> usize {
+        if self.slots[self.active].is_some() {
             self.active
         } else {
             self.slots.iter().position(|w| w.is_some()).unwrap_or(0)
-        };
+        }
+    }
+
+    pub fn active_weapon_mut(&mut self) -> &mut Weapon {
+        let i = self.held_index();
         self.slots[i].as_mut().expect("slot checked above")
     }
 
@@ -1223,10 +1600,19 @@ impl Arsenal {
         if i >= self.slots.len() || i == self.active || self.slots[i].is_none() {
             return;
         }
+        // Putting the weapon in hand away cancels whatever it was doing. A
+        // reload used to keep ticking while holstered and quietly refill the
+        // magazine behind the player's back — to the knife and back and the
+        // rifle came up full with no reload ever seen. Only the weapon in hand
+        // can be reloading (every `start_reload` goes through
+        // `active_weapon_mut`), so cancelling this one is cancelling the reload.
+        if let Some(w) = self.slots[self.held_index()].as_mut() {
+            w.reload_t = 0.0;
+        }
         self.active = i;
         self.switch_t = 0.34;
+        // The weapon being drawn starts clean too: no carry-over inspect pose.
         if let Some(w) = self.slots[i].as_mut() {
-            w.reload_t = 0.0;
             w.inspect_t = 0.0;
         }
     }
@@ -1257,13 +1643,11 @@ impl Arsenal {
 
 /// Parts for the tests to build with.
 ///
-/// A shipping build has no catalogue, so the model would be exercised by empty
-/// builds alone if these lived anywhere else. The first six are parts a rifle
-/// can legitimately take — one of them structural, opening a slot for another,
-/// and one ranged, which is what "same part, different feel" means — and the
-/// rest are arithmetic probes whose names say what they do, so that the ordering
-/// tests are about the order and not about anyone's idea of what a compensator
-/// should feel like.
+/// The shipping catalogue has its own parts now (see `parts`, above); these
+/// stay beside the tests because nothing in the game should install them: one
+/// part opens a slot for another, and the rest are arithmetic probes whose
+/// names say what they do, so that the ordering tests are about the order and
+/// not about anyone's idea of what a compensator should feel like.
 #[cfg(test)]
 mod demo_parts {
     use super::*;
@@ -1273,73 +1657,6 @@ mod demo_parts {
         id: SlotId("probe"),
         accepts: InterfaceId("probe"),
         max_parts: 8,
-    };
-
-    pub const MICRO_DOT: PartDef = PartDef {
-        id: PartId("micro_dot"),
-        slot: SlotId("optic"),
-        interface: InterfaceId("rail"),
-        subslots: &[],
-        mods: &[StatMod {
-            stat: StatId::AdsFov,
-            kind: ModKind::Add,
-            amount: Value::Static(-4.0),
-        }],
-    };
-
-    pub const COMPENSATOR: PartDef = PartDef {
-        id: PartId("compensator"),
-        slot: SlotId("muzzle"),
-        interface: InterfaceId("threaded_muzzle"),
-        subslots: &[],
-        mods: &[
-            StatMod {
-                stat: StatId::RecoilPitch,
-                kind: ModKind::MulPre,
-                amount: Value::Static(0.75),
-            },
-            StatMod {
-                stat: StatId::RecoilYaw,
-                kind: ModKind::MulPre,
-                amount: Value::Static(0.75),
-            },
-        ],
-    };
-
-    pub const EXTENDED_MAG: PartDef = PartDef {
-        id: PartId("extended_mag"),
-        slot: SlotId("magazine"),
-        interface: InterfaceId("magwell"),
-        subslots: &[],
-        mods: &[
-            StatMod {
-                stat: StatId::MagSize,
-                kind: ModKind::Add,
-                amount: Value::Static(10.0),
-            },
-            StatMod {
-                stat: StatId::ReloadTime,
-                kind: ModKind::Add,
-                amount: Value::Static(0.15),
-            },
-        ],
-    };
-
-    /// Surplus ammunition: the same crate, a different lot. A range is what
-    /// makes two copies of one part feel different without a second part.
-    pub const SURPLUS_LOT: PartDef = PartDef {
-        id: PartId("surplus_lot"),
-        slot: SlotId("magazine"),
-        interface: InterfaceId("magwell"),
-        subslots: &[],
-        mods: &[StatMod {
-            stat: StatId::Damage,
-            kind: ModKind::Add,
-            amount: Value::Range {
-                min: -4.0,
-                max: 4.0,
-            },
-        }],
     };
 
     /// A rail riser: no numbers of its own, one slot for whatever goes on top.
@@ -1457,6 +1774,7 @@ mod demo_parts {
 #[cfg(test)]
 mod tests {
     use super::demo_parts::*;
+    use super::parts::*;
     use super::*;
 
     const FRAME: f32 = 1.0 / 60.0;
@@ -2003,21 +2321,194 @@ mod tests {
     }
 
     /// The four-slot design: a sidearm and a knife are always carried, whatever
-    /// a mission asks for.
+    /// the two long slots hold — an arsenal that carries nothing still leaves
+    /// the player a weapon.
     #[test]
     fn the_sidearm_and_knife_are_always_present() {
-        for mission in crate::campaign::MISSIONS.iter() {
-            let ars = Arsenal::new(mission.loadout);
+        for loadout in [
+            [Some(WeaponKind::Rifle), None],
+            [Some(WeaponKind::Smg), Some(WeaponKind::Shotgun)],
+            [None, None],
+        ] {
+            let ars = Arsenal::new(loadout);
             assert_eq!(
                 ars.slot(SlotClass::Pistol as usize).map(|w| w.kind),
                 Some(WeaponKind::Pistol),
-                "mission without a sidearm"
+                "arsenal without a sidearm"
             );
             assert_eq!(
                 ars.slot(SlotClass::Melee as usize).map(|w| w.kind),
                 Some(WeaponKind::Knife),
-                "mission without a knife"
+                "arsenal without a knife"
             );
+        }
+    }
+
+    /// A reload is a thing done with the weapon in hand: putting it away
+    /// cancels it, and nothing finishes in the holster. Holstered reloads used
+    /// to keep ticking — knife out, rifle back full, no reload ever seen.
+    #[test]
+    fn putting_a_weapon_away_cancels_its_reload() {
+        let mut ars = Arsenal::new([Some(WeaponKind::Rifle), None]);
+        let rifle = SlotClass::Primary as usize;
+        ars.active_weapon_mut().mag = 12;
+        ars.active_weapon_mut().reserve = 30;
+        assert!(
+            ars.active_weapon_mut().start_reload(),
+            "the reload did not start"
+        );
+
+        // To the knife, and time passes with the rifle out of hand.
+        ars.select(SlotClass::Melee as usize);
+        ars.update(10.0);
+
+        assert_eq!(
+            ars.slot(rifle).expect("rifle").mag,
+            12,
+            "the magazine refilled behind the player's back"
+        );
+        assert!(
+            !ars.slot(rifle).expect("rifle").is_reloading(),
+            "the reload survived the weapon being put away"
+        );
+
+        // Drawing it again changes nothing, and a reload asked for again works.
+        ars.select(rifle);
+        assert!(!ars.active_weapon().is_reloading());
+        assert!(ars.active_weapon_mut().start_reload());
+        ars.update(2.0);
+        assert_eq!(ars.active_weapon().mag, 30);
+    }
+
+    /// The reserve is finite and a reload draws from it: a short reserve loads
+    /// a short magazine, an empty one refuses to load at all, and a pickup
+    /// fills the magazine before it tops the reserve up.
+    #[test]
+    fn a_reload_draws_from_the_reserve() {
+        let mut w = Weapon::new(WeaponKind::Rifle);
+        assert_eq!(w.reserve, 0, "a weapon out of the crate carries no spares");
+        w.mag = 5;
+        assert!(!w.start_reload(), "an empty reserve loaded anyway");
+
+        w.reserve = 7;
+        assert!(w.start_reload());
+        w.update(2.0);
+        assert_eq!(w.mag, 12, "the magazine took more than the reserve had");
+        assert_eq!(w.reserve, 0, "the reserve kept what it gave");
+
+        // A full magazine is not reloaded, reserve or not.
+        w.mag = w.stats().mag_size;
+        w.reserve = 30;
+        assert!(!w.start_reload());
+
+        // Pickups: the magazine first, the rest into the reserve.
+        w.mag = 0;
+        assert_eq!(w.add_ammo(40), 40);
+        assert_eq!(w.mag, 30);
+        assert_eq!(w.reserve, 40);
+        // A full magazine wastes nothing.
+        assert_eq!(w.add_ammo(10), 10);
+        assert_eq!(w.reserve, 50);
+    }
+
+    /// The catalogue the game ships is a set of choices, and every part seats
+    /// somewhere: ids unique, each part built for a slot some gun offers, each
+    /// standard matching the slot it names — and a fully-kitted rifle legal.
+    #[test]
+    fn the_shipped_catalogue_is_sound() {
+        let mut seen = Vec::new();
+        for p in SHIPPED {
+            assert!(!seen.contains(&p.id.0), "duplicate part id {}", p.id.0);
+            seen.push(p.id.0);
+            let slot = GUN_SLOTS
+                .iter()
+                .find(|s| s.id == p.slot)
+                .unwrap_or_else(|| panic!("{} is built for an unknown slot", p.id.0));
+            assert_eq!(
+                p.interface, slot.accepts,
+                "{} declares the wrong standard for {}",
+                p.id.0, p.slot.0
+            );
+        }
+        let kit = WeaponBuild {
+            entries: GUN_SLOTS
+                .iter()
+                .map(|slot| BuildEntry {
+                    slot: slot.id,
+                    part: SHIPPED
+                        .iter()
+                        .find(|p| p.slot == slot.id)
+                        .expect("a slot with nothing to go in it")
+                        .id,
+                    roll: 0.4,
+                })
+                .collect(),
+        };
+        assert_eq!(
+            validate(def(WeaponKind::Rifle), &kit),
+            Ok(()),
+            "the fully-kitted rifle is illegal"
+        );
+    }
+
+    /// A build survives the settings file: written, read back, the same parts
+    /// at the same rolls — and junk costs its own entry, never the line.
+    #[test]
+    fn a_build_round_trips_through_text() {
+        let built = build(&[
+            (SlotId("optic"), MICRO_DOT.id, 0.25),
+            (SlotId("magazine"), SURPLUS_LOT.id, 0.75),
+        ]);
+        assert_eq!(WeaponBuild::from_text(&built.to_text()), built);
+        // Reading is faithful: a hand-edited roll is believed as typed.
+        assert_eq!(
+            WeaponBuild::from_text("optic=micro_dot@0.666"),
+            build(&[(SlotId("optic"), MICRO_DOT.id, 0.666)])
+        );
+        // Writing rounds to two decimals, so a build beyond them reads back
+        // rounded rather than refused.
+        let many = build(&[(SlotId("optic"), MICRO_DOT.id, 2.0 / 3.0)]);
+        assert_eq!(
+            WeaponBuild::from_text(&many.to_text()).entries[0].roll,
+            0.67
+        );
+        let rough = WeaponBuild::from_text("optix=?, optic=micro_dot@0.5, ,muzzle=who@0.2");
+        assert_eq!(rough.entries.len(), 1);
+        assert_eq!(rough.entries[0].part, MICRO_DOT.id);
+        assert_eq!(WeaponBuild::from_text(""), WeaponBuild::empty());
+    }
+
+    /// Screening is the repair path for a hand-edited file: entries that do
+    /// not fit their def drop out one at a time, and the rest stay.
+    #[test]
+    fn screening_keeps_the_parts_that_fit() {
+        let rifle = def(WeaponKind::Rifle);
+        let rough = build(&[
+            (SlotId("optic"), MICRO_DOT.id, 0.5),
+            (SlotId("muzzle"), MICRO_DOT.id, 0.5),
+            (SlotId("magazine"), EXTENDED_MAG.id, 0.5),
+        ]);
+        let clean = rough.screened(rifle);
+        assert_eq!(clean.entries.len(), 2);
+        assert_eq!(clean.entries[0].part, MICRO_DOT.id);
+        assert_eq!(clean.entries[1].part, EXTENDED_MAG.id);
+        assert_eq!(validate(rifle, &clean), Ok(()));
+    }
+
+    /// Every shipping part and slot has a name for the bench, in both
+    /// languages; a label missing is a row that cannot be drawn.
+    #[test]
+    fn every_shipped_part_and_slot_has_a_label() {
+        for p in SHIPPED {
+            let (en, zh) = part_label(p.id).unwrap_or_else(|| panic!("{} has no name", p.id.0));
+            assert!(
+                !en.is_empty() && !zh.is_empty(),
+                "{} has half a name",
+                p.id.0
+            );
+        }
+        for slot in GUN_SLOTS {
+            assert!(slot_label(slot.id).is_some(), "{} has no name", slot.id.0);
         }
     }
 }

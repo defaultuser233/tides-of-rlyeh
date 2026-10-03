@@ -275,6 +275,24 @@ pub fn stats(kind: Kind) -> KindStats {
     }
 }
 
+/// Fraction of a hit the archetype's physical plate stops before the
+/// weapon's own armour penetration is applied.
+///
+/// Kept beside `stats` rather than in `KindStats` because it is a *rule with
+/// two exceptions*, not a number per archetype: everyone else is soft. The
+/// values follow the reference's §17.2③ framing — heavy, slow archetypes
+/// reward bringing a weapon with a high penetration number, and the fast
+/// ones do not care what you brought. `Heavy` at 0.30 costs a rifle about 7%
+/// of its damage and an SMG about 14%; the Colossus wears more, and the
+/// sniper barely notices either way.
+pub fn armor(kind: Kind) -> f32 {
+    match kind {
+        Kind::Heavy => 0.30,
+        Kind::Colossus => 0.45,
+        _ => 0.0,
+    }
+}
+
 /// A pivot and the rotation hanging off it: where a hip, a knee or a shoulder
 /// is this frame.
 #[derive(Clone, Copy)]
@@ -1234,6 +1252,10 @@ pub struct Enemy {
     pub yaw: f32,
     pub kind: Kind,
     pub health: f32,
+    /// Fraction of a hit that physical plate stops, before the weapon's own
+    /// armour penetration is counted (see `armor` below and `take_damage`).
+    /// Only the heavy archetypes wear any.
+    pub armor: f32,
     pub radius: f32,
     pub height: f32,
     pub speed: f32,
@@ -1295,6 +1317,7 @@ impl Enemy {
             yaw: rng.range(0.0, TAU),
             kind,
             health,
+            armor: armor(kind),
             radius: s.radius,
             height: s.height,
             speed: s.speed * (1.0 + 0.022 * w),
@@ -1421,11 +1444,20 @@ impl Enemy {
         }
     }
 
-    pub fn take_damage(&mut self, amount: f32) -> bool {
+    /// Applies one hit and reports whether it killed.
+    ///
+    /// `armor_pen` is the share of the damage that ignores armour — the
+    /// weapon's own published number (reference §17.2③), passed by the
+    /// shooter. What the plate stops is `armor * (1 - pen)` of the hit, so
+    /// "how does this gun do against a Juggernaut" is a visible property of
+    /// the gun rather than a formula nobody can see. Blasts pass `1.0`: a
+    /// pressure wave is not a round, and there is nothing to stop.
+    pub fn take_damage(&mut self, amount: f32, armor_pen: f32) -> bool {
         if self.dead {
             return false;
         }
-        self.health -= amount;
+        let effective = amount * (1.0 - self.armor * (1.0 - armor_pen.clamp(0.0, 1.0)));
+        self.health -= effective;
         self.flash = 1.0;
         if self.health <= 0.0 {
             self.health = 0.0;

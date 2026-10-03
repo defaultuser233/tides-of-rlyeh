@@ -7,6 +7,11 @@
 //! the cheapest thing that stops that, and it is the one bit of "depth" that
 //! costs the CPU nothing at all.
 //!
+//! The pass also carries the near-death grey: the world desaturating as health
+//! or sanity runs out costs one uniform and two lines for pixels this shader was
+//! already shading. `Grade.x` is how far towards grey, and it is applied before
+//! the fog so a fully fogged wall still meets the sky in the sky's own colour.
+//!
 //! The fog is a custom material, which is what a `Mesh` needs in order to be
 //! shaded by anything other than macroquad's default 3D shader. Three facts
 //! about that path were read out of the vendored source rather than assumed:
@@ -57,16 +62,27 @@ const FRAGMENT: &str = r#"#version 100
 
     uniform sampler2D Texture;
     uniform vec4 FogColour;
+    uniform vec4 Grade;
 
     void main() {
         vec4 texel = color * texture2D(Texture, uv);
-        gl_FragColor = vec4(mix(texel.rgb, FogColour.rgb, fog * FogColour.a), texel.a);
+        // `Grade.x` is the near-death desaturation, 0 while healthy. It runs
+        // before the fog so a fully fogged wall still meets the sky in the
+        // sky's own colour instead of in grey.
+        float luma = dot(texel.rgb, vec3(0.299, 0.587, 0.114));
+        vec3 lit = mix(texel.rgb, vec3(luma), Grade.x);
+        gl_FragColor = vec4(mix(lit, FogColour.rgb, fog * FogColour.a), texel.a);
     }"#;
 
 /// How far away the fog starts, as a fraction of the arena's half-extent.
 const START: f32 = 0.62;
 /// Where it is fully opaque. Past the far wall, so the wall itself is hazed.
 const END: f32 = 2.05;
+/// Under water the same fractions are pulled in: the sea is murk well inside
+/// the arena, so the drowned city's far wing reads as a shape going away
+/// rather than as a wall going pale.
+const MURK_START: f32 = 0.42;
+const MURK_END: f32 = 1.55;
 
 pub struct Fog {
     material: Material,
@@ -91,6 +107,7 @@ impl Fog {
             uniforms: vec![
                 UniformDesc::new("FogRange", UniformType::Float4),
                 UniformDesc::new("FogColour", UniformType::Float4),
+                UniformDesc::new("Grade", UniformType::Float4),
             ],
             textures: vec![],
         };
@@ -108,18 +125,27 @@ impl Fog {
     }
 
     /// Begin a fogged pass: everything drawn until [`Fog::end`] fades into
-    /// `colour` with distance.
+    /// `colour` with distance, and is pulled `desat` of the way towards grey.
     ///
     /// `half` is the arena's half-extent, so the range follows the map rather
-    /// than being four numbers that have to be kept in step with it.
-    pub fn begin(&self, colour: Color, half: f32) {
+    /// than being four numbers that have to be kept in step with it; `desat` is
+    /// the near-death grade (see `main.rs`), 0 for a healthy player; `sunken`
+    /// pulls the range in to the murk fractions for an arena under water.
+    pub fn begin(&self, colour: Color, half: f32, desat: f32, sunken: bool) {
+        let (start, end) = if sunken {
+            (MURK_START, MURK_END)
+        } else {
+            (START, END)
+        };
         self.material
-            .set_uniform("FogRange", Vec4::new(half * START, half * END, 0.0, 0.0));
+            .set_uniform("FogRange", Vec4::new(half * start, half * end, 0.0, 0.0));
         // `a` is how far to the fog colour a fully fogged pixel gets. At 1.0 the
         // far wall would be indistinguishable from the sky, which loses the
         // silhouette the level is built out of.
         self.material
             .set_uniform("FogColour", Vec4::new(colour.r, colour.g, colour.b, 0.86));
+        self.material
+            .set_uniform("Grade", Vec4::new(desat.clamp(0.0, 1.0), 0.0, 0.0, 0.0));
         gl_use_material(&self.material);
     }
 

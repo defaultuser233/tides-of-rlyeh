@@ -108,15 +108,15 @@ path is `assets/_downloads/<pack>/Audio/<stem>.ogg`.
 | `explosion.ogg` | S | `explosionCrunch_000` | 0.78 s | 1 | `Sfx::Explosion` |
 | `spawn.ogg` | S | `forceField_000` | 0.95 s | 1 | `Sfx::Spawn` |
 
-### Six slots deliberately left to the synth
+### Five slots deliberately left to the synth
 
-`pickup_health`, `pickup_ammo`, `pickup_weapon`, `objective_done`,
-`mission_complete`, `mission_failed` have **no file here on purpose**. Their
-synth recipes in `src/audio.rs` are purpose-written musical stings (rising
-pickup arpeggios; a C-E-G-C major figure for mission complete; an A-G-F-C
-descending minor for failure). The Kenney packs contain nothing comparable, so
-dropping a UI blip into those slots would be a downgrade. Add files with those
-names only if you want to override them.
+`pickup_health`, `pickup_ammo`, `objective_done`, `mission_complete`,
+`mission_failed` have **no file here on purpose**. Their synth recipes in
+`src/audio.rs` are purpose-written musical stings (rising pickup arpeggios; a
+C-E-G-C major figure for mission complete; an A-G-F-C descending minor for
+failure). The Kenney packs contain nothing comparable, so dropping a UI blip
+into those slots would be a downgrade. Add files with those names only if you
+want to override them.
 
 ### `assets/sounds/variants/` — 10 extra one-shots, not auto-loaded
 

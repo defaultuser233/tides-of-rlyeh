@@ -390,6 +390,10 @@ pub struct Layout {
     /// Half-extent of the navigation grid; also the default outer shell size.
     pub half: f32,
     pub sky: Color,
+    /// The arena is under water: the backdrop is a water column rather than a
+    /// sky, the fog is murk instead of haze, and suspended matter drifts
+    /// through the air. Only the drowned city sets it.
+    pub sunken: bool,
     /// The colour this arena is remembered by, for the HUD to pick up. Brighter
     /// than the palette's own trim, which is a paint colour seen under lighting
     /// rather than a colour drawn straight onto a panel.
@@ -435,6 +439,8 @@ pub struct Level {
     pub player_start: Vec3,
     pub extraction: Option<Vec3>,
     pub sky: Color,
+    /// See `Layout::sunken`.
+    pub sunken: bool,
     pub name_en: &'static str,
     pub name_zh: &'static str,
     /// See `Layout::accent`.
@@ -514,6 +520,7 @@ impl Level {
             player_start: layout.player_start,
             extraction: layout.extraction,
             sky: layout.sky,
+            sunken: layout.sunken,
             accent: layout.accent,
             name_en: layout.name_en,
             name_zh: layout.name_zh,

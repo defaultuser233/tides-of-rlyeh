@@ -185,6 +185,7 @@ pub fn arena() -> Layout {
         extraction: None,
         half: ARENA,
         sky: Color::new(0.05, 0.06, 0.09, 1.0),
+        sunken: false,
         accent: Color::new(0.88, 0.52, 0.16, 1.0),
     }
 }
@@ -309,6 +310,7 @@ pub fn foundry() -> Layout {
         extraction: Some(vec3(-20.5, 0.0, 20.5)),
         half: 24.0,
         sky: Color::new(0.09, 0.05, 0.04, 1.0),
+        sunken: false,
         accent: Color::new(0.95, 0.44, 0.14, 1.0),
     }
 }
@@ -444,6 +446,7 @@ pub fn docks() -> Layout {
         extraction: Some(vec3(-25.5, 0.0, 25.5)),
         half: 28.0,
         sky: Color::new(0.06, 0.08, 0.11, 1.0),
+        sunken: false,
         accent: Color::new(0.38, 0.66, 0.76, 1.0),
     }
 }
@@ -563,6 +566,7 @@ pub fn bunker() -> Layout {
         extraction: Some(vec3(-15.5, 0.0, 15.5)),
         half: 18.0,
         sky: Color::new(0.07, 0.09, 0.07, 1.0),
+        sunken: false,
         accent: Color::new(0.50, 0.68, 0.46, 1.0),
     }
 }
@@ -701,6 +705,7 @@ pub fn citadel() -> Layout {
         extraction: Some(vec3(0.5, 0.0, 16.5)),
         half: 30.0,
         sky: Color::new(0.08, 0.05, 0.12, 1.0),
+        sunken: false,
         accent: Color::new(0.74, 0.38, 0.88, 1.0),
     }
 }
@@ -955,6 +960,7 @@ pub fn rlyeh() -> Layout {
         extraction: Some(vec3(-30.5, 0.0, -29.5)),
         half: 34.0,
         sky: Color::new(0.035, 0.075, 0.065, 1.0),
+        sunken: true,
         accent: Color::new(0.38, 0.88, 0.50, 1.0),
     }
 }
@@ -1324,10 +1330,11 @@ mod tests {
         }
     }
 
-    /// `pick_spawn` refuses any spawn within 14 m of the player and quietly
-    /// falls back to spawn 0 when every candidate is refused, which would put a
-    /// hostile in the player's lap. Every arena has to keep a few candidates
-    /// out of range from anywhere a body can stand.
+    /// `pick_spawn` refuses any spawn within 14 m of the player, and when
+    /// *every* candidate is refused it falls back to the farthest point there
+    /// is — never to `spawns[0]`, which would put a hostile in the player's
+    /// lap. Every arena has to keep a few candidates out of range from
+    /// anywhere a body can stand, so the chooser always has a real choice.
     #[test]
     fn every_arena_gives_the_spawn_chooser_somewhere_to_put_an_enemy() {
         for layout in campaign() {
@@ -1347,6 +1354,41 @@ mod tests {
             assert!(
                 worst >= 4,
                 "{}: the worst position on the map leaves the chooser {worst} spawns it may use",
+                layout.name_en
+            );
+        }
+    }
+
+    /// The spawn chooser, exercised the way the game exercises it: 200 draws
+    /// from the player's start on each arena, counting which spawn point comes
+    /// out.
+    ///
+    /// The bug this pins down (reference §19.2.1): "hidden" was a flat +30
+    /// that beat the entire distance term (worth 0–16), so nearly every draw
+    /// landed on one blind corner — "the enemies all spawn from the same
+    /// place". The fix makes hiding and distance both weights, and this test
+    /// says the result spreads: no single point may take more than 40% of the
+    /// draws.
+    #[test]
+    fn the_spawn_chooser_spreads_across_the_arena() {
+        for layout in campaign() {
+            let level = Level::from_layout(&layout);
+            let player = crate::player::Player::new(level.player_start);
+            let mut rng = Rng::new(0xA11CE);
+            let mut count = vec![0u32; level.spawns.len()];
+            for _ in 0..200 {
+                let pick = crate::pick_spawn(&level, &player, &mut rng);
+                let i = level
+                    .spawns
+                    .iter()
+                    .position(|s| *s == pick)
+                    .expect("every draw is one of the arena's points");
+                count[i] += 1;
+            }
+            let worst = *count.iter().max().unwrap_or(&0);
+            assert!(
+                worst <= 80,
+                "{}: one spawn point takes {worst} of 200 draws ({count:?})",
                 layout.name_en
             );
         }

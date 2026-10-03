@@ -172,6 +172,12 @@ impl Textures {
         // every tiled surface asks for UVs past 1.0. Left clamped, those sample
         // the edge texel and smear it into stripes across the whole face.
         //
+        // Mirrored rather than plain repeat: a tile's edge meets its own
+        // reflection, so the join cannot be seen, while the pattern's visible
+        // period doubles — the cheapest step against a 4 m tile reading as a
+        // grid across a whole arena. The UVs are world coordinates, so the flip
+        // lines fall on the same world grid the tiles are laid out on.
+        //
         // SAFETY: this only sets the sampler parameters of textures created
         // right here, before anything has been drawn with them. It does not
         // touch the draw-call batching state `get_internal_gl` also hands out.
@@ -180,8 +186,8 @@ impl Textures {
             for tex in &textures {
                 gl.quad_context.texture_set_wrap(
                     tex.raw_miniquad_id(),
-                    macroquad::miniquad::TextureWrap::Repeat,
-                    macroquad::miniquad::TextureWrap::Repeat,
+                    macroquad::miniquad::TextureWrap::Mirror,
+                    macroquad::miniquad::TextureWrap::Mirror,
                 );
             }
         }

@@ -98,6 +98,7 @@ define_strings! {
 
     // --- settings ---
     Sensitivity      => ("MOUSE SENSITIVITY", "鼠标灵敏度"),
+    MouseDpi         => ("MOUSE DPI", "鼠标 DPI"),
     Volume           => ("MASTER VOLUME", "主音量"),
     InvertY          => ("INVERT MOUSE Y", "反转鼠标 Y 轴"),
     ShowFps          => ("SHOW FPS", "显示帧率"),
@@ -105,6 +106,34 @@ define_strings! {
     Resolution       => ("RESOLUTION", "分辨率"),
     On               => ("ON", "开"),
     Off              => ("OFF", "关"),
+
+    // --- armory ---
+    Armory           => ("STASH", "仓库"),
+    ArmoryTab        => ("SECTION", "分类"),
+    ModsTab          => ("MODS", "改装"),
+    PaintTab         => ("PAINT", "涂装"),
+    LoadoutTab       => ("LOADOUT", "配装"),
+    // The bench's three columns: what the section offers, what fits the slot
+    // under the cursor, and the numbers a candidate would move.
+    ArmoryColSlots   => ("SLOTS", "槽位"),
+    ArmoryColParts   => ("FITS", "适配"),
+    PartFitted       => ("FITTED", "已装"),
+    ArmoryBenchHint  => ("PICK A SLOT, THEN A PART — ENTER FITS IT", "先选槽位再选部件 · 回车装上"),
+    PrimaryWeapon    => ("PRIMARY", "主武器"),
+    SecondaryWeapon  => ("SECONDARY", "副武器"),
+    PrimaryMags      => ("PRIMARY MAGS", "主武器备弹"),
+    SecondaryMags    => ("SECONDARY MAGS", "副武器备弹"),
+    Spare            => ("SPARE", "备弹"),
+    ArmoryWeapon     => ("WEAPON", "武器"),
+    PartNone         => ("NONE", "无"),
+    StatAds          => ("ADS FOV", "瞄准视野"),
+    WearLabel        => ("WEAR", "磨损"),
+    SeedLabel        => ("PATTERN", "图案"),
+    WearFactoryNew   => ("FACTORY NEW", "崭新出厂"),
+    WearMinimal      => ("MINIMAL WEAR", "略有磨损"),
+    WearFieldTested  => ("FIELD-TESTED", "久经沙场"),
+    WearWellWorn     => ("WELL-WORN", "破损不堪"),
+    WearBattleScarred => ("BATTLE-SCARED", "战痕累累"),
 
     // --- hud ---
     Health           => ("HEALTH", "生命"),
@@ -135,6 +164,15 @@ define_strings! {
     RetryMission     => ("RETRY MISSION", "重试本关"),
     CampaignCleared  => ("CAMPAIGN COMPLETE", "战役通关"),
     YouWereKilled    => ("YOU WERE KILLED", "你阵亡了"),
+
+    // --- waves ---
+    Wave             => ("WAVE", "波次"),
+    WaveEarly        => ("PRESS F TO CALL IT IN EARLY", "按 F 提前召唤"),
+    Threat           => ("THREAT", "威胁"),
+    ThreatDamage     => ("DMG", "伤害"),
+    ThreatRate       => ("RATE", "攻速"),
+    Best             => ("BEST", "最高分"),
+    NewBest          => ("NEW BEST", "新纪录"),
 
     // --- pickups ---
     PickHealth       => ("MEDKIT", "医疗包"),
@@ -373,10 +411,10 @@ define_strings! {
                          "医疗包 — 引导 2.5 秒回复 60 点；只带一个，受伤、开火或跑动都会打断"),
     CodexItemPainkiller => ("PAINKILLER — 35 health over a 1.8 s channel; you carry one. Damage or firing breaks it",
                             "止痛药 — 引导 1.8 秒回复 35 点；只带一剂，受伤、开火或跑动都会打断"),
-    CodexItemArmor   => ("ARMOUR PLATE — soaks 65% of every hit until the plates run out; 50 points is a full vest",
-                         "防弹插板 — 吸收每发伤害的 65%，直到耗尽；50 点为满护甲"),
-    CodexItemAmmo    => ("AMMO — refills the magazine of the weapon in your hands; there is no reserve pool",
-                         "弹药箱 — 直接补满手上这把武器的弹匣（本作没有备用弹药池）"),
+    CodexItemArmor   => ("ARMOUR PLATE — soaks 65% of every body hit until the plates run out, and never a hit that lands below the hips; what it stops barely moves your view either. 50 points is a full vest",
+                         "防弹插板 — 吸收躯干受击伤害的 65%，直到耗尽；打中腰部以下不生效；被挡下的子弹也几乎不晃视线。50 点为满护甲"),
+    CodexItemAmmo    => ("AMMO — refills the magazine in your hands first; whatever does not fit goes to that weapon's spare pool",
+                         "弹药箱 — 先补满手上这把武器的弹匣，装不下的进该武器的备弹池"),
 
     // --- field manual: stat labels ---
     // The label column of a card's number line. The values beside them are
@@ -393,6 +431,8 @@ define_strings! {
     StatPellets      => ("PELLETS", "弹丸"),
     StatModes        => ("MODES", "开火模式"),
     StatClass        => ("CLASS", "类别"),
+    StatArmorPen     => ("ARMOR PEN.", "护甲穿透"),
+    StatArmor        => ("ARMOR", "装甲"),
 }
 
 pub fn t(k: Key) -> &'static str {

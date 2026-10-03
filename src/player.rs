@@ -105,6 +105,14 @@ const RECOIL_BURST_GAP: f32 = 0.25;
 /// Fallback speed once the delay has passed. This was inlined as
 /// `(-11.0 * dt).exp()` on the recoil lines.
 const RECOIL_FALLBACK_RATE: f32 = 11.0;
+/// How fast a hit's view kick (the "aimpunch") recovers on its own. Slower
+/// than the muzzle's fallback on purpose: the kick has to live long enough to
+/// be *felt* as the thing armour takes away (reference §17.2②), which the
+/// 11-per-second recoil fallback would erase inside a tenth of a second.
+const PUNCH_RECOVERY: f32 = 6.0;
+/// The most a single hit may kick the view, in radians. A Colossus slam
+/// clamps here; it is a shove, not a spin.
+const PUNCH_MAX: f32 = 0.09;
 
 /// Seconds for a hit indicator to fade from full strength to nothing.
 const HURT_DIR_DECAY: f32 = 1.5;
@@ -232,6 +240,10 @@ pub struct Player {
     bob_amount: f32,
     pub recoil_pitch: f32,
     pub recoil_yaw: f32,
+    /// The view kick a *hit taken* leaves behind — the genre's "aimpunch".
+    /// Separate from the recoil above because it recovers on its own slower
+    /// schedule; armour scales it down before it lands (reference §17.2②).
+    punch: f32,
     /// Shot count within the current burst, and seconds since the last shot.
     /// The pattern is indexed by the first and restarted by the second.
     burst_shot: u32,
@@ -279,6 +291,7 @@ impl Player {
             bob_amount: 0.0,
             recoil_pitch: 0.0,
             recoil_yaw: 0.0,
+            punch: 0.0,
             burst_shot: 0,
             // Long enough that the first shot counts as shot one of a burst.
             since_shot: 99.0,
@@ -340,7 +353,9 @@ impl Player {
 
     pub fn cam_pitch(&self) -> f32 {
         let w = self.madness_warp();
-        self.pitch + self.free_pitch + self.recoil_pitch + self.sway().y + w.y
+        // The hit kick rides on the camera like the recoil does; unlike the
+        // recoil it recovers by itself, on `PUNCH_RECOVERY`'s clock.
+        self.pitch + self.free_pitch + self.recoil_pitch + self.punch + self.sway().y + w.y
     }
 
     /// Aim wobble in radians. Only bites while aiming down sights, and holding
@@ -448,6 +463,14 @@ impl Player {
         self.recoil_pitch += pitch * pitch_scale;
     }
 
+    /// Kicks the *view* by a hit taken — the genre's "aimpunch". The caller
+    /// scales it by whether armour stopped the round (reference §17.2②):
+    /// kevlar takes most of the punch, which is how the player feels the
+    /// armour working without another damage number on screen.
+    pub fn aim_punch(&mut self, amount: f32) {
+        self.punch = (self.punch + amount).min(PUNCH_MAX);
+    }
+
     /// The player pulling back against the climb. `pitch_delta` and `yaw_delta`
     /// are view deltas in the same convention as `pitch` and `yaw` — the caller
     /// passes the mouse movement it is about to apply to them.
@@ -511,6 +534,17 @@ impl Player {
         let before = self.health;
         self.health = (self.health + amount).min(self.max_health);
         self.health - before
+    }
+
+    /// Puts the body back to neutral for a new wave: full health and full
+    /// breath, with nothing left channeling. The wave clock calls this
+    /// between waves (reference §19.4-5), so a death is a death of position
+    /// and decision rather than of the last wave's leftovers. Ammunition,
+    /// armour and sanity are deliberately not part of it — those are the
+    /// arena's economy, not the wave's.
+    pub fn wave_reset(&mut self) {
+        self.health = self.max_health;
+        self.breath = 1.0;
     }
 
     /// Can the body occupy `stance` right here, or is there a ceiling in the way?
@@ -750,6 +784,7 @@ impl Player {
         }
         self.hurt_flash = approach(self.hurt_flash, 0.0, dt * 2.2);
         self.shake = approach(self.shake, 0.0, dt * 2.0);
+        self.punch *= (-PUNCH_RECOVERY * dt).exp();
 
         // The hit indicator fades on a schedule rather than an asymptote, so
         // that "gone" is an exact state for the HUD to test instead of a value
@@ -889,6 +924,27 @@ mod tests {
 
     fn flat(pos: Vec3) -> Vec2 {
         vec2(pos.x, pos.z)
+    }
+
+    /// The hit kick (reference §17.2②): a hit raises the camera, the kick is
+    /// clamped — a shove, not a spin — and it recovers on its own clock.
+    #[test]
+    fn a_hit_kicks_the_view_up_and_the_kick_recovers() {
+        let mut player = spawn();
+        let level = test_level();
+        let input = MoveInput::default();
+        let before = player.cam_pitch();
+        player.aim_punch(0.02);
+        assert!(player.cam_pitch() > before, "a hit has to move the aim");
+        player.aim_punch(10.0);
+        assert!(player.punch <= PUNCH_MAX + 1e-5, "the kick is not clamped");
+
+        run(&mut player, &level, &input, 1.0 / 120.0, 60);
+        assert!(
+            player.punch < PUNCH_MAX * 0.06,
+            "the kick is still {} after half a second",
+            player.punch
+        );
     }
 
     /// The rule the model is built on: pushing at a right angle to the velocity

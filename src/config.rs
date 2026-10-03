@@ -29,6 +29,7 @@
 //! width = 1280
 //! height = 720
 //! sensitivity = 1.6
+//! mouse_dpi = 800
 //! volume = 0.8
 //! aim_toggle = true
 //! lean_toggle = true
@@ -40,7 +41,8 @@
 //! ```
 //!
 //! Booleans are `true`/`false` (`1`/`0` and `on`/`off` are taken too), `lang` is
-//! `en` or `zh`, and a width or height outside `640..=7680` is not believed.
+//! `en` or `zh`, and a width or height outside `640..=7680` — or a mouse DPI
+//! outside `100..=100_000` — is not believed.
 //!
 //! # When it is wrong
 //!
@@ -77,6 +79,11 @@ const DIMENSION_RANGE: RangeInclusive<i32> = 640..=7680;
 /// default would be a silent lie about what was read.
 const SENSITIVITY_RANGE: RangeInclusive<f32> = 0.30..=5.0;
 const VOLUME_RANGE: RangeInclusive<f32> = 0.0..=1.0;
+/// The mouse's counts per inch, as the DPI row and the cm/360 readout believe
+/// it. The range is a typo guard rather than a rule: nothing in the game
+/// divides by this number, but a mouse with three counts to the inch does not
+/// exist, and neither does one with a million.
+const DPI_RANGE: RangeInclusive<u32> = 100..=100_000;
 /// Campaign progress is clamped rather than refused: a hand-edited `unlocked =
 /// 400` should not be believed by `continue`, but it is also not a reason to
 /// throw the line away — the campaigns are shorter than this by a wide margin.
@@ -88,12 +95,16 @@ const MAX_UNLOCKED: usize = 99;
 /// language and the window, which the page also shows but does not own — `i18n`
 /// owns the live language and the OS owns the live window, so those two are
 /// copied in and out of here at load and save time.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub fullscreen: bool,
     pub width: i32,
     pub height: i32,
     pub sensitivity: f32,
+    /// The mouse's counts per inch. Nothing in the game's feel reads it — the
+    /// settings page shows the sensitivity as a distance per full turn with it,
+    /// which is the number players carry between games.
+    pub mouse_dpi: u32,
     pub volume: f32,
     pub aim_toggle: bool,
     pub lean_toggle: bool,
@@ -108,20 +119,46 @@ pub struct Config {
     /// rather than at the furthest reached, so deliberately replaying an
     /// earlier mission does not skip the player forward.
     pub last_mission: usize,
+    /// The best score on each mission, one entry per campaign slot —
+    /// `best_1` … `best_6` in the file. This is what makes the score mean
+    /// something after the run is over (reference §19.3): without it every
+    /// number the HUD counts is forgotten the moment the mission ends.
+    pub best: [u32; crate::campaign::COUNT],
+    /// The armory: the build each weapon kind carries and the finish it
+    /// wears, one settings spelling per entry of `weapon::ALL_KINDS`, held as
+    /// the text the file holds. Parsing is `weapon`'s job and is lossy in the
+    /// kind way settings are: a line this build cannot read is repaired, the
+    /// way one bad setting costs its own line and no more.
+    pub builds: [String; 7],
+    pub paints: [String; 7],
+    /// The loadout the stash carries into the field: the two long-gun slots
+    /// (kind keys, or `none`), how many spare magazines each slot brings, and
+    /// the consumable counts. `Kit` turns these into kinds and clamps them.
+    pub primary: String,
+    pub secondary: String,
+    pub primary_mags: u32,
+    pub secondary_mags: u32,
+    pub frags: u32,
+    pub smokes: u32,
+    pub bandages: u32,
+    pub medkits: u32,
+    pub painkillers: u32,
 }
 
 impl Default for Config {
     /// The values the game shipped with before there was a file: 1280×720
-    /// windowed, the mouse at 1.60, the master volume at 0.80, aim and lean on
-    /// toggle, no Y inversion, no FPS counter, Chinese. `main` used to set the
-    /// language and the volume by hand at startup; a missing file has to produce
-    /// the same game, so these are the numbers it names.
+    /// windowed, the mouse at 1.60 on an 800-count mouse, the master volume at
+    /// 0.80, aim and lean on toggle, no Y inversion, no FPS counter, Chinese.
+    /// `main` used to set the language and the volume by hand at startup; a
+    /// missing file has to produce the same game, so these are the numbers it
+    /// names.
     fn default() -> Self {
         Self {
             fullscreen: false,
             width: 1280,
             height: 720,
             sensitivity: 1.60,
+            mouse_dpi: 800,
             volume: 0.80,
             aim_toggle: true,
             lean_toggle: true,
@@ -130,6 +167,22 @@ impl Default for Config {
             lang: Lang::Zh,
             unlocked: 1,
             last_mission: 0,
+            best: [0; crate::campaign::COUNT],
+            // No parts, no finish: a fresh save is every weapon as issued.
+            builds: std::array::from_fn(|_| String::new()),
+            paints: std::array::from_fn(|_| String::new()),
+            // The loadout as issued: a rifle with four spare magazines, no
+            // second gun, and the consumable counts missions have always
+            // started with.
+            primary: "rifle".to_string(),
+            secondary: "none".to_string(),
+            primary_mags: 4,
+            secondary_mags: 0,
+            frags: 2,
+            smokes: 1,
+            bandages: 3,
+            medkits: 1,
+            painkillers: 1,
         }
     }
 }
@@ -267,6 +320,7 @@ fn render(config: &Config) -> String {
     let _ = writeln!(out, "width = {}", config.width);
     let _ = writeln!(out, "height = {}", config.height);
     let _ = writeln!(out, "sensitivity = {}", config.sensitivity);
+    let _ = writeln!(out, "mouse_dpi = {}", config.mouse_dpi);
     let _ = writeln!(out, "volume = {}", config.volume);
     let _ = writeln!(out, "aim_toggle = {}", config.aim_toggle);
     let _ = writeln!(out, "lean_toggle = {}", config.lean_toggle);
@@ -282,6 +336,54 @@ fn render(config: &Config) -> String {
     );
     let _ = writeln!(out, "unlocked = {}", config.unlocked);
     let _ = writeln!(out, "last_mission = {}", config.last_mission);
+    // Best scores, written only once a mission has been played, so a fresh
+    // file stays the short one the module docs show.
+    for (i, best) in config.best.iter().enumerate() {
+        if *best > 0 {
+            let _ = writeln!(out, "best_{} = {}", i + 1, best);
+        }
+    }
+    // The armory: only what has been touched is written, so a fresh file stays
+    // the short one the module docs show. Built in `ALL_KINDS` order, the same
+    // order the arrays are read back in.
+    for (i, kind) in crate::weapon::ALL_KINDS.iter().enumerate() {
+        if !config.builds[i].is_empty() {
+            let _ = writeln!(out, "build_{} = {}", kind.key(), config.builds[i]);
+        }
+        if !config.paints[i].is_empty() {
+            let _ = writeln!(out, "paint_{} = {}", kind.key(), config.paints[i]);
+        }
+    }
+    // The loadout, written only once it differs from the issued kit, so a
+    // fresh file stays the short one the module docs show.
+    let issued = Config::default();
+    if config.primary != issued.primary {
+        let _ = writeln!(out, "primary = {}", config.primary);
+    }
+    if config.secondary != issued.secondary {
+        let _ = writeln!(out, "secondary = {}", config.secondary);
+    }
+    if config.primary_mags != issued.primary_mags {
+        let _ = writeln!(out, "primary_mags = {}", config.primary_mags);
+    }
+    if config.secondary_mags != issued.secondary_mags {
+        let _ = writeln!(out, "secondary_mags = {}", config.secondary_mags);
+    }
+    if config.frags != issued.frags {
+        let _ = writeln!(out, "frags = {}", config.frags);
+    }
+    if config.smokes != issued.smokes {
+        let _ = writeln!(out, "smokes = {}", config.smokes);
+    }
+    if config.bandages != issued.bandages {
+        let _ = writeln!(out, "bandages = {}", config.bandages);
+    }
+    if config.medkits != issued.medkits {
+        let _ = writeln!(out, "medkits = {}", config.medkits);
+    }
+    if config.painkillers != issued.painkillers {
+        let _ = writeln!(out, "painkillers = {}", config.painkillers);
+    }
     out
 }
 
@@ -307,6 +409,7 @@ fn parse(text: &str) -> Config {
             "width" => set_dimension(&mut config.width, value),
             "height" => set_dimension(&mut config.height, value),
             "sensitivity" => set_float(&mut config.sensitivity, value, SENSITIVITY_RANGE),
+            "mouse_dpi" => set_dpi(&mut config.mouse_dpi, value),
             "volume" => set_float(&mut config.volume, value, VOLUME_RANGE),
             "aim_toggle" => set_bool(&mut config.aim_toggle, value),
             "lean_toggle" => set_bool(&mut config.lean_toggle, value),
@@ -319,9 +422,47 @@ fn parse(text: &str) -> Config {
             }
             "unlocked" => set_progress(&mut config.unlocked, value),
             "last_mission" => set_progress(&mut config.last_mission, value),
-            // Unknown keys are ignored, so a file written by a newer build is
-            // still readable here.
-            _ => {}
+            // The armory, one key per weapon kind. The same names `render`
+            // writes; `weapon::ALL_KINDS` order is the array order.
+            "build_rifle" => set_text(&mut config.builds[0], value),
+            "build_shotgun" => set_text(&mut config.builds[1], value),
+            "build_smg" => set_text(&mut config.builds[2], value),
+            "build_sniper" => set_text(&mut config.builds[3], value),
+            "build_lmg" => set_text(&mut config.builds[4], value),
+            "build_pistol" => set_text(&mut config.builds[5], value),
+            "build_knife" => set_text(&mut config.builds[6], value),
+            "paint_rifle" => set_text(&mut config.paints[0], value),
+            "paint_shotgun" => set_text(&mut config.paints[1], value),
+            "paint_smg" => set_text(&mut config.paints[2], value),
+            "paint_sniper" => set_text(&mut config.paints[3], value),
+            "paint_lmg" => set_text(&mut config.paints[4], value),
+            "paint_pistol" => set_text(&mut config.paints[5], value),
+            "paint_knife" => set_text(&mut config.paints[6], value),
+            // The loadout. The kinds are validated by `Kit` against the weapon
+            // table; the counts are clamped here, so a typo costs its own line.
+            "primary" => set_text(&mut config.primary, value),
+            "secondary" => set_text(&mut config.secondary, value),
+            "primary_mags" => set_count(&mut config.primary_mags, value, 0..=8),
+            "secondary_mags" => set_count(&mut config.secondary_mags, value, 0..=8),
+            "frags" => set_count(&mut config.frags, value, 0..=4),
+            "smokes" => set_count(&mut config.smokes, value, 0..=3),
+            "bandages" => set_count(&mut config.bandages, value, 0..=5),
+            "medkits" => set_count(&mut config.medkits, value, 0..=5),
+            "painkillers" => set_count(&mut config.painkillers, value, 0..=5),
+            // A best score per mission, `best_1` … `best_6`. One guarded arm
+            // rather than a list, so the campaign can grow without a key to
+            // remember; anything else falls through and is ignored, so a file
+            // written by a newer build is still readable here.
+            _ => {
+                let lower = key.trim().to_ascii_lowercase();
+                if let Some(n) = lower
+                    .strip_prefix("best_")
+                    .and_then(|rest| rest.parse::<usize>().ok())
+                    && (1..=crate::campaign::COUNT).contains(&n)
+                {
+                    set_best(&mut config.best[n - 1], value);
+                }
+            }
         }
     }
     config
@@ -355,6 +496,44 @@ fn set_dimension(slot: &mut i32, value: &str) {
 fn set_progress(slot: &mut usize, value: &str) {
     if let Ok(v) = value.parse::<usize>() {
         *slot = v.min(MAX_UNLOCKED);
+    }
+}
+
+/// Assigns `slot` a score. Unlike progress there is nothing meaningful to
+/// clamp to — a score is the player's own record, not a length — so anything
+/// that parses is believed.
+fn set_best(slot: &mut u32, value: &str) {
+    if let Ok(v) = value.parse::<u32>() {
+        *slot = v;
+    }
+}
+
+/// Assigns `slot` the value as written, even empty. The armory's text is
+/// parsed — and repaired — by the weapon modules at load, so the file's job is
+/// only to carry it faithfully.
+fn set_text(slot: &mut String, value: &str) {
+    slot.clear();
+    slot.push_str(value.trim());
+}
+
+/// Assigns `slot` a whole count inside `range`; a value outside it is a typo
+/// and is not believed, the way a window size outside its range is not.
+fn set_count(slot: &mut u32, value: &str, range: RangeInclusive<u32>) {
+    if let Ok(v) = value.parse::<u32>()
+        && range.contains(&v)
+    {
+        *slot = v;
+    }
+}
+
+/// Assigns `slot` a mouse resolution in counts per inch, inside the accepted
+/// range. The value only feeds the cm/360 readout, so this is a typo guard
+/// rather than a rule: a mouse with three counts to the inch does not exist.
+fn set_dpi(slot: &mut u32, value: &str) {
+    if let Ok(v) = value.parse::<u32>()
+        && DPI_RANGE.contains(&v)
+    {
+        *slot = v;
     }
 }
 
@@ -428,6 +607,7 @@ mod tests {
         assert_eq!((c.width, c.height), (1280, 720));
         assert!(!c.fullscreen);
         assert!((c.sensitivity - 1.60).abs() < 1e-6);
+        assert_eq!(c.mouse_dpi, 800);
         assert!((c.volume - 0.80).abs() < 1e-6);
         assert!(c.aim_toggle);
         assert!(c.lean_toggle);
@@ -447,6 +627,7 @@ mod tests {
             width: 1600,
             height: 900,
             sensitivity: 2.35,
+            mouse_dpi: 1600,
             volume: 0.35,
             aim_toggle: false,
             lean_toggle: false,
@@ -455,6 +636,28 @@ mod tests {
             lang: Lang::En,
             unlocked: 4,
             last_mission: 3,
+            // Two nonzero entries: the round trip has to keep the key
+            // numbering and the absence of a score distinguishable.
+            best: [0, 1500, 325, 0, 0, 0],
+            builds: {
+                let mut v: [String; 7] = std::array::from_fn(|_| String::new());
+                v[0] = "magazine=extended_mag@0.50".to_string();
+                v
+            },
+            paints: {
+                let mut v: [String; 7] = std::array::from_fn(|_| String::new());
+                v[2] = "desert@0.41:2718".to_string();
+                v
+            },
+            primary: "sniper".to_string(),
+            secondary: "shotgun".to_string(),
+            primary_mags: 6,
+            secondary_mags: 3,
+            frags: 0,
+            smokes: 3,
+            bandages: 5,
+            medkits: 2,
+            painkillers: 0,
         };
         assert!(
             save_to(&path, &want).is_ok(),
@@ -575,6 +778,21 @@ mod tests {
         let _ = std::fs::remove_file(&new);
     }
 
+    /// Best scores come back by mission number, and a mission number the
+    /// campaign does not have is ignored like any other unknown key.
+    #[test]
+    fn best_scores_round_trip_by_mission() {
+        let c = parse("best_1 = 1250\nbest_6 = 98765\nbest_7 = 1\nbest_0 = 1\n");
+        assert_eq!(c.best[0], 1250);
+        assert_eq!(c.best[5], 98765);
+        assert_eq!(c.best[1], 0, "an unwritten mission has no score");
+        // The file only carries the missions that have a score on them.
+        let text = render(&c);
+        assert!(text.contains("best_1 = 1250"));
+        assert!(!text.contains("best_7"));
+        assert!(!text.contains("best_2"));
+    }
+
     /// A window size is only believable inside the range the game will hand to
     /// the OS; the ends of the range are inside it.
     #[test]
@@ -641,6 +859,7 @@ mod tests {
                       width = 1280\n\
                       height = 720\n\
                       sensitivity = 1.6\n\
+                      mouse_dpi = 800\n\
                       volume = 0.8\n\
                       aim_toggle = true\n\
                       lean_toggle = true\n\

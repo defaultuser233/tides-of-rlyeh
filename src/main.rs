@@ -44,6 +44,7 @@ enum Phase {
     Menu,
     MissionSelect,
     Settings,
+    Armory,
     Playing,
     Paused,
     Result,
@@ -75,8 +76,13 @@ struct Wheel {
 }
 
 const GRENADE_KINDS: [GrenadeKind; 2] = [GrenadeKind::Frag, GrenadeKind::Smoke];
-/// (health restored, seconds channelled, starting count)
+/// (health restored, seconds channelled, count as issued). The third field is
+/// the stash's default count — `Kit::issued` carries the same numbers, and a
+/// test pins the two together.
 const MED_KINDS: [(f32, f32, u32); 3] = [(25.0, 1.2, 3), (60.0, 2.5, 1), (35.0, 1.8, 1)];
+/// Spare magazines a sidearm always carries. Not part of the stash, because a
+/// pistol with no ammo is not a loadout choice, it is a nuisance.
+const SIDEARM_MAGS: u32 = 2;
 
 fn med_key(i: usize) -> Key {
     match i {
@@ -93,6 +99,9 @@ fn med_key(i: usize) -> Key {
 #[derive(Clone, Copy)]
 struct Settings {
     sensitivity: f32,
+    /// The mouse's counts per inch. Nothing in the game's feel reads it — the
+    /// settings row shows the sensitivity as a distance per full turn with it.
+    mouse_dpi: u32,
     volume: f32,
     aim_toggle: bool,
     lean_toggle: bool,
@@ -113,6 +122,7 @@ impl Settings {
     fn from_config(c: &config::Config) -> Self {
         Self {
             sensitivity: c.sensitivity,
+            mouse_dpi: c.mouse_dpi,
             volume: c.volume,
             aim_toggle: c.aim_toggle,
             lean_toggle: c.lean_toggle,
@@ -126,14 +136,22 @@ impl Settings {
 
     /// By value: `Settings` is `Copy`, and clippy's convention for `to_*` is
     /// that a copyable `self` is cheaper to pass than a reference to it.
-    /// The settings half of the file. The campaign progress is not a setting
-    /// and lives in `Game`, so it is passed in rather than stored twice.
-    fn to_config(self, unlocked: usize, last_mission: usize) -> config::Config {
+    /// The settings half of the file. The campaign progress and the armory are
+    /// not settings and live in `Game`, so they are passed in rather than
+    /// stored twice.
+    fn to_config(
+        self,
+        unlocked: usize,
+        last_mission: usize,
+        builds: [String; 7],
+        paints: [String; 7],
+    ) -> config::Config {
         config::Config {
             fullscreen: self.fullscreen,
             width: self.width,
             height: self.height,
             sensitivity: self.sensitivity,
+            mouse_dpi: self.mouse_dpi,
             volume: self.volume,
             aim_toggle: self.aim_toggle,
             lean_toggle: self.lean_toggle,
@@ -142,8 +160,411 @@ impl Settings {
             lang: i18n::lang(),
             unlocked,
             last_mission,
+            // The best scores belong to `config_of`, which fills them from
+            // the game right after; these are the issued values.
+            best: [0; crate::campaign::COUNT],
+            builds,
+            paints,
+            // The loadout belongs to `config_of`, which fills it from the kit
+            // right after; these are the issued values.
+            primary: "rifle".to_string(),
+            secondary: "none".to_string(),
+            primary_mags: 4,
+            secondary_mags: 0,
+            frags: 2,
+            smokes: 1,
+            bandages: 3,
+            medkits: 1,
+            painkillers: 1,
         }
     }
+}
+
+/// What the player has made of each weapon kind and how the next mission is
+/// equipped: the builds and finishes, the two long-gun choices, and the spare
+/// magazines and consumables the stash sends along. Weapon arrays are indexed
+/// by `WeaponKind::index`.
+struct Kit {
+    builds: [weapon::WeaponBuild; 7],
+    paints: [viewmodel::Paint; 7],
+    /// The two long-gun slots, chosen in the loadout tab.
+    primary: Option<weapon::WeaponKind>,
+    secondary: Option<weapon::WeaponKind>,
+    /// Spare magazines per slot — what each gun's reserve is at mission start.
+    ammo_mags: [u32; 2],
+    /// Frags and smokes.
+    grenades: [u32; 2],
+    /// Bandages, medkits, painkillers, in `MED_KINDS` order.
+    meds: [u32; 3],
+}
+
+/// The caps the loadout tab winds its counts to. They are the whole "cost" of
+/// stocking up: there is no economy, so what a player cannot do is carry
+/// everything at once.
+const LOADOUT_MAGS_MAX: u32 = 8;
+const LOADOUT_FRAGS_MAX: u32 = 4;
+const LOADOUT_SMOKES_MAX: u32 = 3;
+/// The most of each medicine. The three share one cap because they already
+/// trade against each other by what they heal.
+const LOADOUT_MEDS_MAX: u32 = 5;
+
+impl Kit {
+    /// Everything as issued: empty builds, factory paint, a rifle with four
+    /// spare magazines, no second gun, and the consumable counts missions have
+    /// always started with. A save with no armory lines produces exactly this.
+    fn issued() -> Self {
+        Self {
+            builds: std::array::from_fn(|_| weapon::WeaponBuild::empty()),
+            paints: [viewmodel::Paint::factory(); 7],
+            primary: Some(weapon::WeaponKind::Rifle),
+            secondary: None,
+            ammo_mags: [4, 0],
+            grenades: [2, 1],
+            meds: [3, 1, 1],
+        }
+    }
+
+    /// The kit the file describes. Build text is parsed by `weapon` and then
+    /// screened against the def, so a hand-edited file degrades to the parts
+    /// that fit; paint text falls back to the factory finish the same way; a
+    /// weapon kind the table does not know falls back to as issued.
+    fn from_config(c: &config::Config) -> Self {
+        let mut kit = Self::issued();
+        for kind in weapon::ALL_KINDS {
+            let i = kind.index();
+            kit.builds[i] =
+                weapon::WeaponBuild::from_text(&c.builds[i]).screened(weapon::def(kind));
+            kit.paints[i] = viewmodel::Paint::from_text(&c.paints[i]);
+        }
+        kit.primary = loadout_slot(&c.primary, kit.primary);
+        kit.secondary = loadout_slot(&c.secondary, kit.secondary);
+        kit.ammo_mags = [
+            c.primary_mags.min(LOADOUT_MAGS_MAX),
+            c.secondary_mags.min(LOADOUT_MAGS_MAX),
+        ];
+        kit.grenades = [
+            c.frags.min(LOADOUT_FRAGS_MAX),
+            c.smokes.min(LOADOUT_SMOKES_MAX),
+        ];
+        kit.meds = [c.bandages, c.medkits, c.painkillers].map(|count| count.min(LOADOUT_MEDS_MAX));
+        kit
+    }
+
+    fn build_texts(&self) -> [String; 7] {
+        std::array::from_fn(|i| self.builds[i].to_text())
+    }
+
+    fn paint_texts(&self) -> [String; 7] {
+        std::array::from_fn(|i| self.paints[i].to_text())
+    }
+
+    /// A slot as settings text: the kind's key, or `none`.
+    fn slot_text(slot: Option<weapon::WeaponKind>) -> String {
+        slot.map(|k| k.key().to_string())
+            .unwrap_or_else(|| "none".to_string())
+    }
+}
+
+/// One loadout slot read from the file: a kind key, `none`, or the fallback
+/// when the text names nothing this build knows.
+fn loadout_slot(text: &str, fallback: Option<weapon::WeaponKind>) -> Option<weapon::WeaponKind> {
+    let text = text.trim();
+    if text.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    weapon::kind_named(text).or(fallback)
+}
+
+/// The weapon kinds the armory offers: the guns. The knife takes no parts and
+/// is not painted.
+const ARMORY_KINDS: [weapon::WeaponKind; 6] = [
+    weapon::WeaponKind::Rifle,
+    weapon::WeaponKind::Shotgun,
+    weapon::WeaponKind::Smg,
+    weapon::WeaponKind::Sniper,
+    weapon::WeaponKind::Lmg,
+    weapon::WeaponKind::Pistol,
+];
+
+fn armory_kind(i: usize) -> weapon::WeaponKind {
+    ARMORY_KINDS[i.min(ARMORY_KINDS.len() - 1)]
+}
+
+/// English or Chinese by the live language, for the tables that carry both
+/// spellings outside `i18n` (parts, finishes).
+fn pick<'a>(en: &'a str, zh: &'a str) -> &'a str {
+    match i18n::lang() {
+        i18n::Lang::En => en,
+        i18n::Lang::Zh => zh,
+    }
+}
+
+/// A fresh finish's wear: uniform over the case range 0.06 – 0.80. Drawn from
+/// `Rng::f32`, which is uniform over whole 24-bit integers scaled down — the
+/// classic float-roll bug (most of the mass in the first thousandth) needs an
+/// exponent-biased source, and this is not one.
+fn roll_wear(rng: &mut Rng) -> f32 {
+    rng.range(0.06, 0.80)
+}
+
+/// The wear tier a finish reads as, on the bands the reference library's CS2
+/// numbers describe.
+fn wear_tier(wear: f32) -> &'static str {
+    let key = if wear < 0.07 {
+        Key::WearFactoryNew
+    } else if wear < 0.15 {
+        Key::WearMinimal
+    } else if wear < 0.37 {
+        Key::WearFieldTested
+    } else if wear < 0.44 {
+        Key::WearWellWorn
+    } else {
+        Key::WearBattleScarred
+    };
+    i18n::t(key)
+}
+
+/// Whether a bigger number is a better weapon, for the armory's arrows.
+enum Better {
+    Up,
+    Down,
+    Flat,
+}
+
+/// The numbers the armory shows, and how to read them.
+const ARMORY_STATS: [(Key, weapon::StatId, Better); 7] = [
+    (Key::StatDamage, weapon::StatId::Damage, Better::Up),
+    (Key::StatRate, weapon::StatId::FireInterval, Better::Up),
+    (Key::StatSpread, weapon::StatId::BaseSpread, Better::Down),
+    (Key::StatRecoil, weapon::StatId::RecoilPitch, Better::Down),
+    (Key::StatMag, weapon::StatId::MagSize, Better::Up),
+    (Key::StatReload, weapon::StatId::ReloadTime, Better::Down),
+    (Key::StatAds, weapon::StatId::AdsFov, Better::Flat),
+];
+
+/// The value a stat is judged by — fire interval is shown and compared as a
+/// rate, everything else as itself.
+fn stat_value(id: weapon::StatId, stats: &weapon::ResolvedStats) -> f32 {
+    let v = stats.stat(id);
+    if id == weapon::StatId::FireInterval {
+        60.0 / v.max(0.02)
+    } else {
+        v
+    }
+}
+
+/// A stat's number as the panel spells it.
+fn stat_text(id: weapon::StatId, v: f32) -> String {
+    match id {
+        weapon::StatId::Damage | weapon::StatId::MagSize => format!("{v:.0}"),
+        // `v` has already been through `stat_value`: for this stat that is
+        // rounds per minute, not the interval.
+        weapon::StatId::FireInterval => format!("{v:.0}"),
+        weapon::StatId::BaseSpread | weapon::StatId::RecoilPitch => {
+            format!("{:.2}°", v.to_degrees())
+        }
+        weapon::StatId::ReloadTime => format!("{v:.2}s"),
+        weapon::StatId::AdsFov => format!("{v:.0}°"),
+        _ => format!("{v:.2}"),
+    }
+}
+
+/// The stat lines for one weapon: each number, the number it moves from, and
+/// which way it moved.
+///
+/// `against` is the build the panel is judging `fitted` by — the issued weapon
+/// with nothing on the bench, or the build in the player's hands while a
+/// candidate is being weighed. The second reading is what a player actually
+/// asks a part ("is this worth fitting"), and with both numbers on screen the
+/// line answers it instead of only reporting a sign; `weigh` is that reading,
+/// and decides whether the old number is worth printing.
+fn armory_stats(
+    kind: weapon::WeaponKind,
+    def: &weapon::WeaponDef,
+    fitted: &weapon::WeaponBuild,
+    against: &weapon::WeaponBuild,
+    weigh: bool,
+) -> Vec<hud::ArmoryStat> {
+    let was = weapon::resolve(def, against);
+    let now = weapon::resolve(def, fitted);
+    let mut stats: Vec<hud::ArmoryStat> = ARMORY_STATS
+        .iter()
+        .map(|&(key, id, ref better)| {
+            let (from, to) = (stat_value(id, &was), stat_value(id, &now));
+            let eps = from.abs().max(1.0) * 1.0e-3;
+            let good = match better {
+                Better::Flat => 0,
+                Better::Up if to > from + eps => 1,
+                Better::Up if to < from - eps => -1,
+                Better::Down if to < from - eps => 1,
+                Better::Down if to > from + eps => -1,
+                _ => 0,
+            };
+            hud::ArmoryStat {
+                label: i18n::t(key).to_string(),
+                text: stat_text(id, to),
+                was: weigh.then(|| stat_text(id, from)),
+                good,
+            }
+        })
+        .collect();
+    // Armour penetration is a property of the platform, not of the build — no
+    // part moves it — but it is the number that answers "how does this hold
+    // up against a Juggernaut" (reference §17.2③), so it rides with the stat
+    // lines. `good: 0` because there is nothing here to have improved on.
+    stats.push(hud::ArmoryStat {
+        label: i18n::t(Key::StatArmorPen).to_string(),
+        text: format!("{:.0}%", kind.armor_pen() * 100.0),
+        was: None,
+        good: 0,
+    });
+    stats
+}
+
+/// The part a slot holds, if any.
+fn fitted_part(build: &weapon::WeaponBuild, slot: weapon::SlotId) -> Option<weapon::PartId> {
+    build
+        .entries
+        .iter()
+        .find(|e| e.slot == slot)
+        .map(|e| e.part)
+}
+
+/// What a slot currently holds, for its row: the part's name, or NONE.
+fn fitted_name(build: &weapon::WeaponBuild, slot: weapon::SlotId) -> String {
+    fitted_part(build, slot)
+        .and_then(weapon::part_label)
+        .map(|(en, zh)| pick(en, zh).to_string())
+        .unwrap_or_else(|| i18n::t(Key::PartNone).to_string())
+}
+
+/// Everything that fits one slot, "none" first and the rest in catalogue
+/// order: the bench's candidate column, which is what replaced pressing the
+/// right arrow until the wanted part came round.
+///
+/// `None` for a slot this build does not have. The filter is the same one
+/// `validate` applies — the slot's standard and the part's — so a listed
+/// candidate always seats, and a part built for another slot is never shown.
+fn part_choices(
+    def: &weapon::WeaponDef,
+    build: &weapon::WeaponBuild,
+    slot: weapon::SlotId,
+) -> Option<Vec<Option<weapon::PartId>>> {
+    let accepts = weapon::reachable_slots(def, build)
+        .iter()
+        .find(|s| s.id == slot)
+        .map(|s| s.accepts)?;
+    let mut choices: Vec<Option<weapon::PartId>> = vec![None];
+    for part in weapon::catalogue() {
+        if part.slot == slot && part.interface == accepts {
+            choices.push(Some(part.id));
+        }
+    }
+    Some(choices)
+}
+
+/// The build with `part` seated in `slot` at a given roll, or with the slot
+/// emptied when `part` is `None`. Everything else in the build is copied
+/// through untouched: one slot's part cannot move another slot's.
+///
+/// Pure, and the same call builds what the bench previews and what a click
+/// lands, so the numbers on the panel are the numbers the gun gets.
+fn seated(
+    build: &weapon::WeaponBuild,
+    slot: weapon::SlotId,
+    part: Option<weapon::PartId>,
+    roll: f32,
+) -> weapon::WeaponBuild {
+    let mut out = build.clone();
+    out.entries.retain(|e| e.slot != slot);
+    if let Some(part) = part {
+        out.entries.push(weapon::BuildEntry { slot, part, roll });
+    }
+    out
+}
+
+/// The roll a candidate is seated at. A copy already in the slot keeps the roll
+/// it came with — re-seating the same part is not a reroll, so the bench cannot
+/// be clicked twice for a better number — while a new part samples a fresh one,
+/// which is what makes two copies of a ranged part differ. "None" seats nothing
+/// and so rolls nothing.
+fn seat_roll(
+    rng: &mut Rng,
+    build: &weapon::WeaponBuild,
+    slot: weapon::SlotId,
+    part: Option<weapon::PartId>,
+) -> f32 {
+    match (part, build.entries.iter().find(|e| e.slot == slot)) {
+        (Some(part), Some(entry)) if entry.part == part => entry.roll,
+        (Some(_), _) => rng.f32(),
+        (None, _) => 0.0,
+    }
+}
+
+/// Fit one of the focused slot's candidates: what clicking it in the middle
+/// column and pressing Enter on it both mean.
+///
+/// The roll comes from the preview when the panel was already describing this
+/// exact choice, so what the player is looking at is what the click lands; a
+/// candidate that was never previewed takes a fresh roll, like any newly
+/// seated part. Returns whether the weapon actually changed.
+fn fit_candidate(
+    game: &mut Game,
+    kind: weapon::WeaponKind,
+    slot: weapon::SlotId,
+    candidate: usize,
+    choices: &[Option<weapon::PartId>],
+) -> bool {
+    let Some(part) = choices.get(candidate).copied() else {
+        return false;
+    };
+    let at = kind.index();
+    let previewed = game
+        .armory_preview
+        .as_ref()
+        .filter(|p| p.kind == at && p.slot == slot && p.candidate == candidate)
+        .and_then(|p| p.build.entries.iter().find(|e| e.slot == slot))
+        .map(|e| e.roll);
+    let roll = match previewed {
+        Some(roll) => roll,
+        None => seat_roll(&mut game.rng, &game.kit.builds[at], slot, part),
+    };
+    let build = seated(&game.kit.builds[at], slot, part, roll);
+    if build == game.kit.builds[at] {
+        return false;
+    }
+    game.kit.builds[at] = build;
+    true
+}
+
+/// The candidate the bench's panel is describing without having fitted it:
+/// which weapon, which slot and which row of the candidate column it is, and
+/// the build a click on it would produce.
+///
+/// Kept between frames so the roll the panel shows is the roll the click lands
+/// (a ranged part would otherwise show one number and get another), and so the
+/// preview mesh is rebuilt only when the picture really changes.
+struct ArmoryPreview {
+    kind: usize,
+    slot: weapon::SlotId,
+    candidate: usize,
+    build: weapon::WeaponBuild,
+}
+
+/// Cycle a loadout slot through "none" and the six guns. A pistol is as valid
+/// a primary as a rifle, if that is the run the player wants.
+fn step_kind_choice(cur: Option<weapon::WeaponKind>, forward: bool) -> Option<weapon::WeaponKind> {
+    let options: Vec<Option<weapon::WeaponKind>> = std::iter::once(None)
+        .chain(ARMORY_KINDS.iter().copied().map(Some))
+        .collect();
+    let at = options.iter().position(|o| *o == cur).unwrap_or(0) as i32;
+    let n = options.len() as i32;
+    let next = if forward {
+        (at + 1).rem_euclid(n)
+    } else {
+        (at + n - 1).rem_euclid(n)
+    };
+    options[next as usize]
 }
 
 /// A window mode: whether it is fullscreen, and the size it should have when it
@@ -179,9 +600,27 @@ fn window_calls(want: WindowState, applied: WindowState) -> (Option<bool>, Optio
 /// requests to the OS, while the volume is re-set unconditionally because it is
 /// a field assignment and the audio side is the only other reader.
 /// The whole settings file, from the one place that owns every field in it:
-/// the settings screen, the window mode and the campaign progress.
+/// the settings screen, the window mode, the campaign progress and the stash.
 fn config_of(game: &Game) -> config::Config {
-    game.settings.to_config(game.unlocked, game.last_mission)
+    let mut config = game.settings.to_config(
+        game.unlocked,
+        game.last_mission,
+        game.kit.build_texts(),
+        game.kit.paint_texts(),
+    );
+    // The scores half of the record.
+    config.best = game.best;
+    // The loadout half of the stash.
+    config.primary = Kit::slot_text(game.kit.primary);
+    config.secondary = Kit::slot_text(game.kit.secondary);
+    config.primary_mags = game.kit.ammo_mags[0];
+    config.secondary_mags = game.kit.ammo_mags[1];
+    config.frags = game.kit.grenades[0];
+    config.smokes = game.kit.grenades[1];
+    config.bandages = game.kit.meds[0];
+    config.medkits = game.kit.meds[1];
+    config.painkillers = game.kit.meds[2];
+    config
 }
 
 /// Writes the file when the campaign moves on. Called from the two places a
@@ -251,6 +690,63 @@ fn step_resolution(settings: &mut Settings, forward: bool) {
         settings.width = w;
         settings.height = h;
     }
+}
+
+/// The DPI presets the mouse DPI row walks: the run of values gaming mice
+/// actually ship with. The file may hold a value that is not here, and it is
+/// carried as an extra entry, the same way an odd window size is.
+const DPI_PRESETS: [u32; 6] = [400, 800, 1200, 1600, 2400, 3200];
+
+/// The DPI row's list: the presets, plus the current value when it is not one
+/// of them. Sorted, because DPI is one number and stepping it should walk in
+/// order — an odd value belongs where it falls, not at the end.
+fn dpi_options(current: u32) -> Vec<u32> {
+    let mut options = DPI_PRESETS.to_vec();
+    if !options.contains(&current) {
+        options.push(current);
+        options.sort_unstable();
+    }
+    options
+}
+
+/// Moves the DPI one step through `dpi_options`, wrapping at both ends.
+fn step_dpi(settings: &mut Settings, forward: bool) {
+    let options = dpi_options(settings.mouse_dpi);
+    let current = options
+        .iter()
+        .position(|dpi| *dpi == settings.mouse_dpi)
+        .unwrap_or(0);
+    let next = if forward {
+        (current + 1) % options.len()
+    } else {
+        (current + options.len() - 1) % options.len()
+    };
+    if let Some(&dpi) = options.get(next) {
+        settings.mouse_dpi = dpi;
+    }
+}
+
+/// Radians of view rotation per pixel of pointer travel at sensitivity 1.00.
+///
+/// Calibrated so a sweep across a 1920-pixel-wide window turns 2 radians, which
+/// is the feel the game shipped with — but it is a constant, not `2 / window
+/// width`. Pointer travel is what the hand does: scaling it by the window would
+/// make the same movement turn further in a small window and less in a large
+/// one, and the cm/360 the settings row reports would be a lie at every size
+/// but one.
+const LOOK_RADIANS_PER_COUNT: f32 = 2.0 / 1920.0;
+
+/// The distance a full turn takes on the desk, in centimetres, for a
+/// sensitivity and a mouse DPI — the cm/360 players use to compare games.
+///
+/// A pixel of pointer travel turns `LOOK_RADIANS_PER_COUNT` radians at
+/// sensitivity 1.00, a mouse pixel is 1/DPI of an inch, and an inch is 2.54 cm:
+/// the whole turn is `360 × 2.54 ÷ (degrees per pixel × pixels per centimetre)`.
+/// Both arguments are guarded because the row draws this every frame, and a NaN
+/// on screen is worse than a large number.
+fn cm_per_360(sensitivity: f32, dpi: u32) -> f32 {
+    let deg_per_count = sensitivity.max(0.01) * LOOK_RADIANS_PER_COUNT.to_degrees();
+    360.0 * 2.54 / (deg_per_count * dpi.max(1) as f32)
 }
 
 const ARMOR_MAX: f32 = 50.0;
@@ -365,12 +861,53 @@ fn manual_after_keys(
     (true, flip_page(page, turn))
 }
 
+/// Where one wave's releases come from.
+struct WaveRelease {
+    /// Points left to spend this wave.
+    budget: u32,
+    /// How many hostiles this wave has released — the floor bookkeeping.
+    released: u32,
+    /// The entrances this wave uses: a handful of points picked when the wave
+    /// opens, so arrivals read as "from the east and the north" — a direction
+    /// to hold — instead of noise from every corner (reference §19.2).
+    points: Vec<Vec3>,
+    cursor: usize,
+}
+
+/// What the spawner is doing right now.
+///
+/// The field used to be one continuous drip; the reference (§19.1) measured
+/// that as the reason a run has no decisions in it — pressure that never
+/// changes shape gives the player nothing to time against. Now the fight is
+/// fought in waves, with a window between them.
+enum WavePhase {
+    /// Countdown to the next wave; the field is empty.
+    Prep { left: f32 },
+    /// The wave's points are being paid out, one release at a time, while
+    /// the live count is under `max_alive`.
+    Release(WaveRelease),
+    /// The budget is spent; wait for the field to empty.
+    Clear,
+    /// Every wave released and the field is empty — the mission can clear.
+    Finished,
+}
+
+impl Default for WavePhase {
+    /// Only ever held for the span of one `tick_waves` call, which takes the
+    /// phase out of the game so its arms can reach the rest of `self`.
+    fn default() -> Self {
+        WavePhase::Finished
+    }
+}
+
 struct Game {
     phase: Phase,
     overlay: Overlay,
     level: Level,
     player: Player,
     arsenal: Arsenal,
+    /// The player's armory: what each weapon kind is built and painted as.
+    kit: Kit,
     viewmodel: ViewModel,
     grenades: Grenades,
     enemies: Vec<Enemy>,
@@ -422,6 +959,22 @@ struct Game {
     shots_hit: u32,
     elapsed: f32,
     spawn_timer: f32,
+    /// Waves finished this mission. The spawner reads it; the HUD shows
+    /// `waves_done + 1` as the wave in progress.
+    waves_done: u32,
+    /// What the spawner is doing right now.
+    wave_phase: WavePhase,
+    /// The last wave that released an elite, if any — the buffer rule of
+    /// reference §19.2 insists on, so an elite cannot arrive two waves in a
+    /// row.
+    last_elite_wave: Option<u32>,
+    /// This mission's saved best score, and whether the run that just ended
+    /// beat it. Filled in by `settle_score`, read by the result screen.
+    result_best: u32,
+    result_new_best: bool,
+    /// Seconds until the next mote of suspended matter is spawned in a drowned
+    /// arena. Unused — and never ticked — anywhere else.
+    mote_t: f32,
     flow_t: f32,
     survive_left: f32,
     objective_done: bool,
@@ -439,9 +992,29 @@ struct Game {
     /// The mission the player is in, mirrored into the settings file so that
     /// `continue` can put them back here.
     last_mission: usize,
+    /// The best score on each mission, loaded from the file and written back
+    /// through `config_of`. The reason a score outlives its run.
+    best: [u32; campaign::COUNT],
     menu_sel: usize,
     result_sel: usize,
     settings_sel: usize,
+    /// The armory's screen state: which weapon kind and tab are selected, the
+    /// row cursor, and the preview — rebuilt only when a choice moves.
+    armory_kind: usize,
+    armory_tab: usize,
+    armory_sel: usize,
+    armory_mesh: Option<Mesh>,
+    armory_dirty: bool,
+    /// The bench's own state: which column the keyboard is in, the slot it is
+    /// pointed at, the candidate its caret is on — remembered with the slot it
+    /// was placed in, so a slot's list opens where the player left it — the
+    /// candidate under the pointer, and the build that candidate would make.
+    /// All five are dead on the paint and loadout tabs, which are row lists.
+    armory_focus: hud::ArmoryColumn,
+    armory_slot: usize,
+    armory_part: Option<(weapon::SlotId, usize)>,
+    armory_hover_part: Option<usize>,
+    armory_preview: Option<ArmoryPreview>,
     /// Where the cursor was on the previous frame, so a menu can tell "the
     /// mouse moved" from "the cursor happens to be sitting on a row".
     menu_mouse: Vec2,
@@ -468,9 +1041,17 @@ struct Game {
 }
 
 impl Game {
-    /// `settings` come from the file, and are what the window was built with:
-    /// `window_conf` read the same file before the window existed.
-    fn new(settings: Settings, unlocked: usize, last_mission: usize) -> Self {
+    /// `settings` and `kit` come from the file. The settings are what the
+    /// window was built with — `window_conf` read the same file before the
+    /// window existed — and the kit is the armory every carried weapon is
+    /// built from. `best` is the saved score per mission, the same one file.
+    fn new(
+        settings: Settings,
+        kit: Kit,
+        unlocked: usize,
+        last_mission: usize,
+        best: [u32; campaign::COUNT],
+    ) -> Self {
         let mission = campaign::get(0);
         let mut level = Level::from_layout(&maps::campaign()[mission.layout]);
         // Only once a window exists: this uploads textures and fixes up their
@@ -478,7 +1059,9 @@ impl Game {
         let textures = surface::Textures::load();
         level.dress(&textures);
         let player = Player::new(level.player_start);
-        let arsenal = Arsenal::new(mission.loadout);
+        let arsenal = Arsenal::with_builds([kit.primary, kit.secondary], &kit.builds);
+        let grenades = kit.grenades;
+        let meds = kit.meds;
         let survive_left = mission.survive_seconds;
         Self {
             phase: Phase::Menu,
@@ -486,6 +1069,7 @@ impl Game {
             level,
             player,
             arsenal,
+            kit,
             viewmodel: ViewModel::new(),
             grenades: Grenades::new(),
             enemies: Vec::new(),
@@ -500,8 +1084,8 @@ impl Game {
             rng: Rng::new(0x9E37_79B9),
             armor: 0.0,
             stance: Stance::Stand,
-            ammo_grenades: [2, 1],
-            ammo_meds: [MED_KINDS[0].2, MED_KINDS[1].2, MED_KINDS[2].2],
+            ammo_grenades: grenades,
+            ammo_meds: meds,
             wheel: None,
             last_mouse: Vec2::ZERO,
             mouse_ready: false,
@@ -518,6 +1102,12 @@ impl Game {
             shots_hit: 0,
             elapsed: 0.0,
             spawn_timer: 0.0,
+            waves_done: 0,
+            wave_phase: WavePhase::Finished,
+            last_elite_wave: None,
+            result_best: 0,
+            result_new_best: false,
+            mote_t: 0.0,
             flow_t: 0.0,
             survive_left,
             objective_done: false,
@@ -530,9 +1120,20 @@ impl Game {
             // the campaign is shorter than the file's range allows.
             unlocked: unlocked.clamp(1, campaign::count()),
             last_mission: last_mission.min(campaign::count() - 1),
+            best,
             menu_sel: 0,
             result_sel: 0,
             settings_sel: 0,
+            armory_kind: 0,
+            armory_tab: 0,
+            armory_sel: 0,
+            armory_mesh: None,
+            armory_dirty: true,
+            armory_focus: hud::ArmoryColumn::Slots,
+            armory_slot: 0,
+            armory_part: None,
+            armory_hover_part: None,
+            armory_preview: None,
             menu_mouse: Vec2::ZERO,
             settings,
             window_state: WindowState {
@@ -560,16 +1161,31 @@ impl Game {
         self.level.dress(&self.textures);
         self.player = Player::new(self.level.player_start);
         self.player.alive = true;
-        self.arsenal = Arsenal::new(self.mission.loadout);
+        self.arsenal =
+            Arsenal::with_builds([self.kit.primary, self.kit.secondary], &self.kit.builds);
+        // Stock what the stash packed: each long gun's reserve is its spare
+        // magazines, the sidearm always carries two magazines' worth, and the
+        // consumables count out of the kit.
+        for slot in 0..2 {
+            let mags = self.kit.ammo_mags[slot];
+            if let Some(w) = self.arsenal.slot_mut(slot) {
+                let mag_size = w.stats().mag_size;
+                w.reserve = mags * mag_size;
+            }
+        }
+        if let Some(w) = self.arsenal.slot_mut(2) {
+            let mag_size = w.stats().mag_size;
+            w.reserve = SIDEARM_MAGS * mag_size;
+        }
         self.grenades = Grenades::new();
         self.enemies.clear();
         self.pickups.clear();
         self.effects.clear();
         self.armor = 0.0;
         self.stance = Stance::Stand;
-        // You go in with what the mission issues; there is no resupply.
-        self.ammo_grenades = [2, 1];
-        self.ammo_meds = [MED_KINDS[0].2, MED_KINDS[1].2, MED_KINDS[2].2];
+        // You go in with what the stash packed; there is no resupply.
+        self.ammo_grenades = self.kit.grenades;
+        self.ammo_meds = self.kit.meds;
         self.wheel = None;
         self.mouse_ready = false;
         self.trigger_armed = false;
@@ -587,7 +1203,17 @@ impl Game {
         self.shots_fired = 0;
         self.shots_hit = 0;
         self.elapsed = 0.0;
-        self.spawn_timer = 0.5;
+        // The first wave is a prep window like any other: the map-name banner
+        // owns its opening seconds and then the countdown takes over.
+        self.spawn_timer = 0.0;
+        self.waves_done = 0;
+        self.wave_phase = WavePhase::Prep {
+            left: wave_gap(self.mission),
+        };
+        self.last_elite_wave = None;
+        self.result_best = self.best[self.mission_index];
+        self.result_new_best = false;
+        self.mote_t = 0.0;
         self.flow_t = 0.0;
         self.survive_left = self.mission.survive_seconds;
         self.objective_done = false;
@@ -618,18 +1244,192 @@ impl Game {
         self.enemies.iter().filter(|e| !e.dead).count()
     }
 
+    /// Hostiles the mission still owes the field: everyone alive, plus a
+    /// rough count of the points still to be released — this wave's unspent
+    /// budget, or the next wave's whole budget while a prep window runs.
+    /// Points are not bodies, so the average roll is the divisor and the
+    /// number is an estimate by construction; rounding up keeps it from ever
+    /// reading zero while something is still coming.
     fn remaining(&self) -> u32 {
-        self.mission.total_enemies.saturating_sub(self.spawned) + self.alive_enemies() as u32
+        let points = match &self.wave_phase {
+            WavePhase::Prep { .. } => {
+                campaign::wave_budget(self.mission, self.waves_done.min(self.mission.waves - 1))
+            }
+            WavePhase::Release(rel) => rel.budget,
+            WavePhase::Clear | WavePhase::Finished => 0,
+        };
+        let per = campaign::mean_cost(self.mission).max(1.0);
+        self.alive_enemies() as u32 + (points as f32 / per).ceil() as u32
     }
 
-    /// Hostiles from the mission's own budget that have been killed.
+    /// The wave number to show the player, one-based: the wave in progress
+    /// (or being prepared for), held at the last wave after the last one.
+    fn wave_display(&self) -> u32 {
+        (self.waves_done + 1).min(self.mission.waves)
+    }
+
+    /// Files the score of the run that just ended: keeps the saved best up to
+    /// date, writes it out, and remembers what the result screen has to say.
+    /// Called from the two places a run ends — cleared or killed. Without
+    /// this the score is a number the game forgets (reference §19.3).
+    fn settle_score(&mut self) {
+        let i = self.mission_index.min(campaign::COUNT - 1);
+        self.result_new_best = self.score > self.best[i];
+        if self.result_new_best {
+            self.best[i] = self.score;
+            save_progress(self);
+        }
+        self.result_best = self.best[i];
+    }
+
+    /// One tick of the wave clock.
     ///
-    /// `killed` cannot be used for this: it also counts the spawnlings that
-    /// burst out of Tentacle corpses, which were never part of
-    /// `total_enemies`, so the mission panel could read `59 / 26`. Whatever the
-    /// spawnlings do, this stays inside the budget.
-    fn planned_kills(&self) -> u32 {
-        self.spawned.saturating_sub(self.alive_enemies() as u32)
+    /// The phase is taken out of `self` for the span of the tick so each arm
+    /// can reach into the rest of the game; every path hands a phase back
+    /// before this returns.
+    fn tick_waves(&mut self, dt: f32, audio: &audio::Audio) {
+        let phase = std::mem::take(&mut self.wave_phase);
+        let phase = match phase {
+            WavePhase::Prep { mut left } => {
+                left -= dt;
+                if is_key_pressed(KeyCode::F) {
+                    left = 0.0;
+                }
+                // The mission's first prep starts behind the map-name banner;
+                // once that leaves, the countdown banner takes the slot.
+                let gap = wave_gap(self.mission);
+                if left <= gap - 2.6 && self.banner.is_none() {
+                    self.banner = Some((
+                        format!(
+                            "{} {} / {}",
+                            i18n::t(Key::Wave),
+                            self.waves_done + 1,
+                            self.mission.waves
+                        ),
+                        left.max(0.3),
+                    ));
+                }
+                if left <= 0.0 {
+                    self.begin_wave()
+                } else {
+                    WavePhase::Prep { left }
+                }
+            }
+            WavePhase::Release(mut rel) => {
+                self.spawn_timer -= dt;
+                if self.alive_enemies() < self.mission.max_alive as usize && self.spawn_timer <= 0.0
+                {
+                    if self.release_one(&mut rel, audio) {
+                        self.spawn_timer = (1.9 - 0.06 * self.mission.difficulty).max(0.7);
+                        WavePhase::Release(rel)
+                    } else if self.alive_enemies() == 0 {
+                        // The last release is already down: no clear needed.
+                        self.finish_wave()
+                    } else {
+                        WavePhase::Clear
+                    }
+                } else {
+                    WavePhase::Release(rel)
+                }
+            }
+            WavePhase::Clear => {
+                if self.alive_enemies() == 0 {
+                    self.finish_wave()
+                } else {
+                    WavePhase::Clear
+                }
+            }
+            WavePhase::Finished => WavePhase::Finished,
+        };
+        self.wave_phase = phase;
+    }
+
+    /// Opens the next wave: the reset, the entrances it will use, and the
+    /// first release's delay.
+    fn begin_wave(&mut self) -> WavePhase {
+        let mission = self.mission;
+        let wave = self.waves_done;
+        // §19.4-5: a wave starts as a clean duel. Health and breath come
+        // back, so the deaths this buys are deaths of position and decision,
+        // not of the last wave's leftovers. Ammunition is deliberately *not*
+        // refilled — that economy is the stash's — and neither are armour or
+        // sanity: those are things the arena is allowed to take from you.
+        self.player.wave_reset();
+        self.heal_t = 0.0;
+        self.spawn_timer = 0.45;
+        let points = spawn_set(&self.level, &self.player, &mut self.rng, WAVE_ENTRANCES);
+        WavePhase::Release(WaveRelease {
+            budget: campaign::wave_budget(mission, wave),
+            released: 0,
+            points,
+            cursor: 0,
+        })
+    }
+
+    /// Closes the wave that just ended: a prep window for the next one, or
+    /// `Finished` if that was the last.
+    fn finish_wave(&mut self) -> WavePhase {
+        self.waves_done += 1;
+        if self.waves_done >= self.mission.waves {
+            return WavePhase::Finished;
+        }
+        let gap = wave_gap(self.mission);
+        if !matches!(self.mission.objective, Objective::Survive) {
+            self.say(i18n::t(Key::WaveEarly));
+        }
+        self.banner = Some((
+            format!(
+                "{} {} / {}",
+                i18n::t(Key::Wave),
+                self.waves_done + 1,
+                self.mission.waves
+            ),
+            gap,
+        ));
+        WavePhase::Prep { left: gap }
+    }
+
+    /// Releases one hostile for the current wave, if the wave's remaining
+    /// points still afford one. `false` means the budget is spent.
+    fn release_one(&mut self, rel: &mut WaveRelease, audio: &audio::Audio) -> bool {
+        let mission = self.mission;
+        let wave = self.waves_done;
+        let floor_left = campaign::WAVE_FLOOR.saturating_sub(rel.released);
+        let elite_ready = self.last_elite_wave.is_none_or(|l| wave >= l + 2);
+        let kind = {
+            let mut rolls = || self.rng.u32();
+            campaign::draw_kind(mission, &mut rolls, rel.budget, floor_left, elite_ready)
+        };
+        let Some(kind) = kind else {
+            return false;
+        };
+        rel.budget -= campaign::cost(kind);
+        rel.released += 1;
+        if campaign::is_elite(kind) {
+            self.last_elite_wave = Some(wave);
+            // You should know something enormous has arrived before it sees you.
+            self.banner = Some((i18n::t(Key::ColossusStirs).to_string(), 2.6));
+        }
+        let pos = wave_point(rel, &self.player);
+        let mut e = Enemy::spawn(
+            kind,
+            pos,
+            campaign::wave_strength(mission, wave),
+            &mut self.rng,
+        );
+        // Spawned out of sight and never having seen anything, a
+        // reinforcement would otherwise stand at its post forever.
+        e.alert_to(self.player.pos, 20.0);
+        self.enemies.push(e);
+        self.spawned += 1;
+        self.effects.smoke(
+            pos + vec3(0.0, 1.0, 0.0),
+            Color::new(0.5, 0.8, 1.0, 0.5),
+            10,
+            &mut self.rng,
+        );
+        audio.play_at(Sfx::Spawn, 12.0);
+        true
     }
 
     /// Returns to a playable state, swallowing whatever input the menu left
@@ -910,6 +1710,37 @@ mod tests {
         assert_eq!(resume_mission(0, 0), 0);
     }
 
+    /// The armour split, §17.2-style: the bar takes 65% of a body hit while
+    /// it holds, takes nothing when the hit lands on the legs, and can never
+    /// absorb more than it has left.
+    #[test]
+    fn armour_takes_the_body_never_the_legs() {
+        let (absorbed, through) = armor_split(20.0, 50.0, false);
+        assert!((absorbed - 13.0).abs() < 1e-4);
+        assert!((through - 7.0).abs() < 1e-4);
+
+        let (absorbed, through) = armor_split(20.0, 50.0, true);
+        assert_eq!(absorbed, 0.0, "legs are never armoured");
+        assert!((through - 20.0).abs() < 1e-4);
+
+        // The bar absorbs what it has and lets the rest through.
+        let (absorbed, through) = armor_split(20.0, 5.0, false);
+        assert!((absorbed - 5.0).abs() < 1e-4);
+        assert!((through - 15.0).abs() < 1e-4);
+    }
+
+    /// A ray that lands below the hips is a leg hit; the fraction is of the
+    /// live stance's height, so crouching drops the line with the body.
+    #[test]
+    fn hits_below_the_hips_strike_the_legs() {
+        let player = Player::new(Vec3::ZERO);
+        let h = player.body_height();
+        assert!(struck_legs(&player, vec3(0.0, 0.2 * h, 0.0)));
+        assert!(struck_legs(&player, vec3(0.0, -0.5, 0.0)));
+        assert!(!struck_legs(&player, vec3(0.0, 0.8 * h, 0.0)));
+        assert!(!struck_legs(&player, vec3(0.0, h, 0.0)));
+    }
+
     /// Which table a page draws is the manual's whole model: the menu's rows
     /// and the field's keys both name a page by number, so the two have to
     /// agree on what page 1 is. Page 2 is one card list made of two tables, the
@@ -999,6 +1830,7 @@ mod tests {
     fn settings_survive_the_config_conversion() {
         let live = Settings {
             sensitivity: 3.45,
+            mouse_dpi: 1600,
             volume: 0.15,
             aim_toggle: false,
             lean_toggle: false,
@@ -1008,8 +1840,25 @@ mod tests {
             width: 1920,
             height: 1080,
         };
-        let back = Settings::from_config(&live.to_config(3, 2));
+        // The armory rides the same conversion: one touched weapon proves the
+        // strings are carried through untouched.
+        let mut builds: [String; 7] = std::array::from_fn(|_| String::new());
+        builds[0] = "optic=micro_dot@0.50,muzzle=compensator@0.25".to_string();
+        let mut paints: [String; 7] = std::array::from_fn(|_| String::new());
+        paints[0] = "abyss@0.32:481516".to_string();
+        let config = live.to_config(3, 2, builds, paints);
+        // The armory rides the same conversion: one touched weapon proves the
+        // strings are carried through untouched.
+        assert_eq!(
+            config.builds[0],
+            "optic=micro_dot@0.50,muzzle=compensator@0.25"
+        );
+        assert_eq!(config.paints[0], "abyss@0.32:481516");
+        assert!(config.builds[1..].iter().all(|s| s.is_empty()));
+        assert!(config.paints[1..].iter().all(|s| s.is_empty()));
+        let back = Settings::from_config(&config);
         assert_eq!(back.sensitivity, live.sensitivity);
+        assert_eq!(back.mouse_dpi, live.mouse_dpi);
         assert_eq!(back.volume, live.volume);
         assert_eq!(back.aim_toggle, live.aim_toggle);
         assert_eq!(back.lean_toggle, live.lean_toggle);
@@ -1027,6 +1876,7 @@ mod tests {
     fn the_default_config_builds_the_shipped_settings() {
         let live = Settings::from_config(&config::Config::default());
         assert_eq!(live.sensitivity, 1.60);
+        assert_eq!(live.mouse_dpi, 800);
         assert_eq!(live.volume, 0.80);
         assert!(live.aim_toggle);
         assert!(live.lean_toggle);
@@ -1115,6 +1965,315 @@ mod tests {
         step_resolution(&mut settings, true);
         assert_eq!((settings.width, settings.height), (1280, 720));
     }
+
+    /// The DPI row walks a list that always holds the current value, so a DPI
+    /// the presets do not name is shown and kept — sorted into its place,
+    /// because unlike a window size a DPI that steps out of order would read as
+    /// a bug.
+    #[test]
+    fn the_dpi_row_keeps_a_value_that_is_not_a_preset() {
+        assert_eq!(
+            dpi_options(800),
+            DPI_PRESETS.to_vec(),
+            "a preset is already in the list"
+        );
+        assert_eq!(
+            dpi_options(1000),
+            vec![400, 800, 1000, 1200, 1600, 2400, 3200],
+            "an odd value is carried in order"
+        );
+
+        let mut settings = Settings::from_config(&config::Config::default());
+        assert_eq!(settings.mouse_dpi, 800);
+        // Right walks the presets in order...
+        step_dpi(&mut settings, true);
+        assert_eq!(settings.mouse_dpi, 1200);
+        step_dpi(&mut settings, false);
+        step_dpi(&mut settings, false);
+        assert_eq!(settings.mouse_dpi, 400);
+        // ...and left from the first entry wraps to the last.
+        step_dpi(&mut settings, false);
+        assert_eq!(settings.mouse_dpi, 3200, "left from the first wraps");
+        // A value between presets takes part in the walk from where it falls,
+        // and — like an odd resolution — is carried only while it is current:
+        // stepping away from it lands on the neighbouring preset.
+        settings.mouse_dpi = 1000;
+        step_dpi(&mut settings, true);
+        assert_eq!(settings.mouse_dpi, 1200);
+        step_dpi(&mut settings, false);
+        assert_eq!(settings.mouse_dpi, 800);
+    }
+
+    /// The sensitivity row reports cm/360 so a value tuned here can be carried
+    /// to another game, and a habit from another game found here: it has to
+    /// follow both numbers it is made of, and land where the calibration says —
+    /// 1.60 on an 800-count mouse is a 12 cm turn.
+    #[test]
+    fn the_settings_row_reports_cm_per_360() {
+        let base = cm_per_360(1.60, 800);
+        assert!((base - 11.97).abs() < 0.05, "{base}");
+        // Half the sensitivity is twice the distance; twice the DPI is half of
+        // it, because a full turn costs the same counts either way.
+        assert!((cm_per_360(0.80, 800) - base * 2.0).abs() < 1e-3);
+        assert!((cm_per_360(1.60, 1600) - base * 0.5).abs() < 1e-3);
+        // Hand-edited nonsense cannot put a NaN or an infinity on the row.
+        let guarded = cm_per_360(0.0, 0);
+        assert!(guarded.is_finite() && guarded > 0.0, "{guarded}");
+    }
+
+    /// The near-death grade is off until health or sanity crosses the same
+    /// thresholds the vignette uses, deepens towards the worst state, and stops
+    /// there — the world is never fully drained of colour.
+    #[test]
+    fn the_world_greys_out_only_near_death() {
+        assert_eq!(critical_desaturation(100.0, 1.0), 0.0);
+        assert_eq!(
+            critical_desaturation(CRITICAL_HEALTH, CRITICAL_SANITY),
+            0.0,
+            "the thresholds themselves are not critical yet"
+        );
+        assert!(critical_desaturation(29.0, 1.0) > 0.0);
+        assert!(
+            critical_desaturation(100.0, 0.24) > 0.0,
+            "sanity carries the grade alone"
+        );
+        assert!(
+            (critical_desaturation(0.0, 1.0) - CRITICAL_DESATURATION).abs() < 1e-6,
+            "zero health is the deepest grade"
+        );
+        let expected = CRITICAL_DESATURATION * (1.0 - 1.0 / CRITICAL_HEALTH);
+        assert!((critical_desaturation(1.0, 0.5) - expected).abs() < 1e-6);
+    }
+
+    /// The water is not a palette swap. Only the drowned city is sunken, and
+    /// its backdrop runs the other way round — a surface glow overhead fading
+    /// down into murk — with the murk darker than any open horizon, so the
+    /// arena reads as depth rather than as dusk.
+    #[test]
+    fn the_drowned_city_is_the_one_under_water() {
+        let campaign = maps::campaign();
+        let sunken: Vec<_> = campaign.iter().filter(|layout| layout.sunken).collect();
+        assert_eq!(sunken.len(), 1, "exactly one arena is under water");
+        assert_eq!(sunken[0].name_en, "R'LYEH");
+
+        let sky = sunken[0].sky;
+        let lum = |c: Color| 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+        assert!(
+            lum(surface_glow(sky)) > lum(murk_colour(sky)),
+            "the water column must run bright overhead to dark at the horizon"
+        );
+        assert!(
+            lum(murk_colour(sky)) < lum(horizon_colour(sky)),
+            "the murk must be darker than an open horizon, or it is just dusk"
+        );
+    }
+
+    /// The loadout survives the stash: the file's text parses back into the
+    /// same choices, `none` means none, and a kind this build does not know
+    /// falls back to what the slot held rather than dropping it.
+    #[test]
+    fn the_loadout_round_trips_through_the_kit() {
+        let kit = Kit {
+            primary: Some(weapon::WeaponKind::Sniper),
+            secondary: Some(weapon::WeaponKind::Shotgun),
+            ammo_mags: [6, 3],
+            grenades: [0, 3],
+            meds: [5, 2, 0],
+            ..Kit::issued()
+        };
+        let config = config::Config {
+            primary: Kit::slot_text(kit.primary),
+            secondary: Kit::slot_text(kit.secondary),
+            primary_mags: kit.ammo_mags[0],
+            secondary_mags: kit.ammo_mags[1],
+            frags: kit.grenades[0],
+            smokes: kit.grenades[1],
+            bandages: kit.meds[0],
+            medkits: kit.meds[1],
+            painkillers: kit.meds[2],
+            ..config::Config::default()
+        };
+        let back = Kit::from_config(&config);
+        assert_eq!(back.primary, kit.primary);
+        assert_eq!(back.secondary, kit.secondary);
+        assert_eq!(back.ammo_mags, kit.ammo_mags);
+        assert_eq!(back.grenades, kit.grenades);
+        assert_eq!(back.meds, kit.meds);
+
+        assert_eq!(loadout_slot("none", Some(weapon::WeaponKind::Rifle)), None);
+        assert_eq!(
+            loadout_slot("trebuchet", Some(weapon::WeaponKind::Rifle)),
+            Some(weapon::WeaponKind::Rifle),
+            "junk named a gun that does not exist"
+        );
+        assert_eq!(Kit::slot_text(None), "none");
+        assert_eq!(Kit::slot_text(Some(weapon::WeaponKind::Smg)), "smg");
+    }
+
+    /// The counts `Kit::issued` starts with are the ones `MED_KINDS` documents
+    /// beside its stats, and the grenade pair missions have always opened
+    /// with — two tables of defaults that must not drift apart.
+    #[test]
+    fn the_issued_kit_matches_the_documented_counts() {
+        let issued = Kit::issued();
+        assert_eq!(
+            issued.meds,
+            [MED_KINDS[0].2, MED_KINDS[1].2, MED_KINDS[2].2]
+        );
+        assert_eq!(issued.grenades, [2, 1]);
+        assert_eq!(issued.ammo_mags, [4, 0]);
+    }
+
+    /// The loadout slots walk "none" and the six guns, wrapping both ways; a
+    /// kind the stash does not offer lands at the front of the walk.
+    #[test]
+    fn the_kind_choice_walks_none_and_every_gun() {
+        use weapon::WeaponKind;
+        let mut cur = None;
+        let mut seen = Vec::new();
+        for _ in 0..ARMORY_KINDS.len() + 1 {
+            cur = step_kind_choice(cur, true);
+            seen.push(cur);
+        }
+        assert_eq!(cur, None, "a full lap comes back to none");
+        assert!(seen.contains(&Some(WeaponKind::Rifle)));
+        assert!(seen.contains(&Some(WeaponKind::Pistol)));
+        assert_eq!(
+            step_kind_choice(None, false),
+            Some(WeaponKind::Pistol),
+            "backwards from none wraps to the last gun"
+        );
+        assert_eq!(
+            step_kind_choice(Some(WeaponKind::Knife), true),
+            Some(WeaponKind::Rifle),
+            "a stray kind lands at the front of the walk"
+        );
+    }
+
+    /// A part id from the live catalogue, by the name it is filed under. The
+    /// catalogue a test build sees is not the shipped one — it carries the
+    /// demo parts too — so the bench's tests ask for parts by name rather than
+    /// by position.
+    fn part_id(name: &str) -> Option<weapon::PartId> {
+        weapon::catalogue()
+            .iter()
+            .map(|p| p.id)
+            .find(|id| id.0 == name)
+    }
+
+    /// The bench writes through exactly one slot. Fitting a part must not move
+    /// another slot's part or its roll, and taking one off must not take
+    /// anything else with it: `seated` is the only write the bench makes, so
+    /// this is the whole of what a click changes.
+    #[test]
+    fn seating_a_candidate_touches_one_slot() {
+        let def = weapon::def(weapon::WeaponKind::Rifle);
+        let (optic, muzzle) = (weapon::SlotId("optic"), weapon::SlotId("muzzle"));
+        let dot = part_id("micro_dot").expect("the dot is in the catalogue");
+        let brake = part_id("compensator").expect("the brake is in the catalogue");
+        let start = seated(&weapon::WeaponBuild::empty(), optic, Some(dot), 0.25);
+
+        let fitted = seated(&start, muzzle, Some(brake), 0.75);
+        assert_eq!(fitted_part(&fitted, optic), Some(dot));
+        assert_eq!(fitted_part(&fitted, muzzle), Some(brake));
+        assert_eq!(
+            fitted.entries.len(),
+            2,
+            "an entry was added twice: {fitted:?}"
+        );
+        assert!(
+            fitted
+                .entries
+                .iter()
+                .any(|e| e.slot == optic && e.roll == 0.25),
+            "the optic lost the roll it was seated at: {:?}",
+            fitted.entries
+        );
+        assert!(
+            weapon::validate(def, &fitted).is_ok(),
+            "the bench built a weapon that does not validate: {:?}",
+            weapon::validate(def, &fitted)
+        );
+
+        let bare = seated(&fitted, muzzle, None, 0.0);
+        assert_eq!(fitted_part(&bare, muzzle), None);
+        assert_eq!(fitted_part(&bare, optic), Some(dot));
+        assert!(weapon::validate(def, &bare).is_ok());
+    }
+
+    /// The candidate column lists what will seat and nothing else: "none"
+    /// first, then every catalogue part whose slot and standard match — the
+    /// same pair of checks `validate` makes. A part built for another slot is
+    /// never offered, a slot the weapon does not have has no list at all, and
+    /// the part already in the slot is on its own list, which is how the
+    /// column can mark it.
+    #[test]
+    fn the_candidate_column_offers_only_what_fits() {
+        let def = weapon::def(weapon::WeaponKind::Rifle);
+        let empty = weapon::WeaponBuild::empty();
+        let optic = weapon::SlotId("optic");
+        let accepts = weapon::reachable_slots(def, &empty)
+            .iter()
+            .find(|s| s.id == optic)
+            .map(|s| s.accepts)
+            .expect("a rifle has an optic rail");
+
+        let choices = part_choices(def, &empty, optic).expect("a rifle has the slot");
+        assert_eq!(
+            choices.first(),
+            Some(&None),
+            "the column does not start on none"
+        );
+        let want: Vec<_> = weapon::catalogue()
+            .iter()
+            .filter(|p| p.slot == optic && p.interface == accepts)
+            .map(|p| Some(p.id))
+            .collect();
+        assert_eq!(
+            &choices[1..],
+            &want[..],
+            "the column is not the catalogue's own order"
+        );
+        let dot = part_id("micro_dot").expect("the dot is in the catalogue");
+        assert!(want.contains(&Some(dot)), "the rail lost its dot");
+
+        let fitted = seated(&empty, optic, Some(dot), 0.4);
+        let again = part_choices(def, &fitted, optic).expect("a rifle has the slot");
+        assert!(
+            again.contains(&Some(dot)),
+            "the fitted part is not on its own list: {again:?}"
+        );
+
+        let knife = weapon::def(weapon::WeaponKind::Knife);
+        assert!(
+            part_choices(knife, &weapon::WeaponBuild::empty(), optic).is_none(),
+            "a weapon with no rail offered optics"
+        );
+    }
+
+    /// A roll is what makes two copies of a ranged part differ, so a part
+    /// arriving in a slot draws one — but the copy already there keeps the roll
+    /// it has, or the bench could be clicked twice to reroll it.
+    #[test]
+    fn reseating_the_same_part_is_not_a_reroll() {
+        let slot = weapon::SlotId("magazine");
+        let lot = part_id("surplus_lot").expect("the surplus lot is in the catalogue");
+        let other = part_id("extended_mag").expect("the extended mag is in the catalogue");
+        let mut rng = Rng::new(7);
+        let build = seated(&weapon::WeaponBuild::empty(), slot, Some(lot), 0.31);
+
+        assert_eq!(seat_roll(&mut rng, &build, slot, Some(lot)), 0.31);
+        let fresh = seat_roll(&mut rng, &build, slot, Some(other));
+        assert!(
+            fresh.is_finite() && (0.0..1.0).contains(&fresh),
+            "a new part was seated at {fresh}, which is not a roll"
+        );
+        assert_eq!(
+            seat_roll(&mut rng, &build, slot, None),
+            0.0,
+            "emptying a slot has no number to roll"
+        );
+    }
 }
 
 /// The window's opening state, read from the settings file.
@@ -1152,12 +2311,32 @@ fn horizon_colour(sky: Color) -> Color {
     )
 }
 
-fn draw_sky(sky: Color) {
+/// What distance dissolves into under water — [`horizon_colour`]'s drowned
+/// counterpart, and the colour the fog shares with the sky either way.
+///
+/// Far darker than an open horizon: the sea takes light with distance instead
+/// of scattering it back, so R'LYEH's far wing goes away into the dark rather
+/// than paling out.
+fn murk_colour(sky: Color) -> Color {
+    Color::new(sky.r * 0.45, sky.g * 0.50, sky.b * 0.50, 1.0)
+}
+
+/// The top of a sunken frame: the surface glow, far overhead.
+fn surface_glow(sky: Color) -> Color {
+    Color::new(
+        (sky.r * 1.30 + 0.030).min(1.0),
+        (sky.g * 1.25 + 0.048).min(1.0),
+        (sky.b * 1.25 + 0.042).min(1.0),
+        1.0,
+    )
+}
+
+/// The gradient both backdrops are built from: `top` at the top of the frame
+/// down to `bottom` at the horizon, in the same forty bands either way.
+fn draw_bands(top: Color, bottom: Color) {
     let h = screen_height();
     let w = screen_width();
     let bands = 40.0;
-    let top = Color::new(sky.r * 0.30, sky.g * 0.32, sky.b * 0.42, 1.0);
-    let bottom = horizon_colour(sky);
     for i in 0..bands as i32 {
         let t = i as f32 / bands;
         let c = Color::new(
@@ -1168,6 +2347,23 @@ fn draw_sky(sky: Color) {
         );
         draw_rectangle(0.0, h * t, w, h / bands + 1.0, c);
     }
+}
+
+/// A night sky: darkest overhead, brightening down to the horizon haze.
+fn draw_sky(sky: Color) {
+    let top = Color::new(sky.r * 0.30, sky.g * 0.32, sky.b * 0.42, 1.0);
+    draw_bands(top, horizon_colour(sky));
+}
+
+/// The drowned city's backdrop: the same bands, lit from the other end.
+///
+/// Light reaches this arena from the surface far above, so the frame is
+/// brightest at the top — a dim teal glow — and falls away to the murk at the
+/// horizon, which is also what the fog fades the far geometry into. Night and
+/// depth must not be mistaken for each other, and the way to keep them apart
+/// is to run the gradient the other way and take the light out of it.
+fn draw_sunken_sky(sky: Color) {
+    draw_bands(surface_glow(sky), murk_colour(sky));
 }
 
 /// Ray against the player's own body box, for enemy fire. Uses the current
@@ -1190,19 +2386,54 @@ fn ray_player(player: &Player, origin: Vec3, dir: Vec3) -> Option<f32> {
     )
 }
 
+/// Where a shot landed relative to the player's feet. Below the hips it
+/// struck the legs, which are never armoured (reference §17.2① — CS2's
+/// "legs are never armored", the one armour rule players feel immediately).
+fn struck_legs(player: &Player, hit: Vec3) -> bool {
+    const LEG_FRACTION: f32 = 0.45;
+    let h = (hit.y - player.pos.y) / player.body_height().max(0.1);
+    h < LEG_FRACTION
+}
+
+/// Splits a hit between the armour bar and the body: 65% absorbed while the
+/// bar holds, everything past it through. Returns `(absorbed, through)`.
+fn armor_split(amount: f32, armor: f32, legs: bool) -> (f32, f32) {
+    // No hit point and no legs: a blast is a body hit — the rule is about
+    // where bullets land, and a grenade does not land anywhere in particular.
+    let absorbed = if legs {
+        0.0
+    } else {
+        (amount * 0.65).min(armor.max(0.0))
+    };
+    (absorbed, amount - absorbed)
+}
+
 fn apply_player_damage(
     player: &mut Player,
     armor: &mut f32,
     audio: &audio::Audio,
     amount: f32,
     from: Vec3,
+    hit: Option<Vec3>,
 ) {
     if !player.alive {
         return;
     }
-    let absorbed = (amount * 0.65).min(*armor);
+    let legs = hit.is_some_and(|p| struck_legs(player, p));
+    let (absorbed, through) = armor_split(amount, *armor, legs);
     *armor -= absorbed;
-    player.damage(amount - absorbed);
+    player.damage(through);
+    // §17.2②: armour absorbs the *punch* as well as the padding — a stopped
+    // round barely moves the view where an unarmoured one shoves it. The
+    // 0.0022 rad per damage point puts a Grunt's 8 at about one degree and
+    // the Colossus's 42 at the clamp.
+    let punch = amount
+        * if absorbed > 0.0 {
+            0.0022 * 0.15
+        } else {
+            0.0022
+        };
+    player.aim_punch(punch);
     // Where the hit came from, for the HUD's directional indicator. `hurt_from`
     // reads a direction from the player out toward the source and ignores a
     // flat zero, and this is the one place damage reaches the player, so the
@@ -1263,7 +2494,11 @@ fn fire_player_shot(game: &mut Game, audio: &audio::Audio, pressed: bool, held: 
                 game.shots_hit += 1;
                 let dmg = game.arsenal.active_weapon().damage_at(hit.dist)
                     * if head { headshot } else { 1.0 };
-                let died = game.enemies[index].take_damage(dmg);
+                // The weapon's own penetration number goes in with the shot
+                // (reference §17.2③): armour stops less of a rifle round than
+                // of a pistol one, visibly.
+                let pen = game.arsenal.active_weapon().kind.armor_pen();
+                let died = game.enemies[index].take_damage(dmg, pen);
                 game.effects.blood(
                     hit.point,
                     dir,
@@ -1340,8 +2575,19 @@ fn kill_enemy(game: &mut Game, index: usize, audio: &audio::Audio) {
     // Body horror: the corpse bursts open and smaller things crawl out, so
     // killing a Tentacle horror at point-blank range is a mistake.
     if spawns > 0 {
-        let wave = game.mission.wave;
+        // The hatchlings are born at the wave that killed their host, so they
+        // inherit its strength like any other hostile of that wave.
+        let wave = campaign::wave_strength(game.mission, game.waves_done);
         for i in 0..spawns {
+            // The whole-scene ceiling (reference §19.4-4): pressure is meant
+            // to be bounded by what the player can fight, not by how many
+            // corpses happened to burst at once. Twenty-four is far above
+            // anything the missions' own `max_alive` (5–8) can produce on its
+            // own, so this only ever catches a pile-up of spawnlings — which
+            // is exactly the pile-up it exists to catch.
+            if game.alive_enemies() >= ENEMY_CAP {
+                break;
+            }
             let a = i as f32 / spawns as f32 * std::f32::consts::TAU;
             let offset = vec3(a.cos() * 1.05, 0.0, a.sin() * 1.05);
             let spot = at + offset;
@@ -1365,34 +2611,176 @@ fn kill_enemy(game: &mut Game, index: usize, audio: &audio::Audio) {
     }
 }
 
-fn pick_spawn(level: &Level, player: &Player, rng: &mut Rng) -> Vec3 {
-    // Far enough that nothing materialises in your face, but close enough that
-    // the fight actually arrives. Preferring the *farthest* spawn was fine on
-    // the small arenas and disastrous on R'LYEH, where the nearest spawn is
-    // 19 m and the farthest 65 m through a deliberate labyrinth — the first
-    // fourty seconds passed with nothing happening at all.
+/// Flat player-to-spawn distance: hostiles walk, they do not fly.
+fn spawn_distance(at: Vec3, player: &Player) -> f32 {
+    vec3(at.x - player.pos.x, 0.0, at.z - player.pos.z).length()
+}
+
+/// The spawn points this player may be attacked from: everything at least
+/// `MIN` away, measured flat.
+///
+/// When nothing is far enough, the fallback is the *farthest point there
+/// is*. The old chooser fell back to `spawns[0]`, which is not a rule about
+/// spacing at all — it is a rule about array order, and on some arenas it
+/// put a hostile in the player's lap. (Reference §19.2.1.)
+fn spawn_pool(level: &Level, player: &Player) -> Vec<Vec3> {
     const MIN: f32 = 14.0;
-    const IDEAL: f32 = 24.0;
-    let mut best = level.spawns[0];
-    let mut best_score = f32::MIN;
-    for _ in 0..10 {
-        let cand = level.spawns[(rng.u32() as usize) % level.spawns.len()];
-        let d = vec3(cand.x - player.pos.x, 0.0, cand.z - player.pos.z).length();
-        if d < MIN {
-            continue;
+    let legal: Vec<Vec3> = level
+        .spawns
+        .iter()
+        .copied()
+        .filter(|s| spawn_distance(*s, player) >= MIN)
+        .collect();
+    if !legal.is_empty() {
+        return legal;
+    }
+    level
+        .spawns
+        .iter()
+        .copied()
+        .max_by(|a, b| spawn_distance(*a, player).total_cmp(&spawn_distance(*b, player)))
+        .into_iter()
+        .collect()
+}
+
+/// One weighted draw over `pool`: entrances the player cannot see are worth
+/// more (`HIDDEN_WEIGHT`), and nearness to `IDEAL` is the rest. Returns the
+/// index into `pool`.
+fn weighted_spawn_index(pool: &[Vec3], level: &Level, player: &Player, rng: &mut Rng) -> usize {
+    const IDEAL: f32 = 26.0;
+    // What an unseen point is worth against a seen one at the same distance.
+    // Two and a half prefers cover without letting a distant hatch beat a
+    // good close entrance, and without freezing the spread onto whichever
+    // corners happen to be blind.
+    const HIDDEN_WEIGHT: f32 = 2.5;
+
+    let eye = vec3(player.pos.x, player.pos.y + 1.6, player.pos.z);
+    let mut weights: Vec<f32> = Vec::with_capacity(pool.len());
+    let mut total = 0.0f32;
+    for s in pool {
+        let d = spawn_distance(*s, player);
+        // A soft triangle around `IDEAL`: half weight at 1 m of error, a
+        // quarter at 3 m, an eighth at 7 m. Deliberately gentler than
+        // `1 / (1 + dev)` — the sharp version crowns one point per arena
+        // even when nothing is wrong with the others.
+        let mut w = 1.0 / (1.0 + 0.6 * (d - IDEAL).abs());
+        if !level.line_of_sight(vec3(s.x, 1.6, s.z), eye) {
+            w *= HIDDEN_WEIGHT;
         }
-        let hidden = !level.line_of_sight(
-            vec3(cand.x, 1.6, cand.z),
-            vec3(player.pos.x, player.pos.y + 1.6, player.pos.z),
-        );
-        // Arriving unseen is worth a lot; the rest is closeness to IDEAL.
-        let score = if hidden { 30.0 } else { 0.0 } - (d - IDEAL).abs();
-        if score > best_score {
-            best_score = score;
-            best = cand;
+        total += w;
+        weights.push(w);
+    }
+    let mut roll = rng.range(0.0, total);
+    for (i, w) in weights.iter().enumerate() {
+        roll -= w;
+        if roll <= 0.0 {
+            return i;
         }
     }
-    best
+    // Float sums disagreeing with themselves lands here; the last legal
+    // point is still a legal point.
+    pool.len().saturating_sub(1)
+}
+
+/// Picks where the next hostile enters the arena.
+///
+/// The rule used to be ten draws *with replacement*, scored
+/// `hidden ? 30 : 0 - |d - IDEAL|`. Out of sight was worth 30 and the
+/// distance term is worth at most 16, so any draw into a blind corner won
+/// outright — one corner per arena soaked up almost every spawn, which read
+/// as "everything arrives from the same place". Now hiding is a weight
+/// rather than an override, distance keeps its say through `IDEAL`, and the
+/// weighted draw keeps a fixed player position from falling into a fixed
+/// pattern. Preferring the farthest point was fine on the small arenas and
+/// disastrous on R'LYEH, where the nearest spawn is 19 m and the farthest
+/// 65 m through a deliberate labyrinth — forty seconds of nothing happening.
+///
+/// The wave system no longer calls this per release (a wave fixes its
+/// entrances up front — see `spawn_set`), but it remains the one-draw
+/// version of the same chooser, and the distribution test in `maps` pins it.
+#[cfg(test)]
+fn pick_spawn(level: &Level, player: &Player, rng: &mut Rng) -> Vec3 {
+    let pool = spawn_pool(level, player);
+    let i = weighted_spawn_index(&pool, level, player, rng);
+    // An empty arena (no spawns at all, which the arena tests already forbid)
+    // degrades to the player's position rather than panicking in a shipping
+    // build.
+    pool.get(i).copied().unwrap_or(player.pos)
+}
+
+/// The number of different entrances a single wave uses.
+const WAVE_ENTRANCES: usize = 3;
+
+/// The most hostiles that may be alive at once, from every source. Missions
+/// cap their own releases at `max_alive` (5–8); this is the ceiling for
+/// everything that *multiplies* — the spawnlings that burst out of corpses —
+/// so a chain of deaths can never swell the field past what the frame budget
+/// and the player's attention can carry (reference §19.4-4).
+const ENEMY_CAP: usize = 24;
+
+/// The entrances one wave uses: up to `count` distinct points, drawn the way
+/// `pick_spawn` draws them but without replacement. Fixing a wave's entrances
+/// is what turns arrivals into a direction the player can read and hold
+/// (reference §19.2) instead of noise from every corner — and it is also why
+/// `WaveRelease` carries a rotation cursor rather than calling `pick_spawn`
+/// per release.
+fn spawn_set(level: &Level, player: &Player, rng: &mut Rng, count: usize) -> Vec<Vec3> {
+    let mut pool = spawn_pool(level, player);
+    let mut set = Vec::with_capacity(count.min(pool.len()));
+    while set.len() < count && !pool.is_empty() {
+        let i = weighted_spawn_index(&pool, level, player, rng);
+        set.push(pool.swap_remove(i));
+    }
+    set
+}
+
+/// The entrance for the next release: the wave's set is used in rotation, so
+/// no two arrivals share a point back to back. A point the player is now
+/// standing on is skipped while any other remains.
+fn wave_point(rel: &mut WaveRelease, player: &Player) -> Vec3 {
+    const MIN: f32 = 10.0;
+    let n = rel.points.len();
+    for _ in 0..n {
+        let p = rel.points[rel.cursor % n];
+        rel.cursor += 1;
+        if spawn_distance(p, player) >= MIN {
+            return p;
+        }
+    }
+    // Every entrance is underfoot (or the arena has none, which the arena
+    // tests forbid): the farthest of the set beats none at all.
+    rel.points
+        .iter()
+        .copied()
+        .max_by(|a, b| spawn_distance(*a, player).total_cmp(&spawn_distance(*b, player)))
+        .unwrap_or(player.pos)
+}
+
+/// The window between a wave's last kill and the next wave's first release.
+///
+/// The reference suggests 45–60 s after KF2, where the window is a shop
+/// phase; this game has no shop, so the window is only as long as the three
+/// things it is actually for — reloading, healing, and picking where to stand
+/// for the next wave's entrances. Twelve seconds fits all three with slack.
+/// The hold-out shortens it further: there the clock *is* the pressure, and
+/// six windows over two minutes must not eat the mission.
+fn wave_gap(mission: &Mission) -> f32 {
+    match mission.objective {
+        Objective::Survive => 4.0,
+        _ => 12.0,
+    }
+}
+
+/// The mission's threat multipliers, exactly as `Enemy::spawn` applies them
+/// to every hostile of the wave in progress: damage and attack rate at that
+/// wave's strength (`campaign::wave_strength`). Shown in the mission panel so
+/// the climb within a mission and the step between missions both have a
+/// number on them (reference §19.4-6).
+fn threat_numbers(mission: &Mission, wave_index: u32) -> (f32, f32) {
+    let w = campaign::wave_strength(mission, wave_index).saturating_sub(1) as f32;
+    let damage = 1.0 + 0.06 * w;
+    let rate = 1.0 / (1.0 - 0.015 * w).max(0.01);
+    (damage, rate)
 }
 
 /// True when the cursor actually moved since the last frame.
@@ -1480,8 +2868,10 @@ async fn main() {
 
     let mut game = Game::new(
         Settings::from_config(&saved),
+        Kit::from_config(&saved),
         saved.unlocked,
         saved.last_mission,
+        saved.best,
     );
     let mut menu_rects: Vec<(f32, f32, f32, f32)>;
 
@@ -1535,6 +2925,10 @@ async fn main() {
                             enabled: true,
                         },
                         hud::MenuItem {
+                            label: i18n::t(Key::Armory),
+                            enabled: true,
+                        },
+                        hud::MenuItem {
                             label: i18n::t(Key::Quit),
                             enabled: true,
                         },
@@ -1576,6 +2970,11 @@ async fn main() {
                         game.phase = Phase::Settings;
                         game.settings_sel = 0;
                     } else if choose(6) {
+                        audio.play(Sfx::UiClick);
+                        game.phase = Phase::Armory;
+                        game.armory_sel = 0;
+                        game.armory_dirty = true;
+                    } else if choose(7) {
                         break;
                     }
                 }
@@ -1653,14 +3052,17 @@ async fn main() {
                     i18n::t(Key::AimHold)
                 };
                 // Rows in the order the change handler below reads them:
-                // 0 sensitivity, 1 volume, 2 aim mode, 3 lean mode, 4 invert Y,
-                // 5 show FPS, 6 fullscreen, 7 resolution, 8 language, 9 back.
+                // 0 sensitivity, 1 mouse DPI, 2 volume, 3 aim mode, 4 lean mode,
+                // 5 invert Y, 6 show FPS, 7 fullscreen, 8 resolution, 9 language,
+                // 10 back.
                 let rows = [
                     format!(
-                        "{}  {:.2}",
+                        "{}  {:.2} · {:.1} cm/360",
                         i18n::t(Key::Sensitivity),
-                        game.settings.sensitivity
+                        game.settings.sensitivity,
+                        cm_per_360(game.settings.sensitivity, game.settings.mouse_dpi)
                     ),
+                    format!("{}  {}", i18n::t(Key::MouseDpi), game.settings.mouse_dpi),
                     format!(
                         "{}  {:.0}%",
                         i18n::t(Key::Volume),
@@ -1700,7 +3102,7 @@ async fn main() {
                     format!("{}  {}", i18n::t(Key::Language), i18n::lang().label()),
                     i18n::t(Key::Back).to_string(),
                 ];
-                let resolution_row = 7;
+                let resolution_row = 8;
                 let items: Vec<hud::MenuItem> = rows
                     .iter()
                     .enumerate()
@@ -1751,22 +3153,29 @@ async fn main() {
                     None
                 };
 
+                // Which way the selected row moves. A click counts as "forward"
+                // so that a click steps a row exactly as the right arrow does;
+                // the rows that walk a list rather than add a delta take this
+                // bool and not `d`, because their list has an order but no
+                // direction to add 1.0 to.
+                let forward = right || clicked_row.is_some();
                 if let Some(d) = step {
                     match game.settings_sel {
                         0 => {
                             game.settings.sensitivity =
                                 (game.settings.sensitivity + d * 0.10).clamp(0.30, 5.0)
                         }
-                        1 => {
+                        1 => step_dpi(&mut game.settings, forward),
+                        2 => {
                             game.settings.volume = (game.settings.volume + d * 0.05).clamp(0.0, 1.0)
                         }
-                        2 => game.settings.aim_toggle = !game.settings.aim_toggle,
-                        3 => game.settings.lean_toggle = !game.settings.lean_toggle,
-                        4 => game.settings.invert_y = !game.settings.invert_y,
-                        5 => game.settings.show_fps = !game.settings.show_fps,
-                        6 => game.settings.fullscreen = !game.settings.fullscreen,
-                        7 => step_resolution(&mut game.settings, right),
-                        8 => i18n::set_lang(i18n::lang().next()),
+                        3 => game.settings.aim_toggle = !game.settings.aim_toggle,
+                        4 => game.settings.lean_toggle = !game.settings.lean_toggle,
+                        5 => game.settings.invert_y = !game.settings.invert_y,
+                        6 => game.settings.show_fps = !game.settings.show_fps,
+                        7 => game.settings.fullscreen = !game.settings.fullscreen,
+                        8 => step_resolution(&mut game.settings, forward),
+                        9 => i18n::set_lang(i18n::lang().next()),
                         _ => {}
                     }
                     audio.play(Sfx::UiMove);
@@ -1777,6 +3186,500 @@ async fn main() {
                 }
                 let enter = is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter);
                 if (enter && game.settings_sel == back) || clicked(&menu_rects, back) {
+                    audio.play(Sfx::UiBack);
+                    game.phase = Phase::Menu;
+                    game.menu_sel = 0;
+                }
+            }
+
+            Phase::Armory => {
+                pointer::clip(false);
+                pointer::show(true);
+                // Tabs 0/1 edit one weapon kind; tab 2 is the loadout, and what
+                // it shows is the gun going in first.
+                let tab = game.armory_tab.min(2);
+                let kind = armory_kind(game.armory_kind);
+                let shown = if tab < 2 {
+                    kind
+                } else {
+                    game.kit
+                        .primary
+                        .or(game.kit.secondary)
+                        .unwrap_or(weapon::WeaponKind::Rifle)
+                };
+                let def = weapon::def(shown);
+                let build = game.kit.builds[shown.index()].clone();
+
+                // Rows: the tab, then whichever list the tab owns, and the way
+                // out. The step handler below reads them in this same order.
+                let mut rows: Vec<String> = vec![format!(
+                    "{}  {}",
+                    i18n::t(Key::ArmoryTab),
+                    match tab {
+                        0 => i18n::t(Key::ModsTab),
+                        1 => i18n::t(Key::PaintTab),
+                        _ => i18n::t(Key::LoadoutTab),
+                    }
+                )];
+                let slots = weapon::reachable_slots(def, &build);
+                let paint = game.kit.paints[shown.index()];
+                let mags = pick("mags", "匣");
+                match tab {
+                    0 => {
+                        rows.push(format!(
+                            "{}  {}",
+                            i18n::t(Key::ArmoryWeapon),
+                            i18n::t(kind.name())
+                        ));
+                        for slot in &slots {
+                            let name = weapon::slot_label(slot.id)
+                                .map(|(en, zh)| pick(en, zh))
+                                .unwrap_or(slot.id.0);
+                            rows.push(format!("{name}  {}", fitted_name(&build, slot.id)));
+                        }
+                    }
+                    1 => {
+                        rows.push(format!(
+                            "{}  {}",
+                            i18n::t(Key::ArmoryWeapon),
+                            i18n::t(kind.name())
+                        ));
+                        rows.push(format!(
+                            "{}  {}",
+                            i18n::t(Key::PaintTab),
+                            pick(paint.finish().name_en, paint.finish().name_zh)
+                        ));
+                        rows.push(format!(
+                            "{}  {:.0}%",
+                            i18n::t(Key::WearLabel),
+                            paint.wear * 100.0
+                        ));
+                        rows.push(format!("{}  #{}", i18n::t(Key::SeedLabel), paint.seed));
+                    }
+                    _ => {
+                        let gun = |slot: Option<weapon::WeaponKind>| match slot {
+                            Some(k) => i18n::t(k.name()).to_string(),
+                            None => i18n::t(Key::PartNone).to_string(),
+                        };
+                        rows.push(format!(
+                            "{}  {}",
+                            i18n::t(Key::PrimaryWeapon),
+                            gun(game.kit.primary)
+                        ));
+                        rows.push(format!(
+                            "{}  {}",
+                            i18n::t(Key::SecondaryWeapon),
+                            gun(game.kit.secondary)
+                        ));
+                        rows.push(format!(
+                            "{}  {} {mags}",
+                            i18n::t(Key::PrimaryMags),
+                            game.kit.ammo_mags[0]
+                        ));
+                        rows.push(format!(
+                            "{}  {} {mags}",
+                            i18n::t(Key::SecondaryMags),
+                            game.kit.ammo_mags[1]
+                        ));
+                        rows.push(format!(
+                            "{}  {}",
+                            i18n::t(Key::GrenadeFrag),
+                            game.kit.grenades[0]
+                        ));
+                        rows.push(format!(
+                            "{}  {}",
+                            i18n::t(Key::GrenadeSmoke),
+                            game.kit.grenades[1]
+                        ));
+                        for (i, key) in [Key::MedBandage, Key::MedKit, Key::MedPainkiller]
+                            .iter()
+                            .enumerate()
+                        {
+                            rows.push(format!("{}  {}", i18n::t(*key), game.kit.meds[i]));
+                        }
+                    }
+                }
+                rows.push(i18n::t(Key::Back).to_string());
+                let back = rows.len() - 1;
+                let items: Vec<hud::MenuItem> = rows
+                    .iter()
+                    .map(|r| hud::MenuItem {
+                        label: r.as_str(),
+                        enabled: true,
+                    })
+                    .collect();
+
+                // The parts tab is a bench rather than a row list: the slot
+                // column on the left, the candidates of the slot under the
+                // cursor in the middle, and the weapon with the numbers a
+                // candidate would move on the right. A weapon that offers no
+                // slot at all has no bench to draw and keeps the plain list.
+                let bench = tab == 0 && !slots.is_empty();
+
+                // Keys. The arrows come first: on the bench ←/→ move between
+                // the two columns, and the step tables at the end of this arm
+                // only ever see an arrow the column move did not use. Then
+                // up/down, which walk the slot column — the middle column is not
+                // built until the cursor that decides it has stopped moving.
+                let (mut left, mut right) = (
+                    is_key_pressed(KeyCode::Left),
+                    is_key_pressed(KeyCode::Right),
+                );
+                let enter = is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter);
+                if bench {
+                    match game.armory_focus {
+                        hud::ArmoryColumn::Parts => {
+                            if left {
+                                game.armory_focus = hud::ArmoryColumn::Slots;
+                                audio.play(Sfx::UiMove);
+                            }
+                            // → has nothing further to open: the candidates for
+                            // this slot are already on screen.
+                            left = false;
+                            right = false;
+                        }
+                        hud::ArmoryColumn::Slots => {
+                            if right && (2..back).contains(&game.armory_sel) {
+                                game.armory_focus = hud::ArmoryColumn::Parts;
+                                audio.play(Sfx::UiMove);
+                                right = false;
+                            }
+                        }
+                    }
+                }
+                let in_parts = bench && game.armory_focus == hud::ArmoryColumn::Parts;
+                if !in_parts {
+                    menu_nav(&mut game.armory_sel, items.len(), &audio);
+                }
+
+                // Where the bench points: the slot row the cursor is on, what
+                // fits that slot, and the caret's row in that list. The list is
+                // walked every frame rather than cached, because fitting a part
+                // can open a slot of its own and taking one off can close it
+                // again.
+                let mut focus_slot: Option<weapon::SlotId> = None;
+                let mut choices: Vec<Option<weapon::PartId>> = Vec::new();
+                let mut caret = 0usize;
+                if bench {
+                    if (2..back).contains(&game.armory_sel) {
+                        game.armory_slot = game.armory_sel - 2;
+                    }
+                    game.armory_slot = game.armory_slot.min(slots.len().saturating_sub(1));
+                    if let Some(slot) = slots.get(game.armory_slot) {
+                        focus_slot = Some(slot.id);
+                        choices = part_choices(def, &build, slot.id).unwrap_or_default();
+                        // The caret is remembered with the slot it was put in: a
+                        // slot the player has not been in yet opens on whatever
+                        // it holds — the answer to "what is on the gun" — rather
+                        // than on the same row number of another slot's list.
+                        caret = match game.armory_part {
+                            Some((was, at)) if was == slot.id => {
+                                at.min(choices.len().saturating_sub(1))
+                            }
+                            _ => choices
+                                .iter()
+                                .position(|c| *c == fitted_part(&build, slot.id))
+                                .unwrap_or(0),
+                        };
+                    }
+                }
+                if in_parts {
+                    menu_nav(&mut caret, choices.len(), &audio);
+                }
+                if let Some(slot) = focus_slot {
+                    game.armory_part = Some((slot, caret));
+                }
+
+                // The candidate the panel describes: the one under the pointer,
+                // or the caret while the keyboard is in that column. Pointing at
+                // one only asks what it would do — the fitting itself is the
+                // click and the Enter at the end of this arm.
+                let cursor: Option<usize> = if bench {
+                    game.armory_hover_part
+                        .filter(|i| *i < choices.len())
+                        .or_else(|| in_parts.then_some(caret))
+                } else {
+                    None
+                };
+                // The build the cursor would land, kept between frames: a part
+                // that declares a range has to preview the number it will really
+                // have, and the preview mesh is rebuilt only when the picture
+                // actually changes.
+                let wanted = focus_slot
+                    .and_then(|slot| cursor.map(|candidate| (shown.index(), slot, candidate)));
+                let cached = game
+                    .armory_preview
+                    .as_ref()
+                    .map(|p| (p.kind, p.slot, p.candidate));
+                if wanted != cached {
+                    game.armory_preview = match wanted {
+                        Some((at, slot, candidate)) => {
+                            choices.get(candidate).copied().map(|part| {
+                                let roll = seat_roll(&mut game.rng, &build, slot, part);
+                                ArmoryPreview {
+                                    kind: at,
+                                    slot,
+                                    candidate,
+                                    build: seated(&build, slot, part, roll),
+                                }
+                            })
+                        }
+                        None => None,
+                    };
+                    game.armory_dirty = true;
+                }
+
+                clear_background(Color::new(0.03, 0.04, 0.06, 1.0));
+                draw_sky(Color::new(0.06, 0.07, 0.11, 1.0));
+
+                // The preview is the whole weapon recoloured, so it is rebuilt
+                // when a choice moves — a candidate under the cursor is a choice
+                // being weighed, and the well has to show it — and merely redrawn
+                // while the screen is only being looked at.
+                if game.armory_dirty {
+                    let fitted = match game.armory_preview.as_ref().filter(|_| bench) {
+                        Some(p) => &p.build,
+                        None => &game.kit.builds[shown.index()],
+                    };
+                    game.armory_mesh = Some(viewmodel::preview_mesh(shown, fitted, paint));
+                    game.armory_dirty = false;
+                }
+                // The numbers: the build in hand against the issued weapon, or —
+                // while a candidate is under the cursor — that candidate against
+                // the build in hand, old → new. The second reading is the one a
+                // part is on the bench to answer.
+                let issued = weapon::WeaponBuild::empty();
+                let (fitted, against, weigh) = match game.armory_preview.as_ref().filter(|_| bench)
+                {
+                    Some(p) => (&p.build, &build, true),
+                    None => (&build, &issued, false),
+                };
+                let stats = armory_stats(shown, def, fitted, against, weigh);
+                let rects = {
+                    let note = if tab == 1 {
+                        wear_tier(game.kit.paints[shown.index()].wear)
+                    } else if bench {
+                        i18n::t(Key::ArmoryBenchHint)
+                    } else {
+                        ""
+                    };
+                    let held = focus_slot.and_then(|slot| fitted_part(&build, slot));
+                    let parts: Vec<hud::ArmoryPart> = choices
+                        .iter()
+                        .map(|c| hud::ArmoryPart {
+                            label: match c {
+                                Some(id) => weapon::part_label(*id)
+                                    .map(|(en, zh)| pick(en, zh))
+                                    .unwrap_or(id.0),
+                                None => i18n::t(Key::PartNone),
+                            },
+                            fitted: *c == held,
+                        })
+                        .collect();
+                    let bench_view = bench.then(|| hud::ArmoryBench {
+                        parts: &parts,
+                        cursor,
+                        column: game.armory_focus,
+                    });
+                    let view = hud::ArmoryView {
+                        weapon: i18n::t(shown.name()),
+                        rows: &items,
+                        bench: bench_view.as_ref(),
+                        stats: &stats,
+                        preview: game.armory_mesh.as_ref(),
+                        note,
+                    };
+                    hud::draw_armory(&fonts, &view, game.armory_sel)
+                };
+
+                let moved = mouse_moved(&mut game.menu_mouse);
+                let hover = rects.rows.iter().position(hovered_rect);
+                game.armory_sel = hover_selection(game.armory_sel, hover, moved);
+                game.armory_hover_part = rects.parts.iter().position(hovered_rect);
+                let clicked_row = rects.rows.iter().position(clicked_rect);
+                if let Some(i) = clicked_row {
+                    game.armory_sel = i;
+                }
+                let clicked_part = rects.parts.iter().position(clicked_rect);
+                if bench {
+                    // A click on a slot row opens its candidates, the same thing
+                    // → does. Two acts, not one: nothing on the bench is fitted
+                    // by pointing at it, which is what clicking a row used to
+                    // mean before the columns existed (reference §20.2).
+                    if clicked_row.is_some_and(|i| (2..back).contains(&i)) {
+                        game.armory_focus = hud::ArmoryColumn::Parts;
+                        audio.play(Sfx::UiMove);
+                    }
+                    // Fitting: the click on a candidate and Enter on the one the
+                    // caret is on are the same act, and they are the only acts
+                    // that change the gun.
+                    let pick = if in_parts && enter {
+                        Some(caret)
+                    } else {
+                        clicked_part
+                    };
+                    if let (Some(slot), Some(i)) = (focus_slot, pick) {
+                        if fit_candidate(&mut game, shown, slot, i, &choices) {
+                            game.armory_dirty = true;
+                            config::save(&config_of(&game));
+                            audio.play(Sfx::UiClick);
+                        }
+                    }
+                }
+
+                // A click steps a row only where stepping is the row's job: the
+                // section is a three-way switch and the weapon is a closed set
+                // the whole screen is arranged around, while the other tabs'
+                // rows are counts. The bench's slot rows open their candidates
+                // instead of stepping, and a candidate is fitted by being
+                // clicked, so no click here can change a part by accident.
+                let stepped = match (bench, clicked_row) {
+                    (true, Some(i)) => i < 2,
+                    (false, Some(_)) => true,
+                    _ => false,
+                };
+                let step = if clicked_row == Some(back) {
+                    None
+                } else if right || stepped {
+                    Some(1.0)
+                } else if left {
+                    Some(-1.0)
+                } else {
+                    None
+                };
+                if let Some(d) = step {
+                    let forward = right || stepped;
+                    let changed = match tab {
+                        2 => match game.armory_sel {
+                            0 => {
+                                game.armory_tab = if forward {
+                                    (tab + 1) % 3
+                                } else {
+                                    (tab + 2) % 3
+                                };
+                                true
+                            }
+                            1 => {
+                                game.kit.primary = step_kind_choice(game.kit.primary, forward);
+                                true
+                            }
+                            2 => {
+                                game.kit.secondary = step_kind_choice(game.kit.secondary, forward);
+                                true
+                            }
+                            i @ 3..=4 => {
+                                let at = i - 3;
+                                let n = LOADOUT_MAGS_MAX + 1;
+                                let cur = game.kit.ammo_mags[at].min(n - 1);
+                                game.kit.ammo_mags[at] = if forward {
+                                    (cur + 1) % n
+                                } else {
+                                    (cur + n - 1) % n
+                                };
+                                true
+                            }
+                            i @ 5..=6 => {
+                                let at = i - 5;
+                                let n = if at == 0 {
+                                    LOADOUT_FRAGS_MAX + 1
+                                } else {
+                                    LOADOUT_SMOKES_MAX + 1
+                                };
+                                let cur = game.kit.grenades[at].min(n - 1);
+                                game.kit.grenades[at] = if forward {
+                                    (cur + 1) % n
+                                } else {
+                                    (cur + n - 1) % n
+                                };
+                                true
+                            }
+                            i @ 7..=9 => {
+                                let at = i - 7;
+                                let n = LOADOUT_MEDS_MAX + 1;
+                                let cur = game.kit.meds[at].min(n - 1);
+                                game.kit.meds[at] = if forward {
+                                    (cur + 1) % n
+                                } else {
+                                    (cur + n - 1) % n
+                                };
+                                true
+                            }
+                            _ => false,
+                        },
+                        _ => match game.armory_sel {
+                            0 => {
+                                game.armory_tab = if forward {
+                                    (tab + 1) % 3
+                                } else {
+                                    (tab + 2) % 3
+                                };
+                                // The bench's columns belong to the tab being
+                                // left behind.
+                                game.armory_focus = hud::ArmoryColumn::Slots;
+                                true
+                            }
+                            1 => {
+                                let n = ARMORY_KINDS.len();
+                                let cur = game.armory_kind.min(n - 1);
+                                game.armory_kind = if forward {
+                                    (cur + 1) % n
+                                } else {
+                                    (cur + n - 1) % n
+                                };
+                                true
+                            }
+                            i if i >= 2 && i < back => {
+                                if tab == 0 {
+                                    // The bench has no row that steps: a slot
+                                    // row opens its candidates, which the arrows
+                                    // above have already handled.
+                                    false
+                                } else {
+                                    let at = kind.index();
+                                    match i - 2 {
+                                        0 => {
+                                            let n = viewmodel::FINISHES.len();
+                                            let cur = game.kit.paints[at].finish.min(n - 1);
+                                            let next = if forward {
+                                                (cur + 1) % n
+                                            } else {
+                                                (cur + n - 1) % n
+                                            };
+                                            game.kit.paints[at] = viewmodel::Paint {
+                                                finish: next,
+                                                wear: roll_wear(&mut game.rng),
+                                                seed: game.rng.u32(),
+                                            };
+                                            true
+                                        }
+                                        1 => {
+                                            let wear = (game.kit.paints[at].wear + d * 0.05)
+                                                .clamp(0.0, 1.0);
+                                            game.kit.paints[at].wear = wear;
+                                            true
+                                        }
+                                        _ => {
+                                            game.kit.paints[at].seed = game.rng.u32();
+                                            true
+                                        }
+                                    }
+                                }
+                            }
+                            _ => false,
+                        },
+                    };
+                    if changed {
+                        game.armory_dirty = true;
+                        config::save(&config_of(&game));
+                        audio.play(Sfx::UiMove);
+                    }
+                }
+                // Enter on the exit row leaves the screen; in the bench's
+                // candidate column it belongs to the candidate, not the exit.
+                if (enter && !in_parts && game.armory_sel == back)
+                    || is_key_pressed(KeyCode::Escape)
+                    || clicked(&rects.rows, back)
+                {
                     audio.play(Sfx::UiBack);
                     game.phase = Phase::Menu;
                     game.menu_sel = 0;
@@ -1884,8 +3787,17 @@ async fn main() {
                 pointer::show(true);
                 let success = game.objective_done && game.player.alive;
                 let rows = [
+                    (
+                        i18n::t(Key::Wave),
+                        format!("{} / {}", game.wave_display(), game.mission.waves),
+                    ),
                     (i18n::t(Key::Kills), format!("{}", game.killed)),
                     (i18n::t(Key::Score), format!("{}", game.score)),
+                    if game.result_new_best {
+                        (i18n::t(Key::NewBest), format!("{}", game.score))
+                    } else {
+                        (i18n::t(Key::Best), format!("{}", game.result_best))
+                    },
                     (i18n::t(Key::Time), format_time(game.elapsed)),
                     (
                         i18n::t(Key::Accuracy),
@@ -2070,7 +3982,57 @@ fn handle_manual_keys(game: &mut Game, audio: &audio::Audio, over_menu: bool) ->
     open
 }
 
+/// Seconds between motes of suspended matter in a drowned arena.
+const MOTE_PERIOD: f32 = 0.07;
+
+/// One mote for a drowned arena: slow, small, and faint enough to read as silt
+/// in the water rather than as snow.
+///
+/// Motes are spawned in a shell around the eye rather than anywhere in the
+/// level: the camera sees a few dozen metres, so matter that drifted out of
+/// that bubble is invisible matter, and this keeps the cloud centred on where
+/// it is read. It costs no collision either — a mote spawned inside a wall is
+/// simply drawn behind it and never seen.
+fn spawn_mote(game: &mut Game) {
+    let eye = game.player.eye();
+    let rng = &mut game.rng;
+    let dir = vec3(rng.signed(), rng.signed(), rng.signed()).normalize_or_zero();
+    let drift = vec3(
+        rng.signed() * 0.12,
+        -rng.range(0.0, 0.10),
+        rng.signed() * 0.12,
+    );
+    let life = rng.range(7.0, 13.0);
+    game.effects.particles.push(effects::Particle {
+        pos: eye + dir * rng.range(3.5, 18.0),
+        vel: drift,
+        life,
+        max_life: life,
+        // A few centimetres across and faint: a mote is a speck that catches
+        // the light, which is what suspended silt looks like — anything bigger
+        // reads as debris, and anything nearer than the shell's inner edge
+        // reads as a floating cube.
+        size: rng.range(0.02, 0.04),
+        color: Color::new(0.58, 0.76, 0.72, 0.38),
+        gravity: 0.0,
+        drag: 0.0,
+        bounce: false,
+    });
+}
+
 fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
+    // --- suspended matter ----------------------------------------------------
+    // Only the drowned city has anything to float in. Spawned here, ahead of
+    // the input paths, because the motes belong to the world rather than to
+    // the player: silt drifts past a corpse too.
+    if game.level.sunken {
+        game.mote_t -= dt;
+        while game.mote_t <= 0.0 {
+            game.mote_t += MOTE_PERIOD;
+            spawn_mote(game);
+        }
+    }
+
     // A dead player is a spectator. `alive` gates every input path below —
     // look, stance, movement, weapon handling, firing, grenades and medical
     // items — because the two seconds before the result screen used to be two
@@ -2118,9 +4080,12 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
     }
 
     let invert = if game.settings.invert_y { -1.0 } else { 1.0 };
-    // Kept in pixel units so the recentre stays exact, but normalised by the
-    // window width so the feel does not change with resolution.
-    let sens = game.settings.sensitivity * 2.0 / screen_width().max(1.0)
+    // Pointer travel is the unit — `mouse_position` deltas are pixels of it —
+    // so the feel is the same in a window and in fullscreen, at any resolution.
+    // See `LOOK_RADIANS_PER_COUNT`, which is also what the settings page
+    // derives its cm/360 readout from.
+    let sens = game.settings.sensitivity
+        * LOOK_RADIANS_PER_COUNT
         * (1.0 - game.player.ads * 0.5)
         * match game.player.stance() {
             Stance::Stand => 1.0,
@@ -2408,35 +4373,12 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
     game.viewmodel
         .update(dt, sway_delta, &game.player, &game.arsenal);
 
-    // --- enemy spawning -----------------------------------------------------
+    // --- waves --------------------------------------------------------------
+    // The spawner is a clock now: a prep window, a release window that pays
+    // the wave's points out one hostile at a time, then a clear check. See
+    // `tick_waves`.
     let mission = game.mission;
-    if game.spawned < mission.total_enemies {
-        game.spawn_timer -= dt;
-        if game.spawn_timer <= 0.0 && game.alive_enemies() < mission.max_alive as usize {
-            game.spawn_timer = (1.9 - 0.06 * mission.difficulty).max(0.7);
-            let pos = pick_spawn(&game.level, &game.player, &mut game.rng);
-            let roll = game.rng.u32();
-            let kind: EnemyKind = campaign::roll_kind(mission, roll);
-            let wave = mission.wave;
-            // You should know something enormous has arrived before it sees you.
-            if kind == EnemyKind::Colossus {
-                game.banner = Some((i18n::t(Key::ColossusStirs).to_string(), 2.6));
-            }
-            let mut e = Enemy::spawn(kind, pos, wave, &mut game.rng);
-            // Spawned out of sight and never having seen anything, a
-            // reinforcement would otherwise stand at its post forever.
-            e.alert_to(game.player.pos, 20.0);
-            game.enemies.push(e);
-            game.spawned += 1;
-            game.effects.smoke(
-                pos + vec3(0.0, 1.0, 0.0),
-                Color::new(0.5, 0.8, 1.0, 0.5),
-                10,
-                &mut game.rng,
-            );
-            audio.play_at(Sfx::Spawn, 12.0);
-        }
-    }
+    game.tick_waves(dt, audio);
 
     // --- enemy AI -----------------------------------------------------------
     let positions: Vec<Vec3> = game.enemies.iter().map(|e| e.pos).collect();
@@ -2484,8 +4426,17 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
                     // `origin` is the eye the round left, not the feet `from`
                     // holds: both sit on the same column, so the flattened arc
                     // cannot tell them apart today, but the muzzle is the thing
-                    // the indicator is naming.
-                    apply_player_damage(&mut game.player, &mut game.armor, audio, damage, origin);
+                    // the indicator is naming. The hit point is passed along
+                    // because *where* it landed decides whether the armour
+                    // applies at all.
+                    apply_player_damage(
+                        &mut game.player,
+                        &mut game.armor,
+                        audio,
+                        damage,
+                        origin,
+                        Some(origin + dir * t),
+                    );
                     game.heal_t = 0.0;
                     // Stop the strand short of the eye rather than on it: a
                     // beam that ends on the camera plane smears the same way a
@@ -2514,8 +4465,9 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
             }
             Attack::Melee { damage } => {
                 // A swing carries no origin of its own; the attacker's feet are
-                // where it came from.
-                apply_player_damage(&mut game.player, &mut game.armor, audio, damage, from);
+                // where it came from, and it lands on the body — there is no
+                // "leg shot" to armour-test for a claw.
+                apply_player_damage(&mut game.player, &mut game.armor, audio, damage, from, None);
                 game.heal_t = 0.0;
             }
         }
@@ -2578,7 +4530,9 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
             }
             let falloff = 1.0 - (d / b.radius).powf(1.4);
             let dmg = b.damage * falloff.clamp(0.0, 1.0);
-            if game.enemies[i].take_damage(dmg) {
+            // A blast carries full penetration: a pressure wave is not a
+            // round, and there is nothing for plate to stop.
+            if game.enemies[i].take_damage(dmg, 1.0) {
                 kill_enemy(game, i, audio);
             }
         }
@@ -2587,13 +4541,15 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
         if d < b.radius && game.level.line_of_sight(b.pos, eye) {
             let falloff = 1.0 - (d / b.radius).powf(1.4);
             // The blast has no single muzzle: the grenade's own position is the
-            // source the player has to turn toward.
+            // source the player has to turn toward — and, having no hit point
+            // of its own, it lands on the body.
             apply_player_damage(
                 &mut game.player,
                 &mut game.armor,
                 audio,
                 b.damage * falloff,
                 b.pos,
+                None,
             );
             game.heal_t = 0.0;
         }
@@ -2690,8 +4646,9 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
         game.level.flow.update(game.player.pos);
     }
 
-    let all_spawned = game.spawned >= mission.total_enemies;
-    let cleared = all_spawned && game.alive_enemies() == 0;
+    // The mission clears when the wave clock says every wave has been
+    // released and the field has been left empty.
+    let cleared = matches!(game.wave_phase, WavePhase::Finished) && game.alive_enemies() == 0;
     let at_extraction = game
         .level
         .extraction
@@ -2734,6 +4691,7 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
 
     if game.objective_done && game.player.alive {
         game.score += mission.score_bonus;
+        game.settle_score();
         if game.mission_index + 1 < campaign::count() {
             game.unlocked = game.unlocked.max(game.mission_index + 2);
             save_progress(game);
@@ -2746,6 +4704,7 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
     if !game.player.alive {
         game.dead_timer += dt;
         if game.dead_timer > 2.0 {
+            game.settle_score();
             game.phase = Phase::Result;
             game.result_sel = 0;
             audio.play(Sfx::MissionFailed);
@@ -2859,7 +4818,32 @@ fn draw_damage_numbers(game: &mut Game, fonts: &hud::Fonts, view_proj: &Mat4) {
     hud::draw_damage_numbers(fonts, &game.damage_labels);
 }
 
+/// Health and sanity at which the screen starts telling the player they are
+/// nearly gone. Shared by the red vignette and the world grade so the two
+/// cannot disagree about when "nearly" begins.
+const CRITICAL_HEALTH: f32 = 30.0;
+const CRITICAL_SANITY: f32 = 0.25;
+
+/// The most the world grade takes out, at zero health or sanity: half the
+/// colour, so even the worst state stays readable.
+const CRITICAL_DESATURATION: f32 = 0.5;
+
+/// How far the world is pulled towards grey as the player nears death: zero at
+/// the thresholds above, `CRITICAL_DESATURATION` at zero health or sanity.
+///
+/// Deliberately the world only: this rides the fog pass, and the viewmodel and
+/// HUD are drawn after it keep their colour, because the signals a dying
+/// player needs are the ones that must not fade.
+fn critical_desaturation(health: f32, sanity: f32) -> f32 {
+    let health_t = 1.0 - health / CRITICAL_HEALTH;
+    let sanity_t = 1.0 - sanity / CRITICAL_SANITY;
+    health_t.max(sanity_t).clamp(0.0, 1.0) * CRITICAL_DESATURATION
+}
+
 fn render_world(game: &mut Game, fonts: &hud::Fonts) {
+    // The same thresholds the vignette lights up at; the fog pass below greys
+    // the world by this much.
+    let desat = critical_desaturation(game.player.health, game.player.sanity_ratio());
     let shake = game.player.shake_offset();
     let eye = game.player.eye();
     let dir = game.player.look_dir();
@@ -2873,8 +4857,20 @@ fn render_world(game: &mut Game, fonts: &hud::Fonts) {
     let up_tilted = (up * roll.cos() + right * roll.sin()).normalize_or_zero();
     let cam = eye - right * shake.x * 0.0025 - up * shake.y * 0.0025;
 
-    clear_background(game.level.sky);
-    draw_sky(game.level.sky);
+    // The backdrop: a night sky over the open arenas, and the water column over
+    // the drowned one — with the colour the far geometry fades into chosen the
+    // same way, so the fog and the backdrop can never disagree at the seam.
+    let horizon = if game.level.sunken {
+        murk_colour(game.level.sky)
+    } else {
+        horizon_colour(game.level.sky)
+    };
+    clear_background(horizon);
+    if game.level.sunken {
+        draw_sunken_sky(game.level.sky);
+    } else {
+        draw_sky(game.level.sky);
+    }
     // macroquad 0.4.16 has no `Camera3D::world_to_screen` — its projection
     // helpers are `Camera2D`-only — so the frame's view-projection is built
     // here, with the same constructors and defaults this camera is made of.
@@ -2896,7 +4892,7 @@ fn render_world(game: &mut Game, fonts: &hud::Fonts) {
         ..Default::default()
     });
     if let Some(gl_fog) = &game.fog {
-        gl_fog.begin(horizon_colour(game.level.sky), game.level.half);
+        gl_fog.begin(horizon, game.level.half, desat, game.level.sunken);
     }
     for mesh in &game.level.meshes {
         // An arena that uses none of a material still gets a mesh for it, so
@@ -2933,12 +4929,10 @@ fn render_world(game: &mut Game, fonts: &hud::Fonts) {
     // A hit already draws a bearing arc and moves the health bar, and a
     // screen-wide wash on every one of them stacks into noise in a firefight —
     // so the wash carries madness alone, and the vignette lights up on its own
-    // when health or sanity is nearly gone.
+    // when health or sanity is nearly gone. The world grade above crosses the
+    // same thresholds, so the two always agree about when "nearly" is.
     let madness = (1.0 - game.player.sanity_ratio()) * 0.7;
-    hud::draw_vignette(
-        madness,
-        game.player.health < 30.0 || game.player.sanity_ratio() < 0.25,
-    );
+    hud::draw_vignette(madness, desat > 0.0);
     hud::draw_kill_flash(game.effects.kill_flash);
     // The one place the two yaw conventions meet. `hurt_dir` points from the
     // player at what hit them; the HUD's bearing is where that lands relative
@@ -2953,7 +4947,8 @@ fn render_world(game: &mut Game, fonts: &hud::Fonts) {
     }
     draw_sanity_bar(fonts, game.player.sanity_ratio());
     if game.player.alive {
-        game.viewmodel.draw(&game.player, &game.arsenal);
+        game.viewmodel
+            .draw(&game.player, &game.arsenal, &game.kit.paints);
     }
     draw_damage_numbers(game, fonts, &view_proj);
     draw_hud_state(game, fonts);
@@ -3049,6 +5044,8 @@ fn draw_hud_state(game: &Game, fonts: &hud::Fonts) {
         kills: game.killed,
         elapsed: game.elapsed,
         enemies_left: game.remaining() as usize,
+        wave: game.wave_display(),
+        waves: game.mission.waves,
         objective,
         objective_sub: if game.extraction_open {
             i18n::t(Key::ObjReach)
@@ -3058,6 +5055,7 @@ fn draw_hud_state(game: &Game, fonts: &hud::Fonts) {
         weapon_name: i18n::t(weapon.kind.name()),
         mag: weapon.mag,
         mag_size: weapon.stats().mag_size,
+        reserve: (!weapon.stats().infinite_ammo && !weapon.stats().melee).then_some(weapon.reserve),
         reload_progress: if weapon.is_reloading() {
             Some(weapon.reload_progress())
         } else {
@@ -3197,12 +5195,27 @@ fn draw_mission_overlay(game: &Game, fonts: &hud::Fonts) {
             format_time(game.survive_left),
             format_time(game.mission.survive_seconds)
         ),
-        _ => format!("{} / {}", game.planned_kills(), game.mission.total_enemies),
+        _ => format_time(game.elapsed),
     };
+    let (damage, rate) = threat_numbers(game.mission, game.wave_display() - 1);
     let obj_rows = vec![
         hud::PanelRow {
             label: i18n::t(Key::Objective),
             value: objective,
+        },
+        hud::PanelRow {
+            label: i18n::t(Key::Wave),
+            value: format!("{} / {}", game.wave_display(), game.mission.waves),
+        },
+        hud::PanelRow {
+            label: i18n::t(Key::Threat),
+            value: format!(
+                "{} ×{:.2} · {} ×{:.2}",
+                i18n::t(Key::ThreatDamage),
+                damage,
+                i18n::t(Key::ThreatRate),
+                rate
+            ),
         },
         hud::PanelRow {
             label: i18n::t(Key::Hostiles),
