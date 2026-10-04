@@ -88,6 +88,33 @@ A magazine check deliberately reports a *band* — full, mostly full, about half
 running low, empty — rather than an exact count. It also prints the real number
 next to it, so the honest answer is one glance away.
 
+Both `U` and `Alt`+`T` are motions as well as words, and they turn the weapon
+**about the grip** rather than about the weapon. The grip is where the hand is,
+so it is the one point that stays where the hand left it while the muzzle and
+the stock swing round it — which is the difference between an arm reading a
+weapon and a weapon on a turntable. `U` runs a short path of poses: the wrist
+rolls in, one flank is brought round to the eye and *held* there while the optic
+and the fore-end are read, then over the top to the far side and the stock, held
+again, then back with the weight overshooting once before it settles. It is a
+path and not a set of overlapping windows for the same reason: a window can only
+swell and fade, and a turn-over has to stand still where there is something to
+read. `Alt`+`T` is its own motion rather than a shorter cut of that one — the
+weapon tipped muzzle-down until the well comes to the eye, because a magazine
+check is a measurement, not an inspection. Which motion a weapon gets is per
+weapon: a sidearm and a shotgun are tipped to the well, a rifle, a submachine gun
+and a light machine gun are turned over, a knife is turned in the fingers with
+nothing to read, and the heavier the weapon the longer the arc it is hefted
+through. Firing or reloading takes the weapon back out of the player's hands over
+a tenth of a second rather than instantly, sprinting will not start an inspect at
+all though walking will, and the mouse keeps working throughout so the head can
+follow the weapon round — the view is never locked.
+
+An empty trigger has something to say. A magazine that has run dry with a spare
+behind it says so and starts the reload; one with nothing behind it says that
+instead, on the same line, because the dry click alone read as the game having
+eaten the input. `R` on a magazine that is merely full stays quiet, because that
+is not a mistake.
+
 A reload belongs to the weapon in hand: switching slots cancels it. A magazine
 that went away half-full comes back half-full — nothing finishes reloading in
 the holster.
@@ -129,6 +156,23 @@ or by moving faster than a walk — you cannot patch up mid-sprint.
 During that countdown the field is empty and the next wave's entrances are
 already chosen; pressing `F` is the "I am done reloading" button. At any other
 time `F` does nothing.
+
+The countdown is silent and invisible, and so is the wave itself. Nothing about
+the wave clock is drawn anywhere on the field: there is no "wave 2 of 4" on the
+HUD and none on the mission panel either, because a battlefield does not tell you
+which wave you are on, and a counter that does is a piece of information the
+player is playing the interface rather than the fight to get. What the HUD keeps
+is the objective panel's hostile count — and that is the **mission**, not the
+wave: every body still to come, released or not, which the rosters make an exact
+number rather than an estimate. The wave survives in one place, the result
+screen, which is a debrief rather than a battle.
+
+The mission panel's threat row is still there, and it is worth saying that it is
+computed from the wave index — `伤害 ×1.00 · 攻速 ×1.00` is the wave's strength
+multiplier — so hiding the wave number while printing its multiplier is a
+half-measure. It is left in because nothing asked for it and because it answers a
+different question, but it is the next thing to go if the same rule is applied
+consistently.
 
 ### Screens
 
@@ -174,9 +218,9 @@ The whole thing is built when a page is opened and dropped when it closes, so
 the drawing path allocates nothing, and the world is frozen behind it like the
 other screens.
 
-### The stash
+### The armory
 
-The main menu's stash — the bench, the paint shop and the loadout in one —
+The main menu's armory — the bench, the paint shop and the loadout in one —
 saves the moment a choice moves, like the settings screen. Three tabs:
 
 - **Mods** — a three-column bench: the slots and the weapon on the left, the
@@ -186,12 +230,77 @@ saves the moment a choice moves, like the settings screen. Three tabs:
   fitted by accident, which is what the old "click steps the row" model did.
   Every slot offers "none" plus the catalogue, and the parts are choices rather
   than rungs: the compensator tames the climb, the flash hider keeps the burst
-  tight, the heavy barrel buys reach and pays in recoil; the extended magazine
-  holds more and reloads slower, the quick magazine the other way around, and
-  the surplus lot is the one part whose damage is rolled per copy — the same
-  crate, a different lot. The panel shows the weapon's numbers against the
-  issued build, arrows up or down, cyan good red bad, with the platform's
-  armour penetration at the bottom.
+  tight, the heavy barrel buys reach and pays in recoil. Magazines are capacity
+  fittings and each names the well it goes into, because a magazine is a fitting
+  of the round it feeds — and the set follows the real catalogue for each
+  platform rather than a ladder of round numbers: a 5.56 rifle takes the thirty
+  it is issued with, a forty-round box, the sixty-round quad-stack and the
+  hundred-round drum; each of the three 9 mm machine pistols its own well and
+  its own set — the Viper a thirty, a forty and the fifty-
+  and hundred-round drums, the MP5 a fifteen, a thirty, a forty or its fifty
+  drum, the MPX a ten, a twenty, a thirty or Magpul's thirty-five; the
+  marksman's rifle a five, a ten or a twenty; the
+  belt-fed gun its hundred-round box or a two-hundred; a sidearm a fifteen, a
+  seventeen, a twenty or the thirty-round stick; and a shotgun its six-shell
+  tube, the eight-shell tube or a twenty-shell drum. The two full-power rifles
+  have **a well each**, because a FAL magazine and an SR-25 magazine are both
+  7.62×51 and neither fits the other's well: twenty or thirty or ten for the
+  battle rifle, twenty or twenty-five or ten for the marksman's rifle. Putting
+  them on one well is what put a twenty-five-round magazine on the FAL, and a
+  twenty-five is an SR-25 magazine. **The same reasoning split the 9 mm well**
+  once the machine pistols arrived: an MP5 magazine and an MPX magazine do not
+  fit one another either, so there are three 9 mm wells now — and the Viper's is
+  the one that already existed, so a saved build naming `drum_50_9mm` still
+  loads. Sharing a well is right only where the real magazines really are
+  interchangeable, which for the three 5.56 rifles they are and for these they
+  are not. The issued magazine is a
+  named option in its own right, not a `NONE`: a magazine well that offers one
+  part and a NONE reads as a weapon with one magazine, which is not what it is.
+  Every one of them trades: a bigger magazine is a longer reload and, on the
+  drums and the quad-stack, a heavier gun.
+
+  A magazine is the one fitting that **replaces** what it goes into rather than
+  adding to it. On the rifle, the submachine gun and the marksman's rifle the
+  issued magazine is left off the weapon and the fitting draws the whole thing —
+  same mouth, same centre line, same taper and same **curve**, which is why the
+  magazines are arcs now instead of the three-step stair the old `rake`
+  approximated. A fitting that starts its own arc can never meet a magazine that
+  is halfway through one, and that is exactly what the fittings used to look
+  like: a second magazine dropped in behind the first.
+
+  The curve is **radians per metre**, not radians for the magazine, because that
+  is how the real thing works: the radius is set by the cartridge's case taper,
+  and a bigger magazine is a longer piece of the same arc rather than a flatter
+  one. Storing a total angle made the sixty-round magazine *straighter* than the
+  thirty, which is backwards. The three numbers are read off the real cases —
+  5.56×45 tapers about a degree, so the rifle's thirty is gently curved at
+  2.0 rad/m; 9×19 tapers less, but a *thirty-round* magazine is long enough for
+  what taper there is to accumulate, which is why the MP5's is the classic
+  curved one: 1.7 rad/m. What is straight is the fifteen-round MP5 magazine, and
+  the Uzi's and the MP40's, which are straight by choice of manufacture rather
+  than because the round is a cylinder. (The first version of this had 9 mm at
+  0.55 rad/m and drew a stick.) 7.62×51 tapers about twice what 5.56 does, so
+  the marksman's twenty is distinctly curved at 1.7. The sidearm, the shotgun and
+  the belt gun do not come through that path at all, because a grip, a tube and a
+  belt box are not columns of stacked cartridges. On the sidearm, the
+  shotgun and the belt gun there is nothing to replace — a grip, a tube and a
+  belt box are not magazines — so their fittings continue what is there and the
+  drums hang where a drum belongs, under the receiver.
+
+  **A smaller one is not on offer.** That is a limitation rather than a decision:
+  the slot resolves a capacity and a reload time, and a weapon issued with
+  thirty rounds has no fitting that takes it to twenty. A twenty-round rifle
+  magazine and the belt gun's thirty-round emergency well are both real, and both
+  are now *possible* — the replace model is what unblocked them — but neither is
+  authored. The panel shows the weapon's numbers against the issued build, arrows
+  up or down, cyan good red bad, with the platform's armour penetration at the
+  bottom.
+
+  The preview beside it is framed on the weapon **as issued** plus fixed room for
+  a magazine, a sight and a muzzle device. It used to be fitted to the model in
+  hand, which meant a longer magazine moved the whole weapon up and shrank it —
+  and two magazines that move the gun between them cannot be compared, which is
+  the one thing that panel is for.
 - **Paint** — six finishes, from factory to the drowned teal of the abyss, with
   a wear value and a pattern seed. Wear scuffs the finish towards bare metal in
   patches, strongest on the faces that hash hardest, and reads as one of the
@@ -200,12 +309,17 @@ saves the moment a choice moves, like the settings screen. Three tabs:
 - **Loadout** — the two long-gun slots, each cycled through "none" and the six
   guns, plus how many spare magazines each slot carries and how many frags,
   smokes and medicines come along. There is no economy, so the caps are the
-  cost: what they stop you doing is carrying everything at once. A gun's spare
-  magazines are its **reserve pool** — a reload spends them, a partial load is
-  possible, and reloading out of reserve is a dry click. Field ammo tops the
-  magazine up first and banks the rest; the sidearm always carries two
-  magazines' worth of its own, and a mission with both long slots empty is a
-  pistol mission, which is a choice the gear allows.
+  cost: what they stop you doing is carrying everything at once.
+- **Magazines are containers**, not a pool of loose rounds. Each spare is packed
+  full and each keeps its own count: a reload swaps the fullest spare into the
+  gun and puts the magazine that came out back with whatever it still held, so
+  ammunition is conserved and a half-empty magazine is still worth carrying. The
+  HUD reads `备弹 140 · 4 匣` for the same reason — 140 rounds over four
+  magazines is a different position from 140 over one. A reload with no spare
+  holding a round is a dry click. Field ammo fills the gun's magazine first and
+  then the fullest spare with room; what does not fit stays on the ground. The
+  sidearm always carries two magazines of its own, and a mission with both long
+  slots empty is a pistol mission, which is a choice the gear allows.
 
 The weapon is drawn in the panel the way it will be held — attachments and
 finish and all — and the same geometry rides into the mission. A build moves
@@ -433,10 +547,20 @@ as well as arriving in greater numbers — the finale's last wave fights at
 strength 12. The mission panel's threat numbers always show the wave in
 progress, not the mission's opening step.
 
-Between waves there is a twelve-second window (four seconds in BUNKER, where
-the clock is the pressure): the field is empty, health and breath come back,
-and the next wave is announced — `F` calls it in early. Ammunition is not
-refilled between waves; that economy belongs to the stash.
+Between waves there is a six-second window (three seconds in BUNKER, where the
+clock is the pressure): the field is empty, health and breath come back, and the
+next wave is announced — `F` calls it in early. Ammunition is not refilled
+between waves; that economy belongs to the armory.
+
+That window used to be twelve seconds, and a mission used to open with one like
+any other — which meant a player had twelve seconds of empty arena before the
+first hostile of the *mission* and twelve more after every two or three kills.
+On RUST YARD, whose opening wave is a pair, that is most of the time alone: walk
+the whole arena, find nobody, conclude that nothing is coming. The opening is now
+a beat rather than a window (`MISSION_OPEN_GAP`, 2.5 s — enough for the map-name
+banner and one look at the weapon) and the wave's own releases are a second
+apart instead of nearly two, so a wave arrives as a group to be met rather than a
+trickle to be waited out.
 
 Each wave uses two or three fixed entrances, picked when the wave opens and
 used in rotation, so arrivals read as a direction to hold rather than noise
@@ -446,17 +570,37 @@ included, is capped at 24 live hostiles.
 
 ### Weapons
 
-| Weapon | Magazine | Damage | Armour pen. | Character |
-| --- | ---: | ---: | ---: | --- |
-| MK-7 RIFLE / MK-7 突击步枪 | 30 | 24 | 78% | Balanced full-auto, 2.4× headshot |
-| BREACHER 12 / 破门者-12 | 6 | 15 × 9 | 30% | Shotgun, brutal up close, falls off hard |
-| VIPER SMG / 毒蛇冲锋枪 | 40 | 14 | 55% | 18 rounds/sec, high bloom |
-| LONGSHOT .50 / 远程 .50 | 5 | 115 | 97% | 16° scope, no damage falloff |
-| VULCAN LMG / 火神轻机枪 | 100 | 21 | 85% | Sustained fire, slows you down |
+Twelve guns and a knife. The five issued ones come first; the seven after them
+are real weapons, and the ones that share a calibre are separated by *handling*
+rather than by numbers on a card — how fast they come up, how hard they climb,
+how long they leave you standing still.
 
-The armour-penetration share is the part of a hit that ignores physical
-plate, and it is on every weapon's codex card; the sidearm (M9, 45%) and the
-knife (which ignores plate entirely) round out the set.
+| Weapon | Magazine | Damage | Rate | Armour pen. | Character |
+| --- | ---: | ---: | ---: | ---: | --- |
+| MK-7 RIFLE / MK-7 突击步枪 | 30 | 24 | 682 | 78% | The issued middle: auto, burst or single, 2.4× headshot |
+| M4A1 CARBINE / M4A1 卡宾枪 | 30 | 22 | 857 | 76% | A carbine's rate for a carbine's reach; the fastest 5.56 |
+| SCAR-L | 30 | 27 | 600 | 82% | Half again the MK-7's punch for two thirds of its rate |
+| FAL / FAL 战斗步枪 | 20 | 43 | 667 | 90% | Hits like a truck and kicks like one, on full auto |
+| VIPER SMG / 毒蛇冲锋枪 | 30 | 14 | 1090 | 55% | Rate and bloom; the 50-round drum makes it a room-clearer |
+| MP5 | 30 | 16 | 770 | 57% | The submachine gun to aim with |
+| MPX | 30 | 15 | 923 | 52% | Rate over control; empty in two seconds |
+| BREACHER 12 / 破门者-12 | 6 | 15 × 9 | 77 | 30% | Brutal up close, falls off hard |
+| LONGSHOT .50 / 远程 .50 | 5 | 115 | 52 | 97% | 16° scope, fires .50 by the card |
+| M110 SASS / M110 精确射手步枪 | 20 | 55 | 207 | 90% | One shot per pull: two for a grunt, one for a head |
+| MOSIN-NAGANT / 莫辛纳甘栓动步枪 | 5 | 140 | 43 | 98% | The highest number here, and a bolt between each |
+| VULCAN LMG / 火神轻机枪 | 100 | 21 | 800 | 85% | Sustained fire, slows you down |
+
+The armour-penetration share is the part of a hit that ignores physical plate,
+and it is on every weapon's codex card; the sidearm (M9, 45%) and the knife
+(which ignores plate entirely) round out the set.
+
+**The roster has near-pairs and that is deliberate.** The MK-7, the M4A1 and the
+SCAR-L are three 5.56 rifles because those are three real answers to one
+question, and they share the 5.56 well — so they share its magazines. The same
+goes for the Viper, the MP5 and the MPX on 9 mm. What separates them is
+handling, not calibre: 682 against 857 against 600 rounds a minute, three
+different recoil climbs and three different reloads. If a pair ever stops being
+worth the choice, the honest fix is to delete one, not to renumber it.
 
 ### Enemies
 
@@ -495,12 +639,29 @@ player, so they path around cover instead of pressing into walls. They keep squa
 separation, hold archetype-specific standoff distances, and need line of sight to
 shoot. Accuracy degrades with distance.
 
-The field follows the player's *current* position, which is right for a unit that
-has never seen them — a reinforcement works its way in until it arrives. A unit
-that has actually had eyes on the player does not use the field that way: it
-searches, walking back to the position where it last saw the player and holding
-there, so breaking contact and moving is a real defence rather than a few seconds
-until the squad walks straight to wherever you went.
+The field follows the player's *current* position, and everything that cannot see
+the player walks it. A reinforcement that was only *told* where the player was
+has no memory to check, so it follows the field in until it arrives; a unit that
+has had eyes on the player goes back to that spot first, and only joins the hunt
+once it has stood there and found nothing. Breaking contact therefore still buys
+real distance — the squad is briefly walking to the wrong place — but it no
+longer ends the engagement. It used to: pursuit was capped at the entry budget
+plus six seconds, after which a unit held position for the rest of the mission,
+which on a large arena left hostiles standing in corridors the player had no
+reason to walk down while the objective counter went on counting them.
+
+**A unit can no longer be permanently lost, because one lost unit used to cost
+the whole mission.** The release gate holds while `max_alive` is full, and a wave
+does not end until every body it released is down — so a hostile wedged in
+geometry, or in a pocket the navigation grid has no route through, stops the wave,
+and the wave stops the mission. Nothing about that is visible from the player's
+side: the counter still counts the body and there is nothing on the map to find.
+Two things close it. The field's steering now falls back to walking straight at
+the player in any cell it has nothing to say about, which is every cell a unit
+has no business being in; and a unit that spends three seconds pushing without
+moving, in such a cell, is put back on the nearest walkable one
+(`Level::navigable_near`). A small teleport is a worse-looking thing than any
+other fix here and it is still the right trade.
 
 ---
 
@@ -523,7 +684,7 @@ src/
   effects.rs    particles, tracers, hit markers, damage readouts
   hud.rs        text, HUD, menus, combat feedback overlays, the manual's pages
   codex.rs      the manual's content: controls, bestiary, armoury and kit
-  audio.rs      24 procedurally synthesised effects with file override
+  audio.rs      29 effects: 28 curated files with a synthesised fallback
   assets.rs     the embedded-asset table, the one place a path is named
   surface.rs    the six world textures and their sampling
   fog.rs        distance fog and the near-death grade, the one custom shader
@@ -574,6 +735,18 @@ by hash along the way. `a_rebuilt_frame_allocates_nothing` is the standing guard
 projected to screen triangles with the camera's own FOV. Drawing it as world
 geometry would make it clip through walls whenever the player stands near one.
 
+**The sniper's scope is a 2D overlay, and the tube comes off the rifle to make
+room for it.** A scope built as geometry around the sight line can only block the
+view it exists to provide: at the 16° the .50 aims down, the tube's own aperture
+projects to a couple of hundred pixels, so what the player saw through it was a
+black mask with a keyhole in it. Past halfway into the aim the tube, its
+objective bell and its post reticle are left out of the in-hand model and
+`hud::draw_scope_overlay` draws an opaque surround with a clear circular aperture
+and a duplex reticle in their place — the two swap on the same frame, off the same
+constant, and the aperture opens as the sight settles. The scope is still on the
+rifle at the hip, and still on the armory's preview, because that is the only
+place it is looked *at*.
+
 **Textured faces take their UVs from world position.** A face's UV is where its
 vertices are, measured along two axes that lie in the face's own plane, so two
 faces of one plane — the slabs of a floor, a crate lid and the ledge it sits on,
@@ -587,10 +760,10 @@ shared corners to agree bit for bit.
 (`WeaponDef`); an instance carries a build (`WeaponBuild`), and the numbers it
 actually uses are `resolve(def, build)`. A shipping gun has an empty build,
 which resolves bit-for-bit to the table the game shipped with —
-`the_shipped_tables_survive_the_resolver_bit_for_bit` is the guard. Nothing in
-the game installs a part yet: the layering exists so that a gunsmith screen, a
-paint or a loadout that changes a stat is a data change on top of one table,
-rather than a second set of numbers to keep in sync.
+`the_shipped_tables_survive_the_resolver_bit_for_bit` is the guard. The bench
+installs parts into that build and nothing else: a fitted optic, muzzle or
+magazine is a data change on top of one table, rather than a second set of
+numbers to keep in sync.
 
 **Combat feedback is its own layer.** A kill flashes a warm frame in from the
 screen edges and buys a short hit-stop — 0.05 s during which the world is
@@ -607,15 +780,29 @@ well as in colour, and a headshot's number is larger as well as brighter.
 
 ## Assets
 
-Everything under `assets/` is CC0 or OFL and safe to redistribute. See
-`assets/MANIFEST.md` for the full per-file inventory.
+Everything under `assets/` is CC0 or OFL and safe to redistribute, with **one
+exception**, which is credited below rather than left implicit. See
+`assets/MANIFEST.md` for the full per-file inventory and `assets/SOUND_SOURCES.md`
+for the provenance of every sound that is not Kenney's.
 
 | Kind | Source | Licence |
 | --- | --- | --- |
 | Weapon, character and prop models | Kenney (Blaster Kit 2.1, Blocky Characters 2.0) | CC0 |
 | Sound effects (19) | Kenney (Impact / Sci-Fi / UI audio) | CC0 |
+| Sound effects (9) | OpenGameArt contributors (bcamzero, rubberduck, bart, stumpystrust) + Kenney RPG | CC0 |
+| Sound effects (12) | [Freesound](https://freesound.org) contributors — the guns, the reload, the impacts and the footsteps | CC0 |
+| `shot_smg.ogg` (1) | Vincent Sevedge, *Gunshot Sounds*, [OpenGameArt](https://opengameart.org/content/gunshot-sounds) | **CC BY 3.0** |
 | Surface textures (6) | [Poly Haven](https://polyhaven.com) | CC0 |
 | Chinese UI font | LXGW WenKai 霞鹜文楷 1.511, subset | SIL OFL 1.1 |
+
+The one CC BY file is the submachine gun's shot, and it is the only sound in the
+game that is credited rather than dedicated. The pack's page declares CC0 and its
+own bundled `creativecommons.txt` declares **Creative Commons Attribution 3.0
+Unported, © 2009 Vincent Sevedge**; the stricter of the two is the one honoured
+here. It is a CZ-52 pistol, cut at its crack and shaped for a weapon that fires
+eighteen rounds a second — the take it replaced was a twelve-gauge sped up by
+two, because no CC0 single 9 mm shot exists. The reasoning, the measurements and
+an undo path are in `assets/SOUND_SOURCES.md`, Part 3.
 
 The font is subset to GB2312 Level 1 plus common punctuation and every CJK
 character in the source, which is why it is 2.9 MB rather than 20 MB. Its family
@@ -625,7 +812,7 @@ name was changed to `RustFPS UI` as OFL-1.1 requires for modified versions —
 
 ### Embedded vs. on-disk assets
 
-The font, the six world textures and the 19 Kenney sound effects are embedded
+The font, the six world textures and all 28 sound files are embedded
 with `include_bytes!`. The font and the sounds used to be loaded from a relative
 `assets/` path, which works under `cargo run` (the working directory is the
 project root) but silently fails for a released executable launched from
@@ -667,8 +854,11 @@ the weapon viewmodel is necessarily drawn in 2D (see above) only the characters
 would benefit. They are left in place so that work is easy to pick up.
 
 The sound effects *are* live: `audio.rs` probes `assets/sounds/<name>.ogg` then
-`.wav` for each of its 24 slots and falls back to its own synthesis, so the 19
-Kenney files take effect with no wiring.
+`.wav` for each of its 29 slots and falls back to its own synthesis, so the 28
+files take effect with no wiring. The embedded copy is asked which container it
+is rather than told — the table now holds both Ogg and WAV, and the first
+version of that check said "ogg" for every asset, which quietly sent every
+embedded WAV to the synthesiser instead.
 
 ---
 
@@ -676,19 +866,138 @@ Kenney files take effect with no wiring.
 
 What was actually tested, and what was not:
 
+- **The encounter gaps (latest round)**: measured, not judged. A probe build was
+  run on RUST YARD with the player doing nothing and logging the wave machine
+  once a second — `target/shots_probe2/stderr.log` is the *before*, where the
+  mission opens `prep` for **12.1 s** with `alive=0`, and
+  `target/shots_probe3/stderr.log` is the after, where the first hostile is on
+  the field at **t=2.5 s** and the wave's second is out a second later. The
+  between-wave window is 6 s and the waves were not resized: mission 1 is still
+  2 / 2 / 4 / 5 hostiles. **The 6 s window itself was not timed in a running
+  game** — the probe run dies before a wave is cleared, because the player in it
+  does nothing — nor was the claim that a lost unit no longer stalls a mission,
+  which is pinned by test instead: `a_hostile_inside_geometry_gets_itself_out`
+  starts a Grunt inside a solid found by scanning the arena and requires it to
+  get out and then close on the player, and the steering fallback is asserted
+  directly at the top of that test.
+- **The magazine row and the wave counter (latest round)**:
+  `target/shots_mags4/03_candidate_2.png` — the rifle's magazine slot now offers
+  four things by name: `标准 30 发`, `40 发弹匣`, `60 发四排弹匣` (the one in the
+  gun) and `100 发双鼓`. Before it offered `无` and the 60, which read as a weapon
+  with one magazine. Fourteen magazines ship now, against six, and the geometry of
+  each is pinned by test rather than by eye:
+  `every_shipped_magazine_draws_and_the_bigger_ones_show` reads the catalogue,
+  requires every one of them to draw on the weapon it fits, and requires every
+  one that holds more rounds than the issued magazine to make the weapon's
+  bounding box bigger somewhere. That last part replaced "the long ones hang
+  lower", which could not tell a box magazine growing downwards from a shotgun's
+  tube growing forwards from a belt box growing outwards.
+  **The shapes were not looked at, and that is what the first two attempts at
+  them got wrong.** The test above checks triangle counts and bounding boxes; it
+  cannot see a gap, and it cannot see a wheel. `render_the_magazines` — an
+  ignored test that rasterises `preview_mesh`, the armory's own mesh through the
+  armory's own projection, one PPM per weapon and magazine — is what found the
+  three defects that were actually there: every capacity fitting sat 3.5 cm behind
+  the magazine it was meant to continue (the anchors had been authored against an
+  older body), so it read as a second magazine dropped in behind the first; the
+  hundred-round drum was two circles in line with a concentric hub on each, which
+  is not a magazine, it is the front axle of a toy; and the shotgun's drum hung
+  off the end of its tube, out at the muzzle, because a drum was using the anchor
+  a tube extension wants. The first renderer was also wrong in the same way the
+  test was — it assembled its own triangles instead of drawing the armory's mesh,
+  and so it did not show that the preview re-centred on its own contents and moved
+  the gun every time the magazine changed. **The pictures are now the evidence and
+  the test says only what it can honestly say**: every magazine draws something,
+  every one changes the weapon it fits, every one in the catalogue fits a weapon,
+  and a fitting on the three replace-the-magazine weapons is not the issued
+  magazine over again. "A bigger magazine looks bigger" is not asserted — a
+  fifty-round drum is wider and deeper than the thirty-round stick it replaces and
+  no taller at all, so every version of that rule that was tried was wrong; it is
+  checked by looking at `target/magsheets`.
+  `target/shots_ui` is the in-game HUD and the mission panel with the wave row
+  taken out of both: the top-right panel reads score, kills and clock, and the
+  mission panel reads objective, threat, hostiles and time. **The result screen
+  still shows the wave** and was not touched, since it is a debrief and nothing
+  asked for it there; the mission panel's threat row is still there too, and the
+  README says why and what it would take to finish the job.
+
+- **A gun that runs dry (latest round)**: driven in the running game with the
+  trigger *held*, which is the case that mattered — a fresh press is an edge and
+  the last round of a magazine leaves the button down, so the old code produced
+  a click, no reload and no line for a player who simply kept firing.
+  `target/shots_fix2` has both positions captured: `弹匣已空` with the reload bar
+  running underneath it, and then `没有可用弹药` with the HUD reading `备弹 0 · 1 匣`
+  and the magazine `0 / 50` in red.
+- **The sniper's scope**: `target/shots_fix4`, the sight brought up on the .50
+  with the view turned onto the arena floor first (the player spawns facing a
+  wall, and a scope aimed at a wall is a photograph of a wall): a clear circular
+  aperture with the world in it, an opaque surround, a duplex reticle with mil
+  ticks, and no rifle drawn behind it. The frame before the tube drops was
+  captured too, so the swap is on the record.
+- **The enemy hunt**: two unit tests drive a Grunt from R'LYEH's farthest spawn —
+  64.8 m, the campaign's longest path — and require it to close; one that has
+  never seen the player and one that has finished searching its memory. In the
+  running game, standing still in R'LYEH draws contact and a death inside half a
+  minute, `target/shots_fix6`. **That run also showed how much of the encounter
+  problem was near spawns rather than far ones**: the wave's entrances are drawn
+  from the 19 m ring as well as the 65 m one, and the near ones were never the
+  broken case. The far case is pinned by test rather than by play, because
+  arranging one on demand means walking a labyrinth for a minute.
+- **The magazines, by eye**: `target/shots_fix8` is the rifle in hand with the
+  60-round quad-stack (`60 / 60`) and the SMG with the fifty-round drum
+  (`50 / 50`), and `target/shots_fix9` is the bench, whose magazine row now
+  offers `无 / 60 发四排弹匣` for the rifle — the 45-round fitting is gone. The
+  quad-stack's extra *width* is the thing that makes it a quad-stack and is
+  across the gun, so the armory's left-profile preview shows its length and not
+  its columns; the columns are visible in hand, where the weapon is held at an
+  angle. **The sniper's new raked magazine, the LMG's lid-and-belt box and the
+  pistol's floorplate were not photographed** — they are pinned by the geometry
+  test, which requires every shipped magazine to add triangles and the long ones
+  to hang lower, but they have not been looked at.
+- **The inspect motion**: `target/shots_insp3` samples `U` across its 2.2 s on
+  the rifle and `target/insp3_sheet.png` is the twelve frames as one sheet. The
+  arc reads: the wrist rolls in, one flank comes round and stays for a beat, the
+  weapon turns the other way for a second beat, and it comes back upright and
+  settles. Two things about it are pinned by test rather than by eye — the grip
+  does not move while the weapon turns (`the_inspect_turns_the_weapon_about_the_grip`,
+  which requires the muzzle to travel more than 30 cm while the grip travels
+  less than a hundredth of a millimetre), and every weapon's path starts and
+  ends at the rest pose with a real hold in the middle
+  (`the_inspect_path_rests_at_the_ends_and_holds_in_the_middle`). **The motion
+  was not watched as motion** — twelve stills are not a frame rate, so nothing
+  here says the 2.2 s of it does or does not flow. `Alt`+`T`'s check was
+  captured in the same run and is visibly a different pose from any of the
+  twelve, which is all that is claimed for it.
+
 - **New control systems**: the running game was driven through Tab / M / J /
   C / 3 / 4 with window captures confirming the inventory screen (four slots,
   grenade and medical counts), the mission panel, the map (arena footprint,
   player heading, scale bar), the knife viewmodel and the 4-slot HUD strip.
-- **The wave clock and the bench (latest round)**: the running game was driven
-  through a whole wave cycle — the countdown banner, `F` calling wave 1 in
-  early (proved with a probe build: `F skip at left=7.26` → `begin wave 0
-  budget=200`), enemies engaging from off-screen while the player stood still
-  (health 100 → 82 → 28), and the HUD's WAVE row and the mission panel's
-  WAVE/THREAT rows captured in `target/shots_waves`. The armory bench was then
-  driven end to end by keyboard alone: slot → candidates → hover preview
-  (ADS 38° → 32°) → Enter fitted the scope, `target/shots_bench`. Every key
-  injection first proves the game owns the foreground, or sends nothing.
+- **The wave clock and the bench**: the running game was driven through a whole
+  wave cycle — `F` calling wave 1 in early (proved with a probe build: `F skip
+  at left=7.26` → `begin wave 0`), enemies engaging from off-screen while the
+  player stood still (health 100 → 82 → 28), and the HUD's WAVE row and the
+  mission panel's WAVE/THREAT rows captured in `target/shots_waves`. **The WAVE
+  rows in both of those are gone now** — `target/shots_ui` is the same two
+  screens without them: the top-right panel reads score, kills and clock, and the
+  mission panel reads objective, threat, hostiles, time. The armory
+  bench was then driven end to end by keyboard alone: slot → candidates → hover
+  preview (ADS 38° → 32°) → Enter fitted the scope, `target/shots_bench`. Every
+  key injection first proves the game owns the foreground, or sends nothing.
+- **The magazines (the round before)**: the bench was clicked open and driven to
+  the magazine row, photographed at every step — the rifle's slot then offered
+  `none / 45 发弹匣 / 60 发四排弹匣`, hovering the 60 turned the diff panel into
+  `弹匣 30 → 60` with `换弹 1.35s → 1.80s`, and the preview grew a longer
+  magazine, captured in `target/shots_mags` (script `target/e2e_mags.ps1`). That
+  fitting is gone now: the rifle takes a thirty or the sixty and nothing in
+  between. Every shipped magazine's geometry is still pinned by test
+  (`every_shipped_magazine_draws_and_the_big_ones_reach_lower`): each one adds
+  triangles to the weapon it fits, and the long ones hang lower than the standard
+  magazine. **The SMG's drum was not looked at in the running game** in that
+  round either, so its shape has been verified structurally rather than by eye,
+  then and now. The magazine model itself (rounds conserved across a reload,
+  spares drawn fullest-first, pickups filling the gun and then the fullest
+  partial) is covered by tests, not by play.
 - **Mouse look**: verified by injecting 800 px of relative pointer travel and
   confirming the view rotated to face a different part of the arena with the
   horizon at a sane height — no runaway drift, which is what the naive
@@ -707,9 +1016,58 @@ What was actually tested, and what was not:
   **It has not been executed**, because this machine has no Linux environment
   (WSL is installed but has no distribution). It is verified as a well-formed
   static binary, not as a running program.
-- **Audio**: 19 of 24 slots are overridden by real Kenney files; the remaining 5
-  (pickup stings and mission-complete/failed fanfares) stay synthesised on purpose.
-  Whether a given sound *feels* right in context was not auditioned.
+- **Audio (the guns, this round)**: thirteen clips were replaced with real
+  recordings rather than the Kenney science-fiction lasers they used to be — the
+  five player weapons, the enemy's shot, the reload and its dry click, the three
+  impacts, the death and the footstep. Twelve are **CC0 on their own Freesound
+  pages**, checked one page at a time; the thirteenth is the submachine gun's
+  shot, which is a CZ-52 recording from an OpenGameArt pack whose page says CC0
+  and whose bundled licence text says **CC BY 3.0, © 2009 Vincent Sevedge** — so
+  it is credited in the asset table above and is the one non-CC0 byte in
+  `assets/`. Each one's source page, author, licence string, input and output
+  measurements and decode check is in `assets/SOUND_SOURCES.md`. The Freesound
+  takes were pulled from the CDN previews rather than the uploader originals,
+  which need a login; previews are published under the item's own licence and the
+  originals can be dropped in over them without touching anything else. **Nobody
+  has listened to them.** What was measured instead: every file decodes under two
+  independent decoders to within 5e-7, every one is 44.1 kHz mono at −1.0 to
+  −1.3 dBFS with no sample at full scale, all 28 files hash distinct, and the
+  worst case for full-auto — the sum of every copy that overlaps at the weapon's
+  own rate — peaks *lower* than the clips they replace did (the old machine gun,
+  shotgun and sniper summed past full scale; the new ones stay at 0.88–0.95,
+  including the CZ-52, whose room tail is deliberately pulled down after its
+  first 15 ms because eighteen rounds a second of a one-second tail is not a tail
+  but a bed). Two of the thirteen are stand-ins the player can hear for what they
+  are: `hit_head` is cracked ice offered by its author as a bone substitute, and
+  nothing else in the set is a substitution any more.
+  Thirteen clips they replaced are in `assets/_downloads/sfx_new/orig_backup/`.
+- **Audio (the first pass)**: 28 of 29 slots have a real file — the 19 Kenney
+  ones plus nine CC0 files found for the slots that were synthesiser-only (the
+  pickup and objective stings, the completion and failure cues, and the §19.4-10
+  event cues for elite arrival, boss arrival and low sanity). `reload_done` is
+  the one slot still synthesised, on purpose. The nine were verified as CC0 on
+  their own pages, and their headers, containers, decoded levels and byte-for-byte
+  identity are recorded in `assets/SOUND_SOURCES.md`. **None of them has been
+  listened to**, and two are outside the length the brief asked for
+  (`boss_arrival` 5.15 s, `mission_failed` 1.13 s) — they were picked for
+  character. Deleting any of them falls back to its recipe.
+- **The load path**: a probe build was run from a working directory where the
+  on-disk `assets/sounds/` probe cannot resolve, so every effect had to come out
+  of the embedded copy or the synthesiser. All 29 slots loaded, 28 as
+  `embedded` with the byte counts of their files and `reload_done` as `synth` —
+  no slot came back empty, which is what would have happened to every embedded
+  WAV under the old container check.
+- **The §19.4-10 event cues**: a probe build that logs every effect it hands to
+  the mixer was driven through three bursts and three reloads, then a fourth `R`
+  on a full magazine as a control. The trace is exactly three `Reload` and three
+  `ReloadDone`, each finish following its own start, and the control silent —
+  `target/sfx_trace_debug.log`, script `target/e2e_sfx.ps1`. The elite, boss and
+  sanity cues were **not** driven in the running game: they are one-shot events
+  behind a random draw, and the sanity drain needs a mission 1 never fields. What
+  is verified for those is the wiring and the trigger arithmetic, by test — the
+  cue picked by `campaign::is_final_wave`, both cues proved reachable against the
+  wave budgets, and the alarm's crossing and gap behaviour driven directly.
+  None of the four was judged by ear.
 - Font rendering was verified end-to-end against `fontdue` — the exact rasterizer
   macroquad uses — and visually in the running game.
 
@@ -806,6 +1164,3 @@ harness problem, not a game bug — but it is worth knowing before concluding
 - Enemies cannot climb the raised structures, only step over crates under 0.62 m.
   This is deliberate — it gives the player a vertical advantage — but it also means
   a player who camps somewhere unreachable is only threatened by ranged enemies.
-- **Cosmetic:** the ammo readout shows `0 / 0` in red for the knife, because the
-  HUD renders a magazine count unconditionally and melee weapons have none. It
-  should read as "no ammo" rather than "empty".

@@ -362,10 +362,6 @@ pub struct HudState<'a> {
     pub kills: u32,
     pub elapsed: f32,
     pub enemies_left: usize,
-    /// The wave in progress and how many the mission has (both one-based on
-    /// the incoming side, as a scoreboard reads).
-    pub wave: u32,
-    pub waves: u32,
     pub objective: &'a str,
     pub objective_sub: &'a str,
     pub weapon_name: &'a str,
@@ -374,12 +370,19 @@ pub struct HudState<'a> {
     /// Rounds carried outside the magazine; `None` for weapons that do not
     /// feed from one.
     pub reserve: Option<u32>,
+    /// How many spare magazines those rounds are in. `None` alongside `reserve`
+    /// for the weapons that have neither.
+    pub magazines: Option<usize>,
     /// `Some(0.0..=1.0)` while reloading, else `None`.
     pub reload_progress: Option<f32>,
     /// Short labels for each carried weapon plus which one is active.
     pub slots: Vec<(&'a str, bool)>,
     /// Current shot spread, in radians.
     pub spread: f32,
+    /// True while a sniper's sight is up and `draw_scope_overlay` is drawing
+    /// the aperture: the scope carries its own reticle, so the crosshair would
+    /// be a second one stacked on the first.
+    pub scoped: bool,
     pub hit_marker: f32,
     pub headshot_marker: f32,
     /// 0..=1 red damage flash.
@@ -406,7 +409,6 @@ struct HudText {
     reserve: String,
     slot_keys: Vec<String>,
     hostiles: String,
-    wave: String,
     score: String,
     kills: String,
     time: String,
@@ -441,7 +443,6 @@ impl HudText {
             put(key, format_args!("{}", i + 1));
         }
         put(&mut self.hostiles, format_args!("{}", s.enemies_left));
-        put(&mut self.wave, format_args!("{} / {}", s.wave, s.waves));
         put(&mut self.score, format_args!("{}", s.score));
         put(&mut self.kills, format_args!("{}", s.kills));
         let secs = s.elapsed.max(0.0) as u32;
@@ -483,6 +484,11 @@ pub fn draw_hud(f: &Fonts, s: &HudState) {
 }
 
 fn draw_crosshair(s: &HudState, w: f32, h: f32) {
+    // The scope's reticle is the aiming mark when the sight is up; a crosshair
+    // on top of it would be two aiming marks that never quite agree.
+    if s.scoped {
+        return;
+    }
     let ui = Ui::new();
     let cx = w * 0.5;
     let cy = h * 0.5;
@@ -656,17 +662,48 @@ fn draw_ammo(f: &Fonts, s: &HudState, t: &mut HudText, ui: &Ui, w: f32, h: f32) 
             bar(ix, y + ui.s(70.0), iw, ui.s(7.0), p, accent());
         }
         None => {
+            // A knife has no magazine: the old readout drew `0 / 0` in red for
+            // it, which is the opposite of the truth — it is not an empty gun,
+            // it is not a gun. The count and the capacity are drawn only on the
+            // weapons that have both, and the blade names itself instead.
+            let mag_line = s.mag_size > 0;
             let small = t.mag_size.as_str();
-            let sw = f.width(small, ui.s(16.0));
-            f.text_r(small, right, y + ui.s(74.0), ui.s(16.0), fade(INK, 0.45));
+            let sw = if mag_line { f.width(small, ui.s(16.0)) } else { 0.0 };
+            if mag_line {
+                f.text_r(small, right, y + ui.s(74.0), ui.s(16.0), fade(INK, 0.45));
+            } else {
+                f.text_r(
+                    i18n::t(Key::SlotMelee),
+                    right,
+                    y + ui.s(74.0),
+                    ui.s(20.0),
+                    fade(INK, 0.55),
+                );
+            }
 
             // What is left outside the magazine, on the left of the same line:
             // the number a player checks before deciding to spray.
             if let Some(rounds) = s.reserve {
-                put(
-                    &mut t.reserve,
-                    format_args!("{} {}", i18n::t(Key::Spare), rounds),
-                );
+                // The magazines are shown beside the rounds because they are
+                // the thing that actually runs out first: 140 rounds over four
+                // magazines is a different position from 140 over one, and the
+                // old single "reserve" number could not say which it was.
+                match s.magazines {
+                    Some(mags) if mags > 0 => put(
+                        &mut t.reserve,
+                        format_args!(
+                            "{} {} · {} {}",
+                            i18n::t(Key::Spare),
+                            rounds,
+                            mags,
+                            i18n::t(Key::Magazines)
+                        ),
+                    ),
+                    _ => put(
+                        &mut t.reserve,
+                        format_args!("{} {}", i18n::t(Key::Spare), rounds),
+                    ),
+                }
                 f.text(&t.reserve, ix, y + ui.s(72.0), ui.s(15.0), fade(INK, 0.45));
             }
 
@@ -679,13 +716,15 @@ fn draw_ammo(f: &Fonts, s: &HudState, t: &mut HudText, ui: &Ui, w: f32, h: f32) 
             } else {
                 INK
             };
-            f.text_r(
-                &t.mag,
-                right - sw - ui.s(8.0),
-                y + ui.s(74.0),
-                ui.s(46.0),
-                col,
-            );
+            if mag_line {
+                f.text_r(
+                    &t.mag,
+                    right - sw - ui.s(8.0),
+                    y + ui.s(74.0),
+                    ui.s(46.0),
+                    col,
+                );
+            }
         }
     }
 
@@ -852,15 +891,14 @@ fn draw_stats(f: &Fonts, t: &HudText, ui: &Ui, w: f32) {
     let pw = ui.s(250.0);
     let x = w - ui.s(MARGIN) - pw;
     let y = ui.s(MARGIN);
-    // One row taller than the objective panel: the wave line joined the
-    // score, kills and clock (reference §19.4-6 — the HUD has to say where
-    // in the mission you are, and how strong the mission's hostiles are).
-    panel(x, y, pw, ui.s(BLOCK_H + 32.0));
+    // The score, the kills and the clock. A wave counter sat on top of these
+    // and is gone: a battlefield does not tell you which wave you are on. It is
+    // still on the result screen, which is a debrief rather than a battle.
+    panel(x, y, pw, ui.s(BLOCK_H));
 
     let ix = x + ui.s(PAD);
     let right = x + pw - ui.s(PAD);
     let rows = [
-        (i18n::t(Key::Wave), t.wave.as_str(), INK),
         (i18n::t(Key::Score), t.score.as_str(), INK),
         (i18n::t(Key::Kills), t.kills.as_str(), INK),
         (i18n::t(Key::Time), t.time.as_str(), CYAN),
@@ -954,6 +992,104 @@ fn draw_banner(f: &Fonts, text: &str, alpha: f32, ui: &Ui, w: f32, h: f32) {
         fade(mix(INK, accent(), 0.55), a),
         ui.s(8.0),
     );
+}
+
+/// The sniper's sight, drawn over the world and over the weapon.
+///
+/// The rifle's own scope tube cannot serve as an aperture: it is geometry built
+/// *around* the sight line, so the window it leaves shrinks with every metre of
+/// its length, and at the 16 degrees the .50 aims down that window is a square
+/// a couple of hundred pixels across — a black mask with a keyhole in it. So
+/// the sight the player actually looks through is drawn here: an opaque
+/// surround, a clear circular aperture and a reticle. `viewmodel` takes the
+/// tube off the rifle on the same frame this arrives, off the same constant, so
+/// the two never overlap.
+///
+/// `ads` is the aim weight, 0 at the hip and 1 with the sight settled.
+pub fn draw_scope_overlay(ads: f32) {
+    let ads = ads.clamp(0.0, 1.0);
+    if ads < crate::viewmodel::SCOPE_HIDE_ADS {
+        return;
+    }
+    // Where the sight is between "the tube has just gone" and "settled". The
+    // aperture opens across it, so the swap reads as the scope coming up rather
+    // than as a cut.
+    let t = ((ads - crate::viewmodel::SCOPE_HIDE_ADS)
+        / (1.0 - crate::viewmodel::SCOPE_HIDE_ADS))
+        .clamp(0.0, 1.0);
+    let (w, h) = (screen_width(), screen_height());
+    let ui = Ui::new();
+    let centre = vec2(w * 0.5, h * 0.5);
+    let radius = h
+        * (crate::viewmodel::SCOPE_RADIUS_MIN
+            + (crate::viewmodel::SCOPE_RADIUS_MAX - crate::viewmodel::SCOPE_RADIUS_MIN) * t);
+
+    // Everything outside the aperture, as a fan of triangles reaching well past
+    // the screen's corners. Opaque: what it covers is the rifle the player is no
+    // longer holding up to their eye.
+    const SEGMENTS: usize = 96;
+    let outer = w + h;
+    let surround = Color::new(0.008, 0.010, 0.012, 1.0);
+    for i in 0..SEGMENTS {
+        let a0 = i as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+        let a1 = (i + 1) as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+        let (s0, c0) = a0.sin_cos();
+        let (s1, c1) = a1.sin_cos();
+        let p0 = centre + vec2(c0, s0) * radius;
+        let p1 = centre + vec2(c1, s1) * radius;
+        let q0 = centre + vec2(c0, s0) * outer;
+        let q1 = centre + vec2(c1, s1) * outer;
+        draw_triangle(p0, q0, q1, surround);
+        draw_triangle(p0, q1, p1, surround);
+    }
+
+    // The glass: a cold wash and a soft rim inside the edge, so the aperture
+    // reads as a lens rather than as a hole cut in the screen.
+    draw_circle(centre.x, centre.y, radius, Color::new(0.05, 0.09, 0.12, 0.12));
+    for i in 0..5 {
+        let f = i as f32 / 5.0;
+        let a = 0.20 * (1.0 - f) + 0.03;
+        draw_circle_lines(
+            centre.x,
+            centre.y,
+            radius * (1.0 - f * 0.055),
+            ui.s(2.0 + f * 4.0),
+            Color::new(0.02, 0.03, 0.04, a),
+        );
+    }
+
+    // Duplex reticle: four posts reaching in from the rim with a gap at the
+    // centre, mil ticks down the lower post, and a centre dot. Thin and dark —
+    // a reticle that glows reads as a HUD, and this one has to sit on a world.
+    let ink = Color::new(0.02, 0.02, 0.025, 0.94);
+    let line = ui.s(1.6);
+    let gap = radius * 0.19;
+    let reach = radius * 0.97;
+    for (dx, dy) in [(1.0f32, 0.0f32), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+        draw_line(
+            centre.x + dx * gap,
+            centre.y + dy * gap,
+            centre.x + dx * reach,
+            centre.y + dy * reach,
+            line,
+            ink,
+        );
+    }
+    draw_circle(centre.x, centre.y, ui.s(1.5), ink);
+    // Mil ticks: below the centre on the vertical post, and out on the
+    // horizontal one, spaced by the aperture so they scale with the sight.
+    for i in 1..=4 {
+        let y = centre.y + radius * (0.14 + 0.105 * i as f32);
+        let half = ui.s(3.0 + 1.6 * i as f32);
+        draw_line(centre.x - half, y, centre.x + half, y, line, ink);
+    }
+    for i in 1..=3 {
+        let x = radius * (0.16 + 0.14 * i as f32);
+        let half = ui.s(3.0 + 1.2 * i as f32);
+        for side in [1.0f32, -1.0] {
+            draw_line(centre.x + side * x, centre.y - half, centre.x + side * x, centre.y + half, line, ink);
+        }
+    }
 }
 
 /// Red/edge damage flash plus a low-health pulse.

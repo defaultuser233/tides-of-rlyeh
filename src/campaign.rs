@@ -1,5 +1,5 @@
 //! Campaign mission definitions: objective type, enemy composition and spawn
-//! pacing. The loadout is the player's — picked and stocked in the stash — so
+//! pacing. The loadout is the player's — picked and stocked in the armory — so
 //! what a mission carries is no longer tabled here. Pure data, so the whole
 //! campaign is reviewable in one place.
 //!
@@ -165,7 +165,7 @@ pub static MISSIONS: [Mission; 6] = [
     ),
     // 5 — everything at once: all five archetypes show up, marksmen on the
     // rooftops and drones in the air, and the answer to both is a scoped
-    // weapon. Whether the player brings one is the stash's business now.
+    // weapon. Whether the player brings one is the armory's business now.
     mission!(
         4,
         Objective::EliminateThenExtract,
@@ -254,6 +254,11 @@ pub fn cheapest(m: &Mission) -> u32 {
 }
 
 /// What one roll of the table is worth on average, in points.
+///
+/// The HUD used to divide a wave's points by this to guess a body count; the
+/// rosters made that unnecessary, so this is the tests' own yardstick now —
+/// the wave table printout reads it to say how many hostiles a budget is.
+#[cfg(test)]
 pub fn mean_cost(m: &Mission) -> f32 {
     let total: u32 = m.kinds.iter().map(|(_, w)| *w).sum();
     if total == 0 {
@@ -308,6 +313,41 @@ pub fn wave_budget(m: &Mission, wave: u32) -> u32 {
     share.max(WAVE_FLOOR * cheapest(m))
 }
 
+/// One wave's roster: exactly which hostiles it will release, drawn up front.
+///
+/// The wave used to be drawn one release at a time, which meant the mission's
+/// size was unknowable until it was over — the HUD could only divide points by
+/// an average, and what it divided was the wave in progress rather than the
+/// mission. Drawing every roster when the mission starts costs one `Vec` per
+/// wave and makes the count exact.
+///
+/// These are the same draws in the same order the release path used to make:
+/// `draw_kind` against the wave's remaining points with the floor reserved, and
+/// `last_elite` carried across waves so an elite still cannot arrive two waves
+/// running (reference §19.2).
+pub fn wave_roster(
+    m: &Mission,
+    wave: u32,
+    rolls: &mut impl FnMut() -> u32,
+    last_elite: &mut Option<u32>,
+) -> Vec<EnemyKind> {
+    let mut budget = wave_budget(m, wave);
+    let mut roster = Vec::new();
+    loop {
+        let floor_left = WAVE_FLOOR.saturating_sub(roster.len() as u32);
+        let elite_ready = last_elite.is_none_or(|l| wave >= l + 2);
+        let Some(kind) = draw_kind(m, rolls, budget, floor_left, elite_ready) else {
+            break;
+        };
+        budget -= cost(kind);
+        if is_elite(kind) {
+            *last_elite = Some(wave);
+        }
+        roster.push(kind);
+    }
+    roster
+}
+
 /// The strength argument for `Enemy::spawn`: the mission's declared base plus
 /// the wave index.
 ///
@@ -319,6 +359,15 @@ pub fn wave_budget(m: &Mission, wave: u32) -> u32 {
 /// mode was still missing).
 pub fn wave_strength(m: &Mission, wave_index: u32) -> u32 {
     m.wave.saturating_add(wave_index)
+}
+
+/// Whether `wave_index` (0-based) is the mission's last wave.
+///
+/// The last wave is the mission's climax, and one thing reads off it: an elite
+/// released there is the thing the mission was building to, not a spike in the
+/// middle of it, so it arrives with a different cue (reference §19.4-10).
+pub fn is_final_wave(m: &Mission, wave_index: u32) -> bool {
+    wave_index + 1 >= m.waves
 }
 
 /// An archetype that may not arrive two waves in a row (reference §19.2 —
@@ -478,6 +527,45 @@ mod tests {
         }
     }
 
+    /// Only the last wave is the finale, and the elite's two cues are both
+    /// reachable: the one mission that may field a colossus can afford it on a
+    /// middle wave *and* on its last one, so neither `EliteArrival` nor
+    /// `BossArrival` (reference §19.4-10) is dead code.
+    #[test]
+    fn only_the_last_wave_is_final_and_both_elite_cues_are_reachable() {
+        for (i, m) in MISSIONS.iter().enumerate() {
+            for w in 0..m.waves {
+                assert_eq!(
+                    is_final_wave(m, w),
+                    w + 1 == m.waves,
+                    "mission {} wave {} is not what `is_final_wave` says",
+                    i + 1,
+                    w + 1
+                );
+            }
+
+            if !m.kinds.iter().any(|&(kind, _)| is_elite(kind)) {
+                continue;
+            }
+            let price = cost(EnemyKind::Colossus);
+            let affordable: Vec<u32> = (0..m.waves)
+                .filter(|&w| wave_budget(m, w) >= price)
+                .collect();
+            assert!(
+                affordable.iter().any(|&w| !is_final_wave(m, w)),
+                "mission {}: the elite could only arrive as the finale, so the \
+                 middle-of-the-run cue would never be heard",
+                i + 1
+            );
+            assert!(
+                affordable.iter().any(|&w| is_final_wave(m, w)),
+                "mission {}: the elite can never be the finale, so the boss cue \
+                 would never be heard",
+                i + 1
+            );
+        }
+    }
+
     /// Wave strength climbs from the mission's own base, one step per wave:
     /// the opening wave fights at the declared strength, the last well above.
     #[test]
@@ -552,9 +640,10 @@ mod tests {
     /// The elite buffer (reference §19.2): an elite may not come back two
     /// waves in a row. The old spawner rolled every release independently, so
     /// a Colossus could die and another arrive immediately behind it — an
-    /// event with no cooldown reads as a bug, and it was one. Twenty
-    /// simulated waves on the finale's table: every elite has to keep its
-    /// distance, and every wave still has to fill its floor.
+    /// event with no cooldown reads as a bug, and it was one. Twenty waves of
+    /// the finale's table, driven through `wave_roster` — the path the game
+    /// actually releases out of, not a rehearsal of it: every elite has to keep
+    /// its distance, and every wave still has to fill its floor.
     #[test]
     fn elites_never_come_back_to_back() {
         let m = &MISSIONS[5];
@@ -566,34 +655,76 @@ mod tests {
             seed
         };
         let mut last: Option<u32> = None;
+        let mut elites = 0;
         for wave in 0..20u32 {
-            let mut ready = last.is_none_or(|l| wave >= l + 2);
-            let mut remaining = 3300;
-            let mut released = 0;
-            loop {
-                let floor_left = WAVE_FLOOR.saturating_sub(released);
-                let Some(kind) = draw_kind(m, &mut rolls, remaining, floor_left, ready) else {
-                    break;
-                };
-                if is_elite(kind) {
-                    assert!(ready, "wave {wave} released an elite while buffered");
-                    last = Some(wave);
-                    ready = false;
-                }
-                remaining -= cost(kind);
-                released += 1;
-                if remaining < cheapest(m) {
-                    break;
-                }
-            }
+            let before = last;
+            let roster = wave_roster(m, wave, &mut rolls, &mut last);
             assert!(
-                released >= WAVE_FLOOR,
-                "wave {wave} released {released} hostiles, under its floor"
+                roster.len() as u32 >= WAVE_FLOOR,
+                "wave {wave} released {} hostiles, under its floor",
+                roster.len()
             );
+            let spent: u32 = roster.iter().map(|k| cost(*k)).sum();
+            assert!(
+                spent <= wave_budget(m, wave),
+                "wave {wave} spent {spent} of a {} point budget",
+                wave_budget(m, wave)
+            );
+            assert!(
+                wave_budget(m, wave) - spent < cheapest(m),
+                "wave {wave} left {} points unspent, enough for another hostile",
+                wave_budget(m, wave) - spent
+            );
+
+            if roster.iter().any(|k| is_elite(*k)) {
+                elites += 1;
+                assert!(
+                    before.is_none_or(|l| wave >= l + 2),
+                    "wave {wave} released an elite while the buffer was counting"
+                );
+                assert_eq!(last, Some(wave), "the elite did not start its buffer");
+            }
         }
-        assert!(last.is_some(), "twenty waves and not one elite appeared");
+        assert!(elites > 0, "twenty waves and not one elite appeared");
     }
 
+    /// The rosters are the mission's body count, decided before the first shot.
+    /// This is what lets the HUD say how many hostiles are left instead of
+    /// dividing points by an average: the same seed has to draw the same
+    /// mission, and the mission has to owe at least its floors.
+    #[test]
+    fn a_missions_rosters_are_drawn_once_and_replay() {
+        let draw = |m: &Mission, seed: u32| {
+            let mut seed = seed;
+            let mut rolls = move || {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                seed
+            };
+            let mut last = None;
+            (0..m.waves)
+                .map(|w| wave_roster(m, w, &mut rolls, &mut last))
+                .collect::<Vec<_>>()
+        };
+
+        for (i, m) in MISSIONS.iter().enumerate() {
+            let a = draw(m, 0xBEEF_1234);
+            let b = draw(m, 0xBEEF_1234);
+            assert_eq!(a, b, "mission {} drew two different rosters", i + 1);
+
+            let owed: u32 = a.iter().map(|r| r.len() as u32).sum();
+            assert!(
+                owed >= m.waves * WAVE_FLOOR,
+                "mission {} owes {owed} hostiles over {} waves, under its floors",
+                i + 1,
+                m.waves
+            );
+        }
+    }
+
+    /// The wave tables, one line per wave: what the debug report shows.
+    ///
     /// Not an assertion: the pacing report. `cargo test -- --ignored --nocapture`.
     ///
     /// Prints each mission's per-wave budgets, the ratios the tests above work

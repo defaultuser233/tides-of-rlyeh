@@ -57,12 +57,21 @@ pub enum Asset {
     SfxUiBack,
     SfxExplosion,
     SfxSpawn,
+    SfxHealing,
+    SfxEliteArrival,
+    SfxBossArrival,
+    SfxSanityCritical,
+    SfxPickupHealth,
+    SfxPickupAmmo,
+    SfxObjectiveDone,
+    SfxMissionComplete,
+    SfxMissionFailed,
 }
 
 impl Asset {
     /// Every variant, for tests and for anything that wants to walk the set.
     #[cfg(test)]
-    pub const ALL: [Asset; 26] = [
+    pub const ALL: [Asset; 35] = [
         Asset::UiFont,
         Asset::TexConcreteFloor,
         Asset::TexConcreteTiles,
@@ -89,6 +98,15 @@ impl Asset {
         Asset::SfxUiBack,
         Asset::SfxExplosion,
         Asset::SfxSpawn,
+        Asset::SfxHealing,
+        Asset::SfxEliteArrival,
+        Asset::SfxBossArrival,
+        Asset::SfxSanityCritical,
+        Asset::SfxPickupHealth,
+        Asset::SfxPickupAmmo,
+        Asset::SfxObjectiveDone,
+        Asset::SfxMissionComplete,
+        Asset::SfxMissionFailed,
     ];
 }
 
@@ -125,6 +143,15 @@ pub const fn bytes(asset: Asset) -> &'static [u8] {
         Asset::SfxUiBack => include_bytes!("../assets/sounds/ui_back.ogg"),
         Asset::SfxExplosion => include_bytes!("../assets/sounds/explosion.ogg"),
         Asset::SfxSpawn => include_bytes!("../assets/sounds/spawn.ogg"),
+        Asset::SfxMissionFailed => include_bytes!("../assets/sounds/mission_failed.ogg"),
+        Asset::SfxMissionComplete => include_bytes!("../assets/sounds/mission_complete.wav"),
+        Asset::SfxObjectiveDone => include_bytes!("../assets/sounds/objective_done.wav"),
+        Asset::SfxPickupAmmo => include_bytes!("../assets/sounds/pickup_ammo.wav"),
+        Asset::SfxPickupHealth => include_bytes!("../assets/sounds/pickup_health.ogg"),
+        Asset::SfxSanityCritical => include_bytes!("../assets/sounds/sanity_critical.wav"),
+        Asset::SfxBossArrival => include_bytes!("../assets/sounds/boss_arrival.ogg"),
+        Asset::SfxEliteArrival => include_bytes!("../assets/sounds/elite_arrival.ogg"),
+        Asset::SfxHealing => include_bytes!("../assets/sounds/healing.ogg"),
     }
 }
 

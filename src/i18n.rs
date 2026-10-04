@@ -108,7 +108,7 @@ define_strings! {
     Off              => ("OFF", "关"),
 
     // --- armory ---
-    Armory           => ("STASH", "仓库"),
+    Armory           => ("ARMORY", "军械库"),
     ArmoryTab        => ("SECTION", "分类"),
     ModsTab          => ("MODS", "改装"),
     PaintTab         => ("PAINT", "涂装"),
@@ -126,6 +126,10 @@ define_strings! {
     Spare            => ("SPARE", "备弹"),
     ArmoryWeapon     => ("WEAPON", "武器"),
     PartNone         => ("NONE", "无"),
+    // The empty option in a *magazine* slot: the magazine the weapon is issued
+    // with, named by its capacity. `{}` is the round count — see
+    // `empty_slot_name` in `main`.
+    PartIssuedMag    => ("STANDARD {} ROUND", "标准 {} 发"),
     StatAds          => ("ADS FOV", "瞄准视野"),
     WearLabel        => ("WEAR", "磨损"),
     SeedLabel        => ("PATTERN", "图案"),
@@ -167,6 +171,7 @@ define_strings! {
 
     // --- waves ---
     Wave             => ("WAVE", "波次"),
+    Magazines        => ("MAGS", "匣"),
     WaveEarly        => ("PRESS F TO CALL IT IN EARLY", "按 F 提前召唤"),
     Threat           => ("THREAT", "威胁"),
     ThreatDamage     => ("DMG", "伤害"),
@@ -218,6 +223,7 @@ define_strings! {
     MagHalf          => ("MAGAZINE ABOUT HALF", "弹匣约一半"),
     MagLow           => ("MAGAZINE RUNNING LOW", "弹匣即将打空"),
     MagEmpty         => ("MAGAZINE EMPTY", "弹匣已空"),
+    NoSpareAmmo      => ("OUT OF AMMUNITION", "没有可用弹药"),
     Inspecting       => ("INSPECTING", "检视武器"),
 
     // --- grenades ---
@@ -257,6 +263,13 @@ define_strings! {
     // --- weapons ---
     WeaponPistol     => ("SIDEARM M9", "M9 手枪"),
     WeaponKnife      => ("COMBAT KNIFE", "战术匕首"),
+    WeaponM4a1       => ("M4A1 CARBINE", "M4A1 卡宾枪"),
+    WeaponScar       => ("SCAR-L", "SCAR-L 步枪"),
+    WeaponFal        => ("FAL", "FAL 战斗步枪"),
+    WeaponMp5        => ("MP5", "MP5 冲锋枪"),
+    WeaponMpx        => ("MPX", "MPX 冲锋枪"),
+    WeaponM110       => ("M110 SASS", "M110 精确射手步枪"),
+    WeaponMosin      => ("MOSIN-NAGANT", "莫辛纳甘栓动步枪"),
 
     // --- breath ---
     BreathHeld       => ("HOLDING BREATH", "屏息中"),
@@ -373,6 +386,27 @@ define_strings! {
                            "18 血、极快，一枪一个。麻烦的是触手怪死后冒出的三只。"),
 
     // --- field manual: armoury ---
+    CodexM4a1Tag     => ("CARBINE", "卡宾枪"),
+    CodexM4a1Note    => ("857 rpm against the MK-7's 682, and each round weaker. A close-quarters rifle.",
+                         "857 发/分（MK-7 是 682），单发威力更低。近距离的步枪。"),
+    CodexScarTag     => ("HEAVY 5.56", "重装 5.56"),
+    CodexScarNote    => ("600 rpm, 27 a hit and a flatter kick than the MK-7. Slow to reload.",
+                         "600 发/分，单发 27，后坐比 MK-7 平。换弹慢。"),
+    CodexFalTag      => ("BATTLE RIFLE", "战斗步枪"),
+    CodexFalNote     => ("43 a hit on full auto, and the climb to match. Twenty rounds, 2.2 s.",
+                         "全自动单发 43，枪口也抬得一样凶。20 发，换弹 2.2 秒。"),
+    CodexMp5Tag      => ("CONTROLLED 9MM", "可控 9mm"),
+    CodexMp5Note     => ("770 rpm with a spread the Viper does not have. The SMG to aim with.",
+                         "770 发/分，散布比毒蛇小得多。用来瞄的那把冲锋枪。"),
+    CodexMpxTag      => ("RATE OVER CONTROL", "射速优先"),
+    CodexMpxNote     => ("923 rpm and the bloom to go with it. Empty in two seconds.",
+                         "923 发/分，散布跟着涨。两秒打空一匣。"),
+    CodexM110Tag     => ("SEMI-AUTO MARKSMAN", "半自动精确射手"),
+    CodexM110Note    => ("55 a hit, one per trigger pull. Two shots for a grunt, one for a head.",
+                         "单发 55，一次扳机一发。步兵两枪，爆头一枪。"),
+    CodexMosinTag    => ("BOLT-ACTION", "栓动步枪"),
+    CodexMosinNote   => ("140 a hit — the highest number here — at 43 rounds a minute. Five in the well.",
+                         "单发 140，全场最高；代价是 43 发/分。弹仓 5 发。"),
     CodexRifleTag    => ("FULL-AUTO BASELINE", "全自动基准枪"),
     CodexRifleNote   => ("Auto, burst or single; 30 rounds, 1.35 s reload. The most forgiving gun here.",
                          "全自动 / 三连发 / 单发随切，30 发弹匣，最省心的一把。"),

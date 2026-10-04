@@ -77,46 +77,140 @@ Useful as arena cover; `src/level.rs` already works in AABBs.
 
 ## 2. Sounds — `assets/sounds/`
 
-19 files, 220 KB total. All Ogg Vorbis 44.1 kHz, mono or stereo.
+28 files, 1.05 MB total (1,049,528 B) in three groups: the six Kenney one-shots
+that were kept (§2), the thirteen weapon and combat cues re-cut from CC0 field
+recordings on 2026-10-03 (§2a), and the nine mostly-WAV files found for the
+effects that used to be synthesiser-only (§2b). Mono or stereo, 44.1 kHz
+throughout except the three §2b Oggs (`healing`, `pickup_health`,
+`mission_failed`), which are 48 kHz.
 
 **They are named after the `Sfx::file_name()` slots in `src/audio.rs`**, so
 `load_effect()` finds them automatically and they replace the built-in synth.
 Nothing else needs wiring up.
 
 From the **sci-fi pack** (S), **impact pack** (I) or **UI pack** (U); source
-path is `assets/_downloads/<pack>/Audio/<stem>.ogg`.
+path is `assets/_downloads/<pack>/Audio/<stem>.ogg`. These six are unchanged.
 
 | Copied file | Pack | Source stem | Len | ch | Engine slot |
 | --- | :-: | --- | ---: | :-: | --- |
-| `shot_rifle.ogg` | S | `laserSmall_000` | 0.24 s | 2 | `Sfx::ShotRifle` |
-| `shot_shotgun.ogg` | S | `laserLarge_000` | 0.68 s | 1 | `Sfx::ShotShotgun` |
-| `shot_smg.ogg` | S | `laserSmall_002` | 0.34 s | 2 | `Sfx::ShotSmg` |
-| `shot_sniper.ogg` | S | `laserLarge_004` | 0.69 s | 1 | `Sfx::ShotSniper` |
-| `shot_lmg.ogg` | S | `laserRetro_002` | 0.26 s | 1 | `Sfx::ShotLmg` |
-| `enemy_shot.ogg` | S | `laserRetro_000` | 0.24 s | 1 | `Sfx::EnemyShot` |
-| `hit_flesh.ogg` | I | `impactPunch_medium_000` | 0.43 s | 2 | `Sfx::HitFlesh` |
-| `hit_world.ogg` | I | `impactPlate_medium_000` | 0.61 s | 2 | `Sfx::HitWorld` |
-| `hit_head.ogg` | I | `impactMetal_light_001` | 0.25 s | 2 | `Sfx::HitHead` |
-| `enemy_death.ogg` | I | `impactSoft_heavy_003` | 0.54 s | 2 | `Sfx::EnemyDeath` |
 | `player_hurt.ogg` | I | `impactPunch_heavy_000` | 0.65 s | 2 | `Sfx::PlayerHurt` |
-| `reload.ogg` | U | `switch4` | 0.42 s | 2 | `Sfx::Reload` |
-| `reload_empty.ogg` | U | `click3` | 0.09 s | 2 | `Sfx::ReloadEmpty` |
-| `footstep.ogg` | I | `footstep_concrete_000` | 0.11 s | 2 | `Sfx::Footstep` |
 | `ui_click.ogg` | U | `click1` | 0.09 s | 2 | `Sfx::UiClick` |
 | `ui_move.ogg` | U | `rollover1` | 0.23 s | 2 | `Sfx::UiMove` |
 | `ui_back.ogg` | U | `click2` | 0.06 s | 2 | `Sfx::UiBack` |
 | `explosion.ogg` | S | `explosionCrunch_000` | 0.78 s | 1 | `Sfx::Explosion` |
 | `spawn.ogg` | S | `forceField_000` | 0.95 s | 1 | `Sfx::Spawn` |
 
-### Five slots deliberately left to the synth
+### 2a. The thirteen weapon and combat cues re-cut from field recordings
 
-`pickup_health`, `pickup_ammo`, `objective_done`, `mission_complete`,
-`mission_failed` have **no file here on purpose**. Their synth recipes in
-`src/audio.rs` are purpose-written musical stings (rising pickup arpeggios; a
-C-E-G-C major figure for mission complete; an A-G-F-C descending minor for
-failure). The Kenney packs contain nothing comparable, so dropping a UI blip
-into those slots would be a downgrade. Add files with those names only if you
-want to override them.
+The six gunshot slots were Kenney `laser*` material — "pew" synth beams — and
+the hit, reload, footstep and death slots were Kenney impacts. All thirteen
+were replaced with real recordings: **freesound.org**, licence-filtered to
+`license:"Creative Commons 0"`, and every submission page re-checked by hand
+(it renders `<a href="http://creativecommons.org/publicdomain/zero/1.0/">`
+with the text `Creative Commons 0`; none of the thirteen carries CC-BY or
+CC-BY-SA). Per-file evidence — source page, preview URL, author, the licence
+string as the page shows it, the measurements and the header bytes — is in
+`assets/SOUND_SOURCES.md`.
+
+Each file is one isolated transient cut out of its source, downmixed to mono,
+30 Hz high-passed, faded 3 ms in / 5 ms out and peak-normalised to ≈ −1 dBFS.
+The five player guns are deliberately five *different* weapons so they can be
+told apart with the eyes shut. Nothing here is synthesised, and no source was
+music.
+
+| Copied file | Source (freesound) | Original asset | Len | ch | Engine slot |
+| --- | --- | --- | ---: | :-: | --- |
+| `shot_rifle.ogg` | 710084 · felix.blume | `Rifle gunshot, one shot` | 0.50 s | 1 | `Sfx::ShotRifle` |
+| `shot_shotgun.ogg` | 569309 · Kobrakon47 | `Saiga 12k Gunshot(12ga)` | 0.57 s | 1 | `Sfx::ShotShotgun` |
+| `shot_smg.ogg` | OpenGameArt · Vincent Sevedge (CC **BY** 3.0) | `cz.wav` | 0.22 s | 1 | `Sfx::ShotSmg` |
+| `shot_sniper.ogg` | 855607 · qubodup | `Sniper Shot in Field 2 (M2010 ESR)` | 0.68 s | 1 | `Sfx::ShotSniper` |
+| `shot_lmg.ogg` | 854641 · qubodup | `M240 Machine Gun Single Shot` | 0.58 s | 1 | `Sfx::ShotLmg` |
+| `enemy_shot.ogg` | 427597 · michorvath | `AR15 rifle shot from 50 yards away` | 0.65 s | 1 | `Sfx::EnemyShot` |
+| `reload.ogg` | 815879 · qubodup | `Assault Rifle Reload` | 1.45 s | 1 | `Sfx::Reload` |
+| `reload_empty.ogg` | 702662 · areniporgen | `Remington 870 pull up and dry fire` | 0.25 s | 1 | `Sfx::ReloadEmpty` |
+| `hit_flesh.ogg` | 344409 · jawbutch | `Three Flesh Impacts.wav` | 0.38 s | 1 | `Sfx::HitFlesh` |
+| `hit_head.ogg` | 703115 · franzzle | `crush1.wav` | 0.25 s | 1 | `Sfx::HitHead` |
+| `hit_world.ogg` | 675951 · craigsmith | `S31-15 Shooting gallery; hitting metal targets` | 0.42 s | 1 | `Sfx::HitWorld` |
+| `enemy_death.ogg` | 416839 · tonsil5 | `Grunt1 - Death Pain.wav` | 0.55 s | 1 | `Sfx::EnemyDeath` |
+| `footstep.ogg` | 521590 · Fission9 | `Hiking Boot Footsteps on Stone` | 0.26 s | 1 | `Sfx::Footstep` |
+| `shot_smg.ogg` (replaced again) | OpenGameArt · Vincent Sevedge | `cz.wav` | 0.22 s | 1 | `Sfx::ShotSmg` |
+
+Twelve of the thirteen are mono Ogg Vorbis at 44.1 kHz, 6.0–16.7 KB each; the
+whole swap is 110,885 B against 144,344 B for what it replaced, so
+`assets/sounds/` got 33,459 B **smaller**. Every shot sits inside the 0.20–0.70 s
+window the brief set (0.42–0.68 s) and every non-shot inside 1.5 s. None of the
+thirteen has a sample at full scale; the hottest is `shot_shotgun.ogg` at
+0.8911 (−1.00 dBFS).
+
+**`shot_smg.ogg` was replaced a second time**, and is the one file in `assets/`
+that is not CC0. The freesound take it had was the only one of the thirteen that
+was not a recording of the weapon it plays: it is a twelve-gauge sped up by two,
+because no CC0 single 9 mm shot exists. The OpenGameArt pack *Gunshot Sounds*
+(CZ-52, Mosin, SKS, shotgun) has a real pistol crack in it, and its page says
+CC0 — but its own `creativecommons.txt` says **Creative Commons Attribution 3.0
+Unported**, © 2009 Vincent Sevedge. The bundle is the stricter and the more
+specific statement, so that is the one recorded here and attributed in the
+README. Only this one file was taken from it: the other three are recordings of
+weapons the shipping set already has CC0 takes of.
+
+The CZ-52 take is a field recording of five shots with a second of room on each.
+The cut is the isolated shot at 2.82 s of the source, and its tail is pulled down
+after the first 15 ms (`exp(-(t−0.015)/0.045)`): this weapon fires eighteen
+rounds a second, so six copies of a one-second room tail would be summed at once
+and the mixer, which has no ducking and no per-slot gain, would clip on the pile.
+Unshaped, four overlapping copies peak at 2.5; shaped, at **0.92** — the same
+headroom the take it replaced had at 0.88. See `assets/SOUND_SOURCES.md`.
+
+### 2b. The nine curated non-Kenney files
+
+These filled the slots that had no file, so they were playing the built-in
+synthesis. All nine are **CC0**, verified on their own pages (the licence field
+of each OpenGameArt page links to
+`creativecommons.org/publicdomain/zero/1.0/`); the per-file evidence — source
+page, direct URL, author, the licence string as the page renders it, and the
+header bytes — is in `assets/SOUND_SOURCES.md`. The source archives
+were not vendored (about 30 MB); the doc's direct links re-fetch each file.
+
+| File | Source pack | Author | Len | Engine slot |
+| --- | --- | --- | ---: | --- |
+| `pickup_health.ogg` | 80 CC0 RPG SFX | rubberduck | 0.39 s | `Sfx::PickupHealth` |
+| `pickup_ammo.wav` | Metal Impact Sounds | bmaczero | 0.26 s | `Sfx::PickupAmmo` |
+| `objective_done.wav` | Metal Impact Sounds | bmaczero | 0.72 s | `Sfx::ObjectiveDone` |
+| `mission_complete.wav` | Metal Impact Sounds | bmaczero | 2.11 s | `Sfx::MissionComplete` |
+| `mission_failed.ogg` | 80 CC0 creature SFX | rubberduck | 1.13 s | `Sfx::MissionFailed` |
+| `healing.ogg` | 50 RPG sound effects | Kenney | 0.66 s | `Sfx::Healing` |
+| `elite_arrival.ogg` | Sci-Fi Sounds 1.0 (local) | Kenney | 2.00 s | `Sfx::EliteArrival` |
+| `boss_arrival.ogg` | Their Coming | stumpystrust | 5.15 s | `Sfx::BossArrival` |
+| `sanity_critical.wav` | Heartbeat sounds | bart | 2.25 s | `Sfx::SanityCritical` |
+
+Two of these are longer than the brief asked for (`boss_arrival` 5.15 s against a
+3.5 s ceiling, `mission_failed` 1.13 s against a 1.5 s floor) and one
+(`objective_done`) sits at −0.02 dBFS, so it is the loudest effect in the table.
+They were chosen for character rather than length; **none has been listened to**,
+so any of them that reads wrong in play should be deleted — the slot falls back
+to its recipe in `src/audio.rs`.
+
+### The one slot deliberately left to the synth
+
+`reload_done` has **no file on purpose**: it is the last effect still
+synthesised, a two-part click-clack written for the frame a magazine seats, and
+it is the one cue the game is happy to own outright. Its recipe is in
+`src/audio.rs`; add `assets/sounds/reload_done.ogg` if a file is ever wanted.
+
+The five that used to be listed here — `pickup_health`, `pickup_ammo`,
+`objective_done`, `mission_complete`, `mission_failed` — now have real files and
+moved to §2b. Their recipes remain as the fallback a missing or broken file
+falls back to.
+
+The four event cues the player has to place by ear (reference §19.4-10) live in
+§2b too, except the last:
+
+| Slot | File name | Event |
+| --- | --- | --- |
+| `Sfx::EliteArrival` | `elite_arrival` | an elite (the colossus) is released mid-mission |
+| `Sfx::BossArrival` | `boss_arrival` | the same on a mission's last wave — lower and longer |
+| `Sfx::SanityCritical` | `sanity_critical` | the mind crosses into the critical band |
+| `Sfx::ReloadDone` | `reload_done` | the magazine is seated — synthesised, see above |
 
 ### `assets/sounds/variants/` — 10 extra one-shots, not auto-loaded
 

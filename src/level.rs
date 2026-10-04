@@ -234,6 +234,15 @@ pub struct FlowField {
     dist: Vec<u16>,
     dir: Vec<Vec2>,
     passable: Vec<bool>,
+    /// Flat position of the last target `update` was given, kept so `dir_at`
+    /// can point a unit straight at it when the grid has nothing to say.
+    target: Vec2,
+    /// False until `update` has been given a target. The fallback has nowhere to
+    /// point before then, and a field that has never been built must steer
+    /// nothing rather than point every unit at the world origin — which is what
+    /// the first version of this did, and what
+    /// `a_standing_enemy_does_not_march_in_place` caught.
+    aimed: bool,
 }
 
 impl FlowField {
@@ -248,6 +257,8 @@ impl FlowField {
             dist: vec![u16::MAX; w * h],
             dir: vec![Vec2::ZERO; w * h],
             passable: vec![true; w * h],
+            target: Vec2::ZERO,
+            aimed: false,
         }
     }
 
@@ -292,7 +303,10 @@ impl FlowField {
         None
     }
 
-    pub fn dir_at(&self, p: Vec3) -> Vec2 {
+    /// The field's own answer for the cell `p` stands in: zero where the search
+    /// found no route. `dir_at` is what steering asks; this is what a unit asks
+    /// about *itself*, to find out whether it is on the field at all.
+    pub fn flow_at(&self, p: Vec3) -> Vec2 {
         let (ix, iz) = self.cell_of(p);
         if !self.in_bounds(ix, iz) {
             return Vec2::ZERO;
@@ -300,8 +314,37 @@ impl FlowField {
         self.dir[self.idx(ix as usize, iz as usize)]
     }
 
+    /// Steering toward the target. Falls back to walking straight at it where
+    /// the field has nothing to say — which is the difference between a unit
+    /// that takes a long way round and a unit that stands in a corridor for the
+    /// rest of the mission.
+    ///
+    /// Nothing on the walkable field is ever without a direction: the search
+    /// fills every cell it can reach, and a cell it cannot reach is a cell the
+    /// unit has no business being in. One that is there anyway is off the grid
+    /// — inside the footprint of a solid, or shoved into a pocket — and standing
+    /// still is what it used to do about it, forever. Since a wave does not end
+    /// until every body it released is down, one such unit was enough to stop
+    /// the mission. Straight at the target is not a route, but the collision
+    /// solver slides a unit along geometry, so it is usually enough to get back
+    /// onto the field.
+    pub fn dir_at(&self, p: Vec3) -> Vec2 {
+        let d = self.flow_at(p);
+        if d != Vec2::ZERO {
+            return d;
+        }
+        if !self.aimed {
+            return Vec2::ZERO;
+        }
+        (self.target - vec2(p.x, p.z)).normalize_or_zero()
+    }
+
     /// Recompute distances from `target` and derive a flow direction per cell.
     pub fn update(&mut self, target: Vec3) {
+        // Remembered so `dir_at` has something to fall back to: a unit standing
+        // where the field never reached still has to walk somewhere.
+        self.target = vec2(target.x, target.z);
+        self.aimed = true;
         self.dist.fill(u16::MAX);
         let Some((tx, tz)) = self.nearest_passable(target) else {
             return;
@@ -543,6 +586,37 @@ impl Level {
     pub fn point_free(&self, pos: Vec3, radius: f32, height: f32) -> bool {
         let b = body(pos, radius, height);
         !self.solids.iter().any(|s| s.overlaps(&b))
+    }
+
+    /// Whether the navigation field has a route from where `p` stands.
+    ///
+    /// The question a unit asks about itself when it has been pushing in one
+    /// direction and going nowhere: a unit whose own cell has no flow is not
+    /// taking a long way round, it is off the field.
+    pub fn has_flow(&self, p: Vec3) -> bool {
+        self.flow.flow_at(p) != Vec2::ZERO
+    }
+
+    /// Centre of the nearest walkable, unoccupied cell to `p`, if there is one.
+    ///
+    /// The other half of `has_flow`: a unit off the field is put back on it. A
+    /// small teleport is a worse-looking thing than any other fix here, and it is
+    /// still the right trade — a unit that can never reach the player holds its
+    /// wave open for the rest of the mission, and a wave nobody can finish is a
+    /// mission nobody can finish.
+    pub fn navigable_near(&self, p: Vec3, radius: f32, height: f32) -> Option<Vec3> {
+        let (cx, cz) = self.flow.nearest_passable(p)?;
+        let c = self.flow.cell_center(cx, cz);
+        // The grid is flat and the world is not: try the unit's own height first,
+        // then a little above and below it, and give up rather than drop it
+        // inside a wall.
+        for dy in [0.0f32, 0.2, -0.2, 0.5, -0.5, 1.0, -1.0, 2.0, -2.0] {
+            let at = vec3(c.x, p.y + dy, c.y);
+            if self.point_free(at, radius, height) {
+                return Some(at);
+            }
+        }
+        None
     }
 
     /// Highest surface at or below `ceiling` under the given footprint.

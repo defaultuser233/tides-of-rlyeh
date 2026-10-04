@@ -40,8 +40,20 @@ pub enum Sfx {
     EnemyDeath,
     Reload,
     ReloadEmpty,
+    /// The magazine seated and the weapon live again. `Reload` is the start of
+    /// the reload; this is the moment it stops being true, which is the half a
+    /// player reloading behind cover actually needs to hear.
+    ReloadDone,
     Footstep,
     PlayerHurt,
+    /// A medical item going on: the bandage, the injector, the bottle. Its own
+    /// slot rather than the reload's click, which is what it used to play —
+    /// two things a player has to be able to tell apart with their eyes on
+    /// something else.
+    Healing,
+    /// The mind crossed into the critical band. A warning, not a scare: it has
+    /// to carry under gunfire, so it is quieter than the shot it plays beside.
+    SanityCritical,
     PickupHealth,
     PickupAmmo,
     UiClick,
@@ -49,6 +61,13 @@ pub enum Sfx {
     UiBack,
     Explosion,
     Spawn,
+    /// Something enormous has been let into the arena (§19.4-10). Played at
+    /// full volume rather than by distance: the point is that it is heard from
+    /// anywhere, before it is seen.
+    EliteArrival,
+    /// The same event on a mission's last wave, where the elite is the climax
+    /// rather than a spike: lower, longer, and allowed to be unpleasant.
+    BossArrival,
     ObjectiveDone,
     MissionComplete,
     MissionFailed,
@@ -57,7 +76,7 @@ pub enum Sfx {
 impl Sfx {
     /// Every effect, in enum order. Only the sound backend enumerates them.
     #[cfg(feature = "sound")]
-    const ALL: [Sfx; 24] = [
+    const ALL: [Sfx; 29] = [
         Sfx::ShotRifle,
         Sfx::ShotShotgun,
         Sfx::ShotSmg,
@@ -70,8 +89,11 @@ impl Sfx {
         Sfx::EnemyDeath,
         Sfx::Reload,
         Sfx::ReloadEmpty,
+        Sfx::ReloadDone,
         Sfx::Footstep,
         Sfx::PlayerHurt,
+        Sfx::Healing,
+        Sfx::SanityCritical,
         Sfx::PickupHealth,
         Sfx::PickupAmmo,
         Sfx::UiClick,
@@ -79,6 +101,8 @@ impl Sfx {
         Sfx::UiBack,
         Sfx::Explosion,
         Sfx::Spawn,
+        Sfx::EliteArrival,
+        Sfx::BossArrival,
         Sfx::ObjectiveDone,
         Sfx::MissionComplete,
         Sfx::MissionFailed,
@@ -109,8 +133,11 @@ impl Sfx {
             Sfx::EnemyDeath => "enemy_death",
             Sfx::Reload => "reload",
             Sfx::ReloadEmpty => "reload_empty",
+            Sfx::ReloadDone => "reload_done",
             Sfx::Footstep => "footstep",
             Sfx::PlayerHurt => "player_hurt",
+            Sfx::Healing => "healing",
+            Sfx::SanityCritical => "sanity_critical",
             Sfx::PickupHealth => "pickup_health",
             Sfx::PickupAmmo => "pickup_ammo",
             Sfx::UiClick => "ui_click",
@@ -118,6 +145,8 @@ impl Sfx {
             Sfx::UiBack => "ui_back",
             Sfx::Explosion => "explosion",
             Sfx::Spawn => "spawn",
+            Sfx::EliteArrival => "elite_arrival",
+            Sfx::BossArrival => "boss_arrival",
             Sfx::ObjectiveDone => "objective_done",
             Sfx::MissionComplete => "mission_complete",
             Sfx::MissionFailed => "mission_failed",
@@ -148,6 +177,17 @@ impl Sfx {
             Sfx::UiBack => Asset::SfxUiBack,
             Sfx::Explosion => Asset::SfxExplosion,
             Sfx::Spawn => Asset::SfxSpawn,
+            Sfx::Healing => Asset::SfxHealing,
+            Sfx::EliteArrival => Asset::SfxEliteArrival,
+            Sfx::BossArrival => Asset::SfxBossArrival,
+            Sfx::SanityCritical => Asset::SfxSanityCritical,
+            Sfx::PickupHealth => Asset::SfxPickupHealth,
+            Sfx::PickupAmmo => Asset::SfxPickupAmmo,
+            Sfx::ObjectiveDone => Asset::SfxObjectiveDone,
+            Sfx::MissionComplete => Asset::SfxMissionComplete,
+            Sfx::MissionFailed => Asset::SfxMissionFailed,
+            // `ReloadDone` has no curated file: it is one of the two effects
+            // still synthesised on purpose, and the recipe below is what plays.
             _ => return None,
         })
     }
@@ -165,11 +205,17 @@ impl Sfx {
             | Sfx::EnemyShot => 0.040,
             Sfx::HitFlesh | Sfx::HitWorld | Sfx::HitHead => 0.025,
             Sfx::Footstep => 0.120,
+            Sfx::ReloadDone => 0.120,
+            // The three event cues are one-shot notices: two of them inside a
+            // few seconds is always a mistake, never a firefight.
+            Sfx::SanityCritical => 2.500,
+            Sfx::EliteArrival | Sfx::BossArrival => 2.000,
             Sfx::UiClick | Sfx::UiMove | Sfx::UiBack => 0.030,
             Sfx::EnemyDeath
             | Sfx::Reload
             | Sfx::ReloadEmpty
             | Sfx::PlayerHurt
+            | Sfx::Healing
             | Sfx::PickupHealth
             | Sfx::PickupAmmo
             | Sfx::Explosion
@@ -296,8 +342,8 @@ pub(crate) fn wav_bytes(sfx: Sfx) -> Vec<u8> {
 /// executable self-contained; the on-disk probe above still wins when present,
 /// so the files remain replaceable.
 #[cfg(feature = "sound")]
-fn embedded(sfx: Sfx) -> Option<(&'static [u8], &'static str)> {
-    Some((crate::assets::bytes(sfx.asset()?), "ogg"))
+fn embedded(sfx: Sfx) -> Option<&'static [u8]> {
+    Some(crate::assets::bytes(sfx.asset()?))
 }
 
 /// Load an override file if there is one, otherwise the synthesised buffer.
@@ -311,8 +357,12 @@ async fn load_effect(sfx: Sfx) -> Option<Sound> {
             return Some(sound);
         }
     }
-    if let Some((bytes, ext)) = embedded(sfx)
-        && container_ok(bytes, ext)
+    // The container is asked of the bytes rather than assumed: an embedded
+    // effect may be an Ogg or a WAV, and the shipped table has both — the first
+    // version of this said "ogg" for every asset, which made every embedded WAV
+    // fail its own check and fall back to the synthesiser without a word.
+    if let Some(bytes) = embedded(sfx)
+        && (wav_ok(bytes) || ogg_ok(bytes))
         && let Ok(sound) = load_sound_from_bytes(bytes).await
     {
         return Some(sound);
@@ -663,6 +713,26 @@ mod synth {
                 t.tone(0.02, 0.20, 0.40, 480.0, 200.0, 0.060);
                 (t, 0.70)
             }
+            Healing => {
+                // The synth fallback: cloth, then the small metal of a cap or a
+                // plunger. The curated file is the real one.
+                let mut t = Track::new(0.55);
+                t.noise(0.00, 0.22, 1.00, 2600.0, 700.0, 0.090);
+                t.tone(0.30, 0.06, 0.45, 900.0, 620.0, 0.020);
+                t.noise(0.32, 0.05, 0.55, 4200.0, 2000.0, 0.016);
+                (t, 0.52)
+            }
+            SanityCritical => {
+                let mut t = Track::new(1.50);
+                // A double heartbeat under a breath that opens upward into a
+                // thin high tone: the body first, then the thing the body is
+                // reacting to.
+                t.tone(0.00, 0.32, 1.00, 58.0, 46.0, 0.130);
+                t.tone(0.30, 0.28, 0.75, 54.0, 44.0, 0.110);
+                t.noise(0.00, 1.10, 0.40, 260.0, 1500.0, 0.420);
+                t.tone(0.35, 0.90, 0.32, 880.0, 1318.5, 0.500);
+                (t, 0.60)
+            }
 
             // --- gear -------------------------------------------------------
             Reload => {
@@ -679,6 +749,15 @@ mod synth {
                 t.noise(0.00, 0.030, 1.00, 6500.0, 4000.0, 0.009);
                 t.tone(0.00, 0.050, 0.50, 1800.0, 1200.0, 0.016);
                 (t, 0.48)
+            }
+            ReloadDone => {
+                let mut t = Track::new(0.24);
+                // The magazine catch, then a short rising pair: metal, then
+                // the weapon saying it is ready again.
+                t.noise(0.00, 0.030, 1.00, 5200.0, 2800.0, 0.008);
+                t.tone(0.00, 0.070, 0.60, 1500.0, 950.0, 0.018);
+                t.tone(0.060, 0.110, 0.50, 700.0, 1120.0, 0.035);
+                (t, 0.55)
             }
             Footstep => {
                 let mut t = Track::new(0.16);
@@ -736,6 +815,30 @@ mod synth {
                 t.noise(0.00, 0.70, 0.55, 200.0, 1800.0, 0.300);
                 (t, 0.55)
             }
+            EliteArrival => {
+                let mut t = Track::new(1.50);
+                // A rise that never resolves into a chord, then one step: the
+                // dread of §19.4-10 rather than a fanfare, because whatever is
+                // arriving is on the other side.
+                t.swell(0.00, 1.00, 0.90, 48.0, 96.0);
+                t.tone(0.55, 0.85, 1.00, 82.0, 41.0, 0.400);
+                t.tone(0.58, 0.80, 0.55, 58.0, 55.0, 0.360);
+                t.noise(0.55, 0.35, 0.45, 600.0, 180.0, 0.120);
+                (t, 0.92)
+            }
+            BossArrival => {
+                let mut t = Track::new(2.30);
+                // The elite cue stretched: a longer descent, a detuned twin
+                // voice to make it beat against itself, and a tritone over the
+                // fundamental — the interval the dread is built out of.
+                t.swell(0.00, 1.60, 0.95, 36.0, 78.0);
+                t.tone(0.90, 1.30, 1.00, 65.0, 32.0, 0.550);
+                t.tone(0.92, 1.20, 0.60, 46.0, 44.0, 0.500);
+                t.tone(1.25, 0.95, 0.45, 92.0, 90.0, 0.420);
+                t.noise(0.90, 0.50, 0.55, 500.0, 150.0, 0.160);
+                t.noise(1.30, 0.80, 0.30, 250.0, 90.0, 0.300);
+                (t, 1.00)
+            }
             ObjectiveDone => {
                 let mut t = Track::new(0.90);
                 t.tone(0.00, 0.35, 1.00, 587.0, 587.0, 0.140);
@@ -760,6 +863,93 @@ mod synth {
                 t.swell(0.00, 1.10, 0.50, 110.0, 82.0);
                 (t, 0.65)
             }
+        }
+    }
+}
+
+/// The table is data, and data can be wrong in ways the compiler cannot see:
+/// an effect added to the enum but not to `ALL` never loads and is simply
+/// silent, and an effect never given a recipe does not compile but one given a
+/// recipe that is all zeroes does. These run on a machine with no sound card,
+/// because nothing here opens a device.
+#[cfg(all(test, feature = "sound"))]
+mod tests {
+    use super::*;
+
+    /// Every variant is in `ALL` exactly once, at the index it is played at.
+    #[test]
+    fn every_effect_is_in_the_table_once() {
+        let mut seen = [false; Sfx::COUNT];
+        for sfx in Sfx::ALL {
+            let i = sfx.index();
+            assert!(i < Sfx::COUNT, "{sfx:?} indexes past the table");
+            assert!(!seen[i], "{sfx:?} is listed twice");
+            seen[i] = true;
+        }
+        assert!(
+            seen.iter().all(|&s| s),
+            "a variant is missing from `Sfx::ALL`, so it would never load"
+        );
+    }
+
+    /// Two effects with one name would share an override file, and whichever
+    /// loaded second would win.
+    #[test]
+    fn file_names_are_distinct() {
+        for (i, a) in Sfx::ALL.iter().enumerate() {
+            for b in &Sfx::ALL[i + 1..] {
+                assert_ne!(
+                    a.file_name(),
+                    b.file_name(),
+                    "{a:?} and {b:?} share an override name"
+                );
+            }
+        }
+    }
+
+    /// Every effect synthesises to a WAV the loader will accept, of the length
+    /// its own header claims, and it is not silence.
+    #[test]
+    fn every_effect_synthesises_to_a_valid_wav() {
+        for sfx in Sfx::ALL {
+            let bytes = wav_bytes(sfx);
+            assert!(wav_ok(&bytes), "{sfx:?} did not produce a RIFF/WAVE file");
+
+            let declared = le_u32(&bytes[40..44]) as usize;
+            assert_eq!(
+                declared + 44,
+                bytes.len(),
+                "{sfx:?} declares a data length it does not have"
+            );
+
+            let loudest = bytes[44..]
+                .chunks_exact(2)
+                .map(|c| i16::from_le_bytes([c[0], c[1]]).unsigned_abs())
+                .max()
+                .unwrap_or(0);
+            assert!(loudest > 0, "{sfx:?} synthesised to silence");
+        }
+    }
+
+    /// Every sound the binary carries is in a container the decoder will take.
+    ///
+    /// The loader is deliberately forgiving — a file it cannot read falls back
+    /// to the synthesiser without saying so — which is what makes a bad file
+    /// here invisible: the game plays *something* either way, and the only way
+    /// to hear the difference is to already know the sound. So the shipped
+    /// bytes are checked here instead, which is also the only place the curated
+    /// files are looked at by the code that has to read them.
+    #[cfg(feature = "sound")]
+    #[test]
+    fn every_embedded_sound_is_in_a_container_the_decoder_accepts() {
+        for sfx in Sfx::ALL {
+            let Some(asset) = sfx.asset() else { continue };
+            let bytes = crate::assets::bytes(asset);
+            assert!(
+                ogg_ok(bytes) || wav_ok(bytes),
+                "{} is not an Ogg or a WAV the decoder will accept",
+                sfx.file_name()
+            );
         }
     }
 }

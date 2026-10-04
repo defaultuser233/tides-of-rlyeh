@@ -77,10 +77,10 @@ struct Wheel {
 
 const GRENADE_KINDS: [GrenadeKind; 2] = [GrenadeKind::Frag, GrenadeKind::Smoke];
 /// (health restored, seconds channelled, count as issued). The third field is
-/// the stash's default count — `Kit::issued` carries the same numbers, and a
+/// the armory's default count — `Kit::issued` carries the same numbers, and a
 /// test pins the two together.
 const MED_KINDS: [(f32, f32, u32); 3] = [(25.0, 1.2, 3), (60.0, 2.5, 1), (35.0, 1.8, 1)];
-/// Spare magazines a sidearm always carries. Not part of the stash, because a
+/// Spare magazines a sidearm always carries. Not part of the armory, because a
 /// pistol with no ammo is not a loadout choice, it is a nuisance.
 const SIDEARM_MAGS: u32 = 2;
 
@@ -143,8 +143,8 @@ impl Settings {
         self,
         unlocked: usize,
         last_mission: usize,
-        builds: [String; 7],
-        paints: [String; 7],
+        builds: [String; weapon::KIND_COUNT],
+        paints: [String; weapon::KIND_COUNT],
     ) -> config::Config {
         config::Config {
             fullscreen: self.fullscreen,
@@ -182,11 +182,11 @@ impl Settings {
 
 /// What the player has made of each weapon kind and how the next mission is
 /// equipped: the builds and finishes, the two long-gun choices, and the spare
-/// magazines and consumables the stash sends along. Weapon arrays are indexed
+/// magazines and consumables the armory sends along. Weapon arrays are indexed
 /// by `WeaponKind::index`.
 struct Kit {
-    builds: [weapon::WeaponBuild; 7],
-    paints: [viewmodel::Paint; 7],
+    builds: [weapon::WeaponBuild; weapon::KIND_COUNT],
+    paints: [viewmodel::Paint; weapon::KIND_COUNT],
     /// The two long-gun slots, chosen in the loadout tab.
     primary: Option<weapon::WeaponKind>,
     secondary: Option<weapon::WeaponKind>,
@@ -215,7 +215,7 @@ impl Kit {
     fn issued() -> Self {
         Self {
             builds: std::array::from_fn(|_| weapon::WeaponBuild::empty()),
-            paints: [viewmodel::Paint::factory(); 7],
+            paints: [viewmodel::Paint::factory(); weapon::KIND_COUNT],
             primary: Some(weapon::WeaponKind::Rifle),
             secondary: None,
             ammo_mags: [4, 0],
@@ -250,11 +250,11 @@ impl Kit {
         kit
     }
 
-    fn build_texts(&self) -> [String; 7] {
+    fn build_texts(&self) -> [String; weapon::KIND_COUNT] {
         std::array::from_fn(|i| self.builds[i].to_text())
     }
 
-    fn paint_texts(&self) -> [String; 7] {
+    fn paint_texts(&self) -> [String; weapon::KIND_COUNT] {
         std::array::from_fn(|i| self.paints[i].to_text())
     }
 
@@ -277,11 +277,24 @@ fn loadout_slot(text: &str, fallback: Option<weapon::WeaponKind>) -> Option<weap
 
 /// The weapon kinds the armory offers: the guns. The knife takes no parts and
 /// is not painted.
-const ARMORY_KINDS: [weapon::WeaponKind; 6] = [
+/// The guns the bench and the loadout offer, in the order they are listed.
+///
+/// A slice rather than an array: the length of this list is the length of two
+/// menus, and a fixed arity meant every added weapon was also a hunt for the
+/// number six.
+const ARMORY_KINDS: &[weapon::WeaponKind] = &[
+    // The issued kit first, in the order it is drawn in.
     weapon::WeaponKind::Rifle,
-    weapon::WeaponKind::Shotgun,
+    weapon::WeaponKind::M4a1,
+    weapon::WeaponKind::Scar,
+    weapon::WeaponKind::Fal,
     weapon::WeaponKind::Smg,
+    weapon::WeaponKind::Mp5,
+    weapon::WeaponKind::Mpx,
+    weapon::WeaponKind::Shotgun,
     weapon::WeaponKind::Sniper,
+    weapon::WeaponKind::M110,
+    weapon::WeaponKind::Mosin,
     weapon::WeaponKind::Lmg,
     weapon::WeaponKind::Pistol,
 ];
@@ -430,12 +443,29 @@ fn fitted_part(build: &weapon::WeaponBuild, slot: weapon::SlotId) -> Option<weap
         .map(|e| e.part)
 }
 
-/// What a slot currently holds, for its row: the part's name, or NONE.
-fn fitted_name(build: &weapon::WeaponBuild, slot: weapon::SlotId) -> String {
+/// What a slot's empty option is called.
+///
+/// For every slot but one that is "none". A magazine well is the exception:
+/// `NONE` there reads as *no magazine at all* rather than as *the one it came
+/// with*, so a bench whose magazine row offers one part and a NONE looks like a
+/// weapon that has one magazine. It is the issued magazine, and it is named by
+/// its capacity — which is also what makes the row read as the two choices it
+/// actually is.
+fn empty_slot_name(kind: weapon::WeaponKind, slot: weapon::SlotId) -> String {
+    if slot != weapon::SlotId("magazine") {
+        return i18n::t(Key::PartNone).to_string();
+    }
+    let rounds = kind.stats().mag_size;
+    i18n::t(Key::PartIssuedMag).replace("{}", &rounds.to_string())
+}
+
+/// What a slot currently holds, for its row: the part's name, or the empty
+/// option's name — see `empty_slot_name`.
+fn fitted_name(kind: weapon::WeaponKind, build: &weapon::WeaponBuild, slot: weapon::SlotId) -> String {
     fitted_part(build, slot)
         .and_then(weapon::part_label)
         .map(|(en, zh)| pick(en, zh).to_string())
-        .unwrap_or_else(|| i18n::t(Key::PartNone).to_string())
+        .unwrap_or_else(|| empty_slot_name(kind, slot))
 }
 
 /// Everything that fits one slot, "none" first and the rest in catalogue
@@ -600,7 +630,7 @@ fn window_calls(want: WindowState, applied: WindowState) -> (Option<bool>, Optio
 /// requests to the OS, while the volume is re-set unconditionally because it is
 /// a field assignment and the audio side is the only other reader.
 /// The whole settings file, from the one place that owns every field in it:
-/// the settings screen, the window mode, the campaign progress and the stash.
+/// the settings screen, the window mode, the campaign progress and the armory.
 fn config_of(game: &Game) -> config::Config {
     let mut config = game.settings.to_config(
         game.unlocked,
@@ -610,7 +640,7 @@ fn config_of(game: &Game) -> config::Config {
     );
     // The scores half of the record.
     config.best = game.best;
-    // The loadout half of the stash.
+    // The loadout half of the armory.
     config.primary = Kit::slot_text(game.kit.primary);
     config.secondary = Kit::slot_text(game.kit.secondary);
     config.primary_mags = game.kit.ammo_mags[0];
@@ -863,9 +893,8 @@ fn manual_after_keys(
 
 /// Where one wave's releases come from.
 struct WaveRelease {
-    /// Points left to spend this wave.
-    budget: u32,
-    /// How many hostiles this wave has released — the floor bookkeeping.
+    /// How many of the roster's hostiles are out — the index into the wave's
+    /// roster, and what the HUD's remaining count reads.
     released: u32,
     /// The entrances this wave uses: a handful of points picked when the wave
     /// opens, so arrivals read as "from the east and the north" — a direction
@@ -951,6 +980,10 @@ struct Game {
     lean_cmd: f32,
     heal_t: f32,
     heal_index: usize,
+    /// Whether the sanity alarm has already sounded for the band the mind is
+    /// in. Cleared with hysteresis, so sitting on the threshold is one notice
+    /// and not a stutter; the timer repeats it while the mind stays down there.
+    sanity_alarm: SanityAlarm,
 
     spawned: u32,
     killed: u32,
@@ -968,6 +1001,11 @@ struct Game {
     /// reference §19.2 insists on, so an elite cannot arrive two waves in a
     /// row.
     last_elite_wave: Option<u32>,
+    /// Every wave's roster, drawn when the mission starts
+    /// (`campaign::wave_roster`). The spawner releases out of it instead of
+    /// drawing at release time, which is what lets the HUD say how many
+    /// hostiles the mission still owes rather than guessing from points.
+    wave_rosters: Vec<Vec<EnemyKind>>,
     /// This mission's saved best score, and whether the run that just ended
     /// beat it. Filled in by `settle_score`, read by the result screen.
     result_best: u32,
@@ -988,6 +1026,10 @@ struct Game {
 
     banner: Option<(String, f32)>,
     toast: Option<(String, f32)>,
+    /// Seconds before a held trigger on an empty magazine reports itself again.
+    /// The trigger is a level, not an edge, so without this the line and the dry
+    /// click would either fire once and stop or fire sixty times a second.
+    dry_t: f32,
     unlocked: usize,
     /// The mission the player is in, mirrored into the settings file so that
     /// `continue` can put them back here.
@@ -1095,6 +1137,7 @@ impl Game {
             lean_cmd: 0.0,
             heal_t: 0.0,
             heal_index: 0,
+            sanity_alarm: SanityAlarm::default(),
             spawned: 0,
             killed: 0,
             score: 0,
@@ -1105,6 +1148,7 @@ impl Game {
             waves_done: 0,
             wave_phase: WavePhase::Finished,
             last_elite_wave: None,
+            wave_rosters: Vec::new(),
             result_best: 0,
             result_new_best: false,
             mote_t: 0.0,
@@ -1116,6 +1160,7 @@ impl Game {
             hitstop: 0.0,
             banner: None,
             toast: None,
+            dry_t: 0.0,
             // Clamped here rather than trusted: the file is hand-editable and
             // the campaign is shorter than the file's range allows.
             unlocked: unlocked.clamp(1, campaign::count()),
@@ -1163,19 +1208,19 @@ impl Game {
         self.player.alive = true;
         self.arsenal =
             Arsenal::with_builds([self.kit.primary, self.kit.secondary], &self.kit.builds);
-        // Stock what the stash packed: each long gun's reserve is its spare
-        // magazines, the sidearm always carries two magazines' worth, and the
-        // consumables count out of the kit.
+        // Stock what the armory packed: each long gun goes in with its spare
+        // magazines, the sidearm with the two it always carries, and the
+        // consumables count out of the kit. A magazine is a container with its
+        // own rounds from here on — packing is a count of magazines, not a
+        // count of rounds.
         for slot in 0..2 {
             let mags = self.kit.ammo_mags[slot];
             if let Some(w) = self.arsenal.slot_mut(slot) {
-                let mag_size = w.stats().mag_size;
-                w.reserve = mags * mag_size;
+                w.pack_magazines(mags as usize);
             }
         }
         if let Some(w) = self.arsenal.slot_mut(2) {
-            let mag_size = w.stats().mag_size;
-            w.reserve = SIDEARM_MAGS * mag_size;
+            w.pack_magazines(SIDEARM_MAGS as usize);
         }
         self.grenades = Grenades::new();
         self.enemies.clear();
@@ -1183,7 +1228,7 @@ impl Game {
         self.effects.clear();
         self.armor = 0.0;
         self.stance = Stance::Stand;
-        // You go in with what the stash packed; there is no resupply.
+        // You go in with what the armory packed; there is no resupply.
         self.ammo_grenades = self.kit.grenades;
         self.ammo_meds = self.kit.meds;
         self.wheel = None;
@@ -1193,6 +1238,7 @@ impl Game {
         self.sprint = false;
         self.lean_cmd = 0.0;
         self.heal_t = 0.0;
+        self.sanity_alarm = SanityAlarm::default();
         self.overlay = Overlay::None;
         self.manual_page = 0;
         self.manual_cache = None;
@@ -1203,14 +1249,29 @@ impl Game {
         self.shots_fired = 0;
         self.shots_hit = 0;
         self.elapsed = 0.0;
-        // The first wave is a prep window like any other: the map-name banner
-        // owns its opening seconds and then the countdown takes over.
+        // The first wave gets a beat, not a window: see `MISSION_OPEN_GAP`.
         self.spawn_timer = 0.0;
         self.waves_done = 0;
         self.wave_phase = WavePhase::Prep {
-            left: wave_gap(self.mission),
+            left: MISSION_OPEN_GAP,
         };
         self.last_elite_wave = None;
+        // The whole mission's rosters, drawn now rather than a release at a
+        // time: the HUD's hostile count is only exact if the bodies are already
+        // decided (`campaign::wave_roster`).
+        let mission = self.mission;
+        let mut last_elite = None;
+        let mut rosters = Vec::with_capacity(mission.waves as usize);
+        for wave in 0..mission.waves {
+            let mut rolls = || self.rng.u32();
+            rosters.push(campaign::wave_roster(
+                mission,
+                wave,
+                &mut rolls,
+                &mut last_elite,
+            ));
+        }
+        self.wave_rosters = rosters;
         self.result_best = self.best[self.mission_index];
         self.result_new_best = false;
         self.mote_t = 0.0;
@@ -1244,22 +1305,24 @@ impl Game {
         self.enemies.iter().filter(|e| !e.dead).count()
     }
 
-    /// Hostiles the mission still owes the field: everyone alive, plus a
-    /// rough count of the points still to be released — this wave's unspent
-    /// budget, or the next wave's whole budget while a prep window runs.
-    /// Points are not bodies, so the average roll is the divisor and the
-    /// number is an estimate by construction; rounding up keeps it from ever
-    /// reading zero while something is still coming.
+    /// Hostiles the mission still owes the field: everyone standing, plus
+    /// everyone the rosters have not released yet.
+    ///
+    /// Exact, because `wave_rosters` was drawn when the mission started. This
+    /// used to divide the *current* wave's points by an average cost, which
+    /// read as a per-wave count and made the panel useless for the one thing
+    /// the player wants it for: how much of the mission is left.
     fn remaining(&self) -> u32 {
-        let points = match &self.wave_phase {
-            WavePhase::Prep { .. } => {
-                campaign::wave_budget(self.mission, self.waves_done.min(self.mission.waves - 1))
-            }
-            WavePhase::Release(rel) => rel.budget,
-            WavePhase::Clear | WavePhase::Finished => 0,
+        let out = match &self.wave_phase {
+            WavePhase::Release(rel) => rel.released,
+            // A clear window means the wave is out in full.
+            WavePhase::Clear => self
+                .wave_rosters
+                .get(self.waves_done as usize)
+                .map_or(0, |roster| roster.len() as u32),
+            WavePhase::Prep { .. } | WavePhase::Finished => 0,
         };
-        let per = campaign::mean_cost(self.mission).max(1.0);
-        self.alive_enemies() as u32 + (points as f32 / per).ceil() as u32
+        self.alive_enemies() as u32 + unreleased(&self.wave_rosters, self.waves_done, out)
     }
 
     /// The wave number to show the player, one-based: the wave in progress
@@ -1295,20 +1358,11 @@ impl Game {
                 if is_key_pressed(KeyCode::F) {
                     left = 0.0;
                 }
-                // The mission's first prep starts behind the map-name banner;
-                // once that leaves, the countdown banner takes the slot.
-                let gap = wave_gap(self.mission);
-                if left <= gap - 2.6 && self.banner.is_none() {
-                    self.banner = Some((
-                        format!(
-                            "{} {} / {}",
-                            i18n::t(Key::Wave),
-                            self.waves_done + 1,
-                            self.mission.waves
-                        ),
-                        left.max(0.3),
-                    ));
-                }
+                // No countdown banner: the wave clock is not allowed to take
+                // the middle of the screen while the player is fighting, and it
+                // is not the HUD's business either — the arrivals announce
+                // themselves, and the field going quiet is the other half of
+                // the signal.
                 if left <= 0.0 {
                     self.begin_wave()
                 } else {
@@ -1320,7 +1374,11 @@ impl Game {
                 if self.alive_enemies() < self.mission.max_alive as usize && self.spawn_timer <= 0.0
                 {
                     if self.release_one(&mut rel, audio) {
-                        self.spawn_timer = (1.9 - 0.06 * self.mission.difficulty).max(0.7);
+                        // A wave arrives as a group rather than a trickle. The
+                        // gap used to be nearly two seconds, so a four-hostile
+                        // wave took seven seconds to assemble and read as a
+                        // series of single arrivals rather than as a push.
+                        self.spawn_timer = (1.05 - 0.04 * self.mission.difficulty).max(0.45);
                         WavePhase::Release(rel)
                     } else if self.alive_enemies() == 0 {
                         // The last release is already down: no clear needed.
@@ -1347,19 +1405,16 @@ impl Game {
     /// Opens the next wave: the reset, the entrances it will use, and the
     /// first release's delay.
     fn begin_wave(&mut self) -> WavePhase {
-        let mission = self.mission;
-        let wave = self.waves_done;
         // §19.4-5: a wave starts as a clean duel. Health and breath come
         // back, so the deaths this buys are deaths of position and decision,
         // not of the last wave's leftovers. Ammunition is deliberately *not*
-        // refilled — that economy is the stash's — and neither are armour or
+        // refilled — that economy is the armory's — and neither are armour or
         // sanity: those are things the arena is allowed to take from you.
         self.player.wave_reset();
         self.heal_t = 0.0;
         self.spawn_timer = 0.45;
         let points = spawn_set(&self.level, &self.player, &mut self.rng, WAVE_ENTRANCES);
         WavePhase::Release(WaveRelease {
-            budget: campaign::wave_budget(mission, wave),
             released: 0,
             points,
             cursor: 0,
@@ -1368,47 +1423,55 @@ impl Game {
 
     /// Closes the wave that just ended: a prep window for the next one, or
     /// `Finished` if that was the last.
+    ///
+    /// The window is silent and invisible on purpose. It used to draw a wave
+    /// banner and a "call the next wave early" prompt in the middle of the
+    /// screen, which is the one place a firefight cannot spare — and the wave
+    /// number is in the HUD and the mission panel for anyone who wants it. `F`
+    /// still works, and the manual still documents it.
     fn finish_wave(&mut self) -> WavePhase {
         self.waves_done += 1;
         if self.waves_done >= self.mission.waves {
             return WavePhase::Finished;
         }
-        let gap = wave_gap(self.mission);
-        if !matches!(self.mission.objective, Objective::Survive) {
-            self.say(i18n::t(Key::WaveEarly));
+        WavePhase::Prep {
+            left: wave_gap(self.mission),
         }
-        self.banner = Some((
-            format!(
-                "{} {} / {}",
-                i18n::t(Key::Wave),
-                self.waves_done + 1,
-                self.mission.waves
-            ),
-            gap,
-        ));
-        WavePhase::Prep { left: gap }
     }
 
-    /// Releases one hostile for the current wave, if the wave's remaining
-    /// points still afford one. `false` means the budget is spent.
+    /// Releases the next hostile of the current wave's roster. `false` means
+    /// the roster is spent — the wave is out.
+    ///
+    /// The kind is not drawn here any more; it was drawn when the mission
+    /// started (`campaign::wave_roster`). This is the release arm of that, and
+    /// it is why the HUD's hostile count is a count and not an estimate.
     fn release_one(&mut self, rel: &mut WaveRelease, audio: &audio::Audio) -> bool {
         let mission = self.mission;
         let wave = self.waves_done;
-        let floor_left = campaign::WAVE_FLOOR.saturating_sub(rel.released);
-        let elite_ready = self.last_elite_wave.is_none_or(|l| wave >= l + 2);
-        let kind = {
-            let mut rolls = || self.rng.u32();
-            campaign::draw_kind(mission, &mut rolls, rel.budget, floor_left, elite_ready)
-        };
+        let kind = self
+            .wave_rosters
+            .get(wave as usize)
+            .and_then(|roster| roster.get(rel.released as usize))
+            .copied();
         let Some(kind) = kind else {
             return false;
         };
-        rel.budget -= campaign::cost(kind);
         rel.released += 1;
         if campaign::is_elite(kind) {
             self.last_elite_wave = Some(wave);
             // You should know something enormous has arrived before it sees you.
             self.banner = Some((i18n::t(Key::ColossusStirs).to_string(), 2.6));
+            // §19.4-10: the arrival is also an event with a sound of its own,
+            // at full volume and not by distance, because the player may be
+            // looking the other way. The last wave's elite is the mission's
+            // climax rather than a spike in the middle of it, so it gets the
+            // heavier of the two cues.
+            let cue = if campaign::is_final_wave(mission, wave) {
+                Sfx::BossArrival
+            } else {
+                Sfx::EliteArrival
+            };
+            audio.play(cue);
         }
         let pos = wave_point(rel, &self.player);
         let mut e = Enemy::spawn(
@@ -1476,7 +1539,7 @@ impl Game {
             i18n::t(Key::Healing),
             i18n::t(med_key(index))
         ));
-        audio.play(Sfx::Reload);
+        audio.play(Sfx::Healing);
     }
 
     fn throw_grenade(&mut self, index: usize, audio: &audio::Audio) {
@@ -1560,6 +1623,11 @@ const HITSTOP_SCALE: f32 = 0.25;
 /// half the screen. The player's own shots start at the eye, and an enemy shot
 /// that connects ends at it, so both ends have to be pushed out by this much.
 const TRACER_NEAR: f32 = 0.55;
+
+/// How often a trigger held down on an empty magazine reports itself, in
+/// seconds. Long enough to read as a line rather than a flicker, short enough
+/// that the player holding it keeps being told.
+const DRY_REPORT: f32 = 0.55;
 
 /// Whether the player is sprinting this frame.
 ///
@@ -1842,9 +1910,9 @@ mod tests {
         };
         // The armory rides the same conversion: one touched weapon proves the
         // strings are carried through untouched.
-        let mut builds: [String; 7] = std::array::from_fn(|_| String::new());
+        let mut builds: [String; weapon::KIND_COUNT] = std::array::from_fn(|_| String::new());
         builds[0] = "optic=micro_dot@0.50,muzzle=compensator@0.25".to_string();
-        let mut paints: [String; 7] = std::array::from_fn(|_| String::new());
+        let mut paints: [String; weapon::KIND_COUNT] = std::array::from_fn(|_| String::new());
         paints[0] = "abyss@0.32:481516".to_string();
         let config = live.to_config(3, 2, builds, paints);
         // The armory rides the same conversion: one touched weapon proves the
@@ -2068,7 +2136,7 @@ mod tests {
         );
     }
 
-    /// The loadout survives the stash: the file's text parses back into the
+    /// The loadout survives the armory: the file's text parses back into the
     /// same choices, `none` means none, and a kind this build does not know
     /// falls back to what the slot held rather than dropping it.
     #[test]
@@ -2125,7 +2193,7 @@ mod tests {
     }
 
     /// The loadout slots walk "none" and the six guns, wrapping both ways; a
-    /// kind the stash does not offer lands at the front of the walk.
+    /// kind the armory does not offer lands at the front of the walk.
     #[test]
     fn the_kind_choice_walks_none_and_every_gun() {
         use weapon::WeaponKind;
@@ -2251,14 +2319,18 @@ mod tests {
         );
     }
 
-    /// A roll is what makes two copies of a ranged part differ, so a part
-    /// arriving in a slot draws one — but the copy already there keeps the roll
-    /// it has, or the bench could be clicked twice to reroll it.
+    /// A part arriving in a slot draws a number, and the copy already there
+    /// keeps the one it has — or the bench could be clicked twice to reroll it.
+    ///
+    /// The number only *means* something for a part whose spec is a range, and
+    /// the shipping magazines are static capacities; the contract is still the
+    /// bench's, so it is still pinned. The rifle's two magazines stand in for
+    /// any two parts here.
     #[test]
     fn reseating_the_same_part_is_not_a_reroll() {
         let slot = weapon::SlotId("magazine");
-        let lot = part_id("surplus_lot").expect("the surplus lot is in the catalogue");
-        let other = part_id("extended_mag").expect("the extended mag is in the catalogue");
+        let lot = part_id("mag_60_556").expect("the rifle's 60 is in the catalogue");
+        let other = part_id("mag_10_762").expect("the marksman's 10 is in the catalogue");
         let mut rng = Rng::new(7);
         let build = seated(&weapon::WeaponBuild::empty(), slot, Some(lot), 0.31);
 
@@ -2273,6 +2345,101 @@ mod tests {
             0.0,
             "emptying a slot has no number to roll"
         );
+    }
+
+    /// The sanity alarm says it once when the mind crosses into the band, and
+    /// keeps saying it while the mind stays there — but at its own gap, which is
+    /// the difference between a warning and a drone.
+    #[test]
+    fn the_sanity_alarm_fires_on_the_crossing_and_repeats_while_it_lasts() {
+        let mut alarm = SanityAlarm::default();
+        let frame = 1.0 / 60.0;
+
+        // Healthy: silence, however long it holds.
+        for _ in 0..600 {
+            assert!(
+                !alarm.update(0.8, frame),
+                "the alarm sounded at full sanity"
+            );
+        }
+
+        assert!(
+            alarm.update(CRITICAL_SANITY, frame),
+            "the crossing was silent"
+        );
+
+        // Counted from the crossing: fifteen seconds of a mind at 0.1 has to be
+        // two repeats at the gap — not a stream, and not silence.
+        let mut sounded_at = Vec::new();
+        for frame_no in 1..=900u32 {
+            if alarm.update(0.1, frame) {
+                sounded_at.push(frame_no as f32 * frame);
+            }
+        }
+        assert_eq!(
+            sounded_at.len(),
+            2,
+            "repeats at {sounded_at:?}, expected two"
+        );
+        for (i, at) in sounded_at.iter().enumerate() {
+            let want = SANITY_ALARM_GAP * (i + 1) as f32;
+            assert!(
+                (at - want).abs() < frame * 2.0,
+                "a repeat at {at} s, where the gap puts it at {want} s"
+            );
+        }
+    }
+
+    /// Leaving the band re-arms it; hovering between the two thresholds does
+    /// not. Otherwise a player who never quite recovers is warned once and then
+    /// never again.
+    #[test]
+    fn the_sanity_alarm_re_arms_only_above_the_clear_ratio() {
+        let mut alarm = SanityAlarm::default();
+        let frame = 1.0 / 60.0;
+
+        assert!(alarm.update(0.10, frame));
+        assert!(alarm.sounding, "the crossing did not latch");
+
+        // Between the thresholds the mind is still down there: the latch holds,
+        // so a later descent is not announced as though it were new.
+        assert!(!alarm.update(SANITY_ALARM_CLEAR, frame));
+        assert!(alarm.sounding, "hovering on the line re-armed the alarm");
+
+        // Clear of the band, the latch drops...
+        assert!(!alarm.update(0.90, frame));
+        assert!(!alarm.sounding, "climbing clear left the alarm latched");
+
+        // ...and falling back through is a new crossing, told again.
+        assert!(alarm.update(0.10, frame), "the second crossing was silent");
+    }
+
+    /// The objective panel's hostile count is un-released bodies plus the ones
+    /// standing, and un-released has to walk the rosters down exactly: the left
+    /// panel used to divide the current wave's points by an average cost, which
+    /// showed a per-wave number in a place that reads as the whole mission.
+    #[test]
+    fn the_remaining_count_walks_the_rosters_down() {
+        let rosters = vec![
+            vec![EnemyKind::Grunt, EnemyKind::Grunt],
+            vec![EnemyKind::Heavy, EnemyKind::Grunt, EnemyKind::Rusher],
+        ];
+        let total: u32 = rosters.iter().map(|r| r.len() as u32).sum();
+
+        // Before a shot: everything is owed.
+        assert_eq!(unreleased(&rosters, 0, 0), total);
+        // Mid-wave: what is out is no longer pending.
+        assert_eq!(unreleased(&rosters, 0, 1), total - 1);
+        // The wave is out in full and only the clear window is left.
+        assert_eq!(unreleased(&rosters, 0, 2), total - 2);
+        // A prep window for the second wave: the first is out, the second is not.
+        assert_eq!(unreleased(&rosters, 1, 0), 3);
+        // The last wave, all of it released.
+        assert_eq!(unreleased(&rosters, 1, 3), 0);
+        // Past the last wave, and an out-of-range release count: nothing, never
+        // a negative.
+        assert_eq!(unreleased(&rosters, 2, 0), 0);
+        assert_eq!(unreleased(&rosters, 1, 9), 0);
     }
 }
 
@@ -2756,6 +2923,29 @@ fn wave_point(rel: &mut WaveRelease, player: &Player) -> Vec3 {
         .unwrap_or(player.pos)
 }
 
+/// Hostiles in the rosters that have not been released yet.
+///
+/// Every wave before `waves_done` is out in full, the one in progress has `out`
+/// of its roster on the field (or in the ground), and the waves after it are
+/// untouched. This is the half of the HUD's hostile count that is not bodies
+/// yet — and because the rosters were drawn at mission start, it is a count and
+/// not an estimate.
+fn unreleased(rosters: &[Vec<EnemyKind>], waves_done: u32, out: u32) -> u32 {
+    let mut pending = 0;
+    for (i, roster) in rosters.iter().enumerate() {
+        let wave = i as u32;
+        let released = if wave < waves_done {
+            roster.len() as u32
+        } else if wave == waves_done {
+            out
+        } else {
+            0
+        };
+        pending += (roster.len() as u32).saturating_sub(released);
+    }
+    pending
+}
+
 /// The window between a wave's last kill and the next wave's first release.
 ///
 /// The reference suggests 45–60 s after KF2, where the window is a shop
@@ -2766,10 +2956,20 @@ fn wave_point(rel: &mut WaveRelease, player: &Player) -> Vec3 {
 /// six windows over two minutes must not eat the mission.
 fn wave_gap(mission: &Mission) -> f32 {
     match mission.objective {
-        Objective::Survive => 4.0,
-        _ => 12.0,
+        Objective::Survive => 3.0,
+        _ => 6.0,
     }
 }
+
+/// The window before a mission's *first* wave, in seconds.
+///
+/// This used to be `wave_gap` like any other, which meant a mission opened with
+/// twelve seconds of empty arena — long enough to walk most of RUST YARD, find
+/// nothing, and conclude that nothing was coming. It is a beat to orient in now:
+/// long enough for the map-name banner to be read and the weapon to be checked,
+/// short enough that the first hostile arrives while the player is still looking
+/// for one.
+const MISSION_OPEN_GAP: f32 = 2.5;
 
 /// The mission's threat multipliers, exactly as `Enemy::spawn` applies them
 /// to every hostile of the wave in progress: damage and attack rate at that
@@ -3235,7 +3435,7 @@ async fn main() {
                             let name = weapon::slot_label(slot.id)
                                 .map(|(en, zh)| pick(en, zh))
                                 .unwrap_or(slot.id.0);
-                            rows.push(format!("{name}  {}", fitted_name(&build, slot.id)));
+                            rows.push(format!("{name}  {}", fitted_name(shown, &build, slot.id)));
                         }
                     }
                     1 => {
@@ -3464,6 +3664,9 @@ async fn main() {
                         ""
                     };
                     let held = focus_slot.and_then(|slot| fitted_part(&build, slot));
+                    // The empty option's name, borrowed by the labels below; see
+                    // `empty_slot_name` for why a magazine well does not say NONE.
+                    let empty = focus_slot.map(|slot| empty_slot_name(shown, slot));
                     let parts: Vec<hud::ArmoryPart> = choices
                         .iter()
                         .map(|c| hud::ArmoryPart {
@@ -3471,7 +3674,7 @@ async fn main() {
                                 Some(id) => weapon::part_label(*id)
                                     .map(|(en, zh)| pick(en, zh))
                                     .unwrap_or(id.0),
-                                None => i18n::t(Key::PartNone),
+                                None => empty.as_deref().unwrap_or(i18n::t(Key::PartNone)),
                             },
                             fitted: *c == held,
                         })
@@ -4136,13 +4339,13 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
     if !alive {
         game.lean_cmd = 0.0;
     } else if game.settings.lean_toggle {
+        // Leaning is silent on purpose: it is a thing the player does dozens of
+        // times a firefight, and a blip on every tap is clutter, not feedback.
         if is_key_pressed(KeyCode::Q) {
             game.lean_cmd = if game.lean_cmd < -0.5 { 0.0 } else { -1.0 };
-            audio.play(Sfx::UiMove);
         }
         if is_key_pressed(KeyCode::E) {
             game.lean_cmd = if game.lean_cmd > 0.5 { 0.0 } else { 1.0 };
-            audio.play(Sfx::UiMove);
         }
     } else {
         game.lean_cmd = (is_key_down(KeyCode::E) as i32 - is_key_down(KeyCode::Q) as i32) as f32;
@@ -4228,7 +4431,7 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
     if alive && is_key_pressed(KeyCode::T) && alt {
         let key = game.arsenal.active_weapon().mag_estimate();
         let rounds = game.arsenal.active_weapon().mag;
-        game.arsenal.active_weapon_mut().mag_check_t = 2.2;
+        game.arsenal.active_weapon_mut().mag_check_t = weapon::MAG_CHECK_TIME;
         game.say(format!(
             "{}: {} ({})",
             i18n::t(Key::CheckingMag),
@@ -4237,7 +4440,9 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
         ));
         audio.play(Sfx::ReloadEmpty);
     }
-    if alive && is_key_pressed(KeyCode::U) {
+    if alive && is_key_pressed(KeyCode::U) && !game.player.sprinting {
+        // A weapon is not turned over in the hands mid-sprint. Walking is fine,
+        // which is what the spec asks for and what a person would do.
         game.arsenal.active_weapon_mut().start_inspect();
     }
 
@@ -4333,6 +4538,7 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
     if !is_mouse_button_down(MouseButton::Left) {
         game.trigger_armed = true;
     }
+    game.dry_t = (game.dry_t - dt).max(0.0);
     let held = is_mouse_button_down(MouseButton::Left) && game.trigger_armed;
     let pressed = is_mouse_button_pressed(MouseButton::Left) && game.trigger_armed;
     let melee = game.arsenal.active_weapon().stats().melee;
@@ -4356,17 +4562,63 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
                     _ => Sfx::ShotShotgun,
                 });
             }
-        } else if pressed {
-            audio.play(Sfx::ReloadEmpty);
-            game.arsenal.active_weapon_mut().start_reload();
+        } else {
+            // The trigger is down with nothing in the magazine. That is a level
+            // rather than an edge — the last round of a magazine leaves the
+            // button held — so this used to need a fresh press to do anything at
+            // all, and holding the trigger through the end of a burst produced a
+            // click, no reload and no line. That is the shape "there is no prompt
+            // when the gun runs dry" had.
+            let (started, reloading) = {
+                let w = game.arsenal.active_weapon_mut();
+                let reloading = w.is_reloading();
+                (w.start_reload(), reloading)
+            };
+            if started {
+                // A spare is on its way: say which of the two positions the
+                // player is in, and let the reload run.
+                audio.play(Sfx::ReloadEmpty);
+                game.say(i18n::t(Key::MagEmpty));
+                game.dry_t = DRY_REPORT;
+            } else if !reloading && game.dry_t <= 0.0 {
+                // Nothing behind the magazine either. A reload already under way
+                // is ammunition on its way rather than the end of it, so it is
+                // the one case that says nothing. Reported on a slow clock so a
+                // held trigger reads as an empty gun and not as a stuck message,
+                // and so the click is not a machine gun of its own.
+                audio.play(Sfx::ReloadEmpty);
+                game.say(i18n::t(Key::NoSpareAmmo));
+                game.dry_t = DRY_REPORT;
+            }
         }
     }
 
-    if alive && is_key_pressed(KeyCode::R) && game.arsenal.active_weapon_mut().start_reload() {
-        audio.play(Sfx::Reload);
+    if alive && is_key_pressed(KeyCode::R) {
+        // `R` on a magazine that is already full is a no-op rather than an
+        // error, so the only reload with something to report is the one that
+        // cannot find a round to put in the gun.
+        let dry = {
+            let w = game.arsenal.active_weapon_mut();
+            if w.start_reload() {
+                audio.play(Sfx::Reload);
+                false
+            } else {
+                let s = w.stats();
+                !s.melee && !w.is_reloading() && w.mag < s.mag_size
+            }
+        };
+        if dry {
+            game.say(i18n::t(Key::NoSpareAmmo));
+        }
     }
 
     game.arsenal.update(dt);
+    // §19.4-10: the other half of the reload. `Reload` says one has started;
+    // this is the frame the magazine is seated and the weapon is live again,
+    // which is the moment the player can come back out of cover.
+    if game.arsenal.active_weapon_mut().take_reload_done() {
+        audio.play(Sfx::ReloadDone);
+    }
     // The viewmodel's sway was tuned against `mouse_delta_position`'s
     // normalised scale, so convert back before handing it over.
     let sway_delta = delta * 2.0 / screen_width().max(1.0);
@@ -4504,6 +4756,14 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
         game.player.sanity = (game.player.sanity + 4.0 * dt).min(100.0);
     }
 
+    // §19.4-10: the mind crossing into the critical band is an event with a
+    // sound. It fires once on the crossing and then repeats while the mind
+    // stays there, because the first notice is easy to lose under a firefight
+    // and the state it warns about lasts.
+    if alive && game.sanity_alarm.update(game.player.sanity_ratio(), dt) {
+        audio.play(Sfx::SanityCritical);
+    }
+
     let blasts = game
         .grenades
         .update(dt, &mut game.level, &mut game.effects, &mut game.rng);
@@ -4588,10 +4848,10 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
             }
             PickupKind::Ammo => {
                 // `add_ammo` reports the rounds that actually fit. Taking none
-                // of them — a full magazine, or a weapon that never consumes
+                // of them — every magazine full, or a weapon that never consumes
                 // ammunition — used to still play the sting and delete the
-                // crate, quietly destroying its contents. There is no reserve
-                // pool to put them in, so the crate stays where it is.
+                // crate, quietly destroying its contents. There is nowhere to
+                // put them, so the crate stays where it is.
                 let rounds = game.arsenal.active_weapon_mut().add_ammo(amount as u32);
                 if rounds == 0 {
                     game.say(i18n::t(Key::AmmoFull));
@@ -4824,6 +5084,48 @@ fn draw_damage_numbers(game: &mut Game, fonts: &hud::Fonts, view_proj: &Mat4) {
 const CRITICAL_HEALTH: f32 = 30.0;
 const CRITICAL_SANITY: f32 = 0.25;
 
+/// How long the sanity alarm waits before repeating while the mind stays in
+/// the critical band. Long enough to be a notice rather than a drone, short
+/// enough that a firefight cannot swallow it whole.
+const SANITY_ALARM_GAP: f32 = 6.0;
+
+/// The ratio the alarm re-arms at, above `CRITICAL_SANITY`. Climbing back into
+/// the band after leaving it is a new warning; hovering on the line is not.
+const SANITY_ALARM_CLEAR: f32 = 0.35;
+
+/// The sanity alarm as a state rather than a comparison, so that "has it
+/// already said this?" is answered in one place and can be tested on its own.
+/// `update` returns whether to sound the cue on this frame.
+#[derive(Default)]
+struct SanityAlarm {
+    /// Whether the alarm has already fired for the band the mind is in.
+    sounding: bool,
+    timer: f32,
+}
+
+impl SanityAlarm {
+    fn update(&mut self, ratio: f32, dt: f32) -> bool {
+        if ratio > SANITY_ALARM_CLEAR {
+            self.sounding = false;
+            return false;
+        }
+        if !self.sounding {
+            if ratio > CRITICAL_SANITY {
+                return false;
+            }
+            self.sounding = true;
+            self.timer = SANITY_ALARM_GAP;
+            return true;
+        }
+        self.timer -= dt;
+        if self.timer <= 0.0 {
+            self.timer = SANITY_ALARM_GAP;
+            return true;
+        }
+        false
+    }
+}
+
 /// The most the world grade takes out, at zero health or sanity: half the
 /// colour, so even the worst state stays readable.
 const CRITICAL_DESATURATION: f32 = 0.5;
@@ -4950,6 +5252,13 @@ fn render_world(game: &mut Game, fonts: &hud::Fonts) {
         game.viewmodel
             .draw(&game.player, &game.arsenal, &game.kit.paints);
     }
+    // The sight goes over the weapon, because by this point the weapon's own
+    // scope is the thing it is replacing. `draw_scope_overlay` ignores anything
+    // short of a sniper with the sights up, so this is cheap for every other
+    // gun in the game.
+    if game.player.alive && game.arsenal.active_weapon().kind == WeaponKind::Sniper {
+        hud::draw_scope_overlay(game.player.ads);
+    }
     draw_damage_numbers(game, fonts, &view_proj);
     draw_hud_state(game, fonts);
     draw_wheel_overlay(game, fonts);
@@ -5044,8 +5353,6 @@ fn draw_hud_state(game: &Game, fonts: &hud::Fonts) {
         kills: game.killed,
         elapsed: game.elapsed,
         enemies_left: game.remaining() as usize,
-        wave: game.wave_display(),
-        waves: game.mission.waves,
         objective,
         objective_sub: if game.extraction_open {
             i18n::t(Key::ObjReach)
@@ -5055,7 +5362,10 @@ fn draw_hud_state(game: &Game, fonts: &hud::Fonts) {
         weapon_name: i18n::t(weapon.kind.name()),
         mag: weapon.mag,
         mag_size: weapon.stats().mag_size,
-        reserve: (!weapon.stats().infinite_ammo && !weapon.stats().melee).then_some(weapon.reserve),
+        reserve: (!weapon.stats().infinite_ammo && !weapon.stats().melee)
+            .then_some(weapon.reserve()),
+        magazines: (!weapon.stats().infinite_ammo && !weapon.stats().melee)
+            .then_some(weapon.magazine_count()),
         reload_progress: if weapon.is_reloading() {
             Some(weapon.reload_progress())
         } else {
@@ -5067,6 +5377,8 @@ fn draw_hud_state(game: &Game, fonts: &hud::Fonts) {
             game.player.ads,
             game.player.spread_scale(),
         ),
+        scoped: weapon.kind == WeaponKind::Sniper
+            && game.player.ads >= viewmodel::SCOPE_HIDE_ADS,
         hit_marker: game.effects.hit_marker,
         headshot_marker: game.effects.head_marker,
         hurt: game.player.hurt_flash,
@@ -5202,10 +5514,6 @@ fn draw_mission_overlay(game: &Game, fonts: &hud::Fonts) {
         hud::PanelRow {
             label: i18n::t(Key::Objective),
             value: objective,
-        },
-        hud::PanelRow {
-            label: i18n::t(Key::Wave),
-            value: format!("{} / {}", game.wave_display(), game.mission.waves),
         },
         hud::PanelRow {
             label: i18n::t(Key::Threat),

@@ -398,6 +398,13 @@ fn weapon_keys(kind: WeaponKind) -> (Key, Key) {
         WeaponKind::Lmg => (Key::CodexLmgTag, Key::CodexLmgNote),
         WeaponKind::Pistol => (Key::CodexPistolTag, Key::CodexPistolNote),
         WeaponKind::Knife => (Key::CodexKnifeTag, Key::CodexKnifeNote),
+        WeaponKind::M4a1 => (Key::CodexM4a1Tag, Key::CodexM4a1Note),
+        WeaponKind::Scar => (Key::CodexScarTag, Key::CodexScarNote),
+        WeaponKind::Fal => (Key::CodexFalTag, Key::CodexFalNote),
+        WeaponKind::Mp5 => (Key::CodexMp5Tag, Key::CodexMp5Note),
+        WeaponKind::Mpx => (Key::CodexMpxTag, Key::CodexMpxNote),
+        WeaponKind::M110 => (Key::CodexM110Tag, Key::CodexM110Note),
+        WeaponKind::Mosin => (Key::CodexMosinTag, Key::CodexMosinNote),
     }
 }
 
@@ -575,7 +582,6 @@ mod tests {
     fn the_armoury_has_one_card_for_every_weapon() {
         let rows = weapons();
         assert_eq!(rows.len(), weapon::ALL_KINDS.len());
-        assert_eq!(rows.len(), 7);
         for (i, &kind) in weapon::ALL_KINDS.iter().enumerate() {
             let s = kind.stats();
             let row = &rows[i];

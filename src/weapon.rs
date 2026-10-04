@@ -4,6 +4,22 @@ use macroquad::prelude::*;
 
 pub const MAX_RANGE: f32 = 160.0;
 
+/// How long the inspect motion runs, in seconds. `start_inspect` arms the timer
+/// and `viewmodel` draws it; the two read the same number so a change to the
+/// choreography cannot leave the drawing running past its own clock.
+pub const INSPECT_TIME: f32 = 2.20;
+
+/// The same, for the shorter motion a magazine check plays. Armed where the
+/// check is asked for, not by the weapon, because it is a reading of the weapon
+/// rather than something the weapon does.
+pub const MAG_CHECK_TIME: f32 = 1.10;
+
+/// How much faster the inspect runs when something has interrupted it, as a
+/// multiple of its own rate. Enough that the arm is back at rest inside a
+/// tenth of a second — a trigger pull has to feel immediate — and not so much
+/// that it is the hard cut it replaced.
+const INSPECT_REWIND: f32 = 9.0;
+
 /// Slot the weapon occupies, matching the 1-4 number keys.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SlotClass {
@@ -48,9 +64,28 @@ pub enum WeaponKind {
     Lmg,
     Pistol,
     Knife,
+    /// 5.56 carbine: the rifle's round at a carbine's rate.
+    M4a1,
+    /// 5.56 rifle: slower, harder-hitting and steadier than the MK-7.
+    Scar,
+    /// 7.62x51 battle rifle: hits like a truck and kicks like one.
+    Fal,
+    /// 9 mm machine pistol with the accuracy the Viper trades away.
+    Mp5,
+    /// 9 mm machine pistol built for rate rather than control.
+    Mpx,
+    /// 7.62x51 semi-automatic marksman's rifle — the middle of the range.
+    M110,
+    /// 7.62x54R bolt-action: one shot, one kill, and a long wait for the next.
+    Mosin,
 }
 
-pub const ALL_KINDS: [WeaponKind; 7] = [
+/// Every kind the game has, in the order `WeaponKind::index` returns.
+///
+/// The length of this list *is* the arity of every per-kind table in the game:
+/// `KIND_COUNT` is what those tables are sized by, so adding a weapon is an entry
+/// here and its data, not a hunt for the number seven in four files.
+pub const ALL_KINDS: [WeaponKind; 14] = [
     WeaponKind::Rifle,
     WeaponKind::Shotgun,
     WeaponKind::Smg,
@@ -58,7 +93,17 @@ pub const ALL_KINDS: [WeaponKind; 7] = [
     WeaponKind::Lmg,
     WeaponKind::Pistol,
     WeaponKind::Knife,
+    WeaponKind::M4a1,
+    WeaponKind::Scar,
+    WeaponKind::Fal,
+    WeaponKind::Mp5,
+    WeaponKind::Mpx,
+    WeaponKind::M110,
+    WeaponKind::Mosin,
 ];
+
+/// How many weapon kinds there are. See `ALL_KINDS`.
+pub const KIND_COUNT: usize = ALL_KINDS.len();
 
 /// The kind a settings key names — the inverse of [`WeaponKind::key`] — or
 /// `None` when nothing matches.
@@ -109,15 +154,22 @@ pub struct WeaponStats {
 
 /// Where a number comes from.
 ///
-/// `Static` is what every shipping weapon uses. `Range` is the source of "same
+/// `Static` is what every shipping part uses. `Range` is the source of "same
 /// part, different feel": whoever builds the instance draws a roll and hands it
 /// in, so nothing here needs to know about `util::Rng`, and `resolve` stays a
 /// function that a test, a tutorial hint and a network check can all replay.
+///
+/// Nothing in the shipping catalogue rolls any more — the magazine probes moved
+/// beside the tests, and a part whose capacity is rolled is a part a player
+/// cannot plan around — so the not-test build is told this variant is
+/// deliberately unused rather than being told to delete a capability the model
+/// is built to carry.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Value {
     Static(f32),
     /// A number that differs between two copies of one part, sampled by the
-    /// build entry's roll. The shipping catalogue uses one: surplus ammo.
+    /// build entry's roll.
+    #[cfg_attr(not(test), allow(dead_code))]
     Range {
         min: f32,
         max: f32,
@@ -275,6 +327,11 @@ pub enum Modifier {
 pub enum ModKind {
     Add,
     MulPre,
+    /// Applied after the stat's envelope and rounding, which is what makes
+    /// handling read as "after the design bounds, this is what practice buys".
+    /// The shipping catalogue has no user of it since the quick magazine moved
+    /// beside the tests; the resolver still offers the stage.
+    #[cfg_attr(not(test), allow(dead_code))]
     MulPost,
 }
 
@@ -499,7 +556,23 @@ impl ResolvedStats {
 /// The part the catalogue files under `id`, or `None` when it has never heard
 /// of it — a build from another version, or a typo.
 fn part_def(id: PartId) -> Option<&'static PartDef> {
-    CATALOG.iter().find(|p| p.id == id)
+    CATALOG
+        .iter()
+        .find(|p| p.id == id)
+        .or_else(|| probes().iter().find(|p| p.id == id))
+}
+
+/// The probe parts a build may name in a test, empty in a shipping build. This
+/// is how `resolve` finds the parts `demo_parts` keeps.
+fn probes() -> &'static [PartDef] {
+    #[cfg(test)]
+    {
+        PROBES
+    }
+    #[cfg(not(test))]
+    {
+        &[]
+    }
 }
 
 /// The static slot id a settings string names, or `None`. Ids are
@@ -507,12 +580,16 @@ fn part_def(id: PartId) -> Option<&'static PartDef> {
 /// table rather than carried as itself; the subslots a part can open are
 /// deliberately not nameable this way.
 fn slot_named(name: &str) -> Option<SlotId> {
-    GUN_SLOTS.iter().map(|s| s.id).find(|id| id.0 == name)
+    SLOT_IDS.iter().copied().find(|id| id.0 == name)
 }
 
 /// The static part id a settings string names, or `None`.
 fn part_named(name: &str) -> Option<PartId> {
-    CATALOG.iter().map(|p| p.id).find(|id| id.0 == name)
+    CATALOG
+        .iter()
+        .chain(probes())
+        .map(|p| p.id)
+        .find(|id| id.0 == name)
 }
 
 /// The parts the game ships, as the armory installs them.
@@ -620,64 +697,289 @@ mod parts {
         ],
     };
 
-    pub const EXTENDED_MAG: PartDef = PartDef {
-        id: PartId("extended_mag"),
-        slot: SlotId("magazine"),
-        interface: InterfaceId("magwell"),
-        subslots: &[],
-        mods: &[
-            StatMod {
-                stat: StatId::MagSize,
-                kind: ModKind::Add,
-                amount: Value::Static(10.0),
-            },
-            StatMod {
-                stat: StatId::ReloadTime,
-                kind: ModKind::Add,
-                amount: Value::Static(0.15),
-            },
-        ],
-    };
-
-    /// A magazine that comes out faster, for a magazine that holds less.
-    pub const QUICK_MAG: PartDef = PartDef {
-        id: PartId("quick_mag"),
-        slot: SlotId("magazine"),
-        interface: InterfaceId("magwell"),
-        subslots: &[],
-        mods: &[
-            StatMod {
-                stat: StatId::ReloadTime,
-                // `MulPost`: the reload time is snapped into its envelope and
-                // rounded first, then shortened — the stage that reads "after
-                // the design bounds, this is what handling buys".
-                kind: ModKind::MulPost,
-                amount: Value::Static(0.72),
-            },
-            StatMod {
-                stat: StatId::MagSize,
-                kind: ModKind::MulPre,
-                amount: Value::Static(0.85),
-            },
-        ],
-    };
-
-    /// Surplus ammunition: the same crate, a different lot. A range is what
-    /// makes two copies of one part feel different without a second part, and
-    /// this is the one shipping part whose numbers are rolled per copy.
-    pub const SURPLUS_LOT: PartDef = PartDef {
-        id: PartId("surplus_lot"),
-        slot: SlotId("magazine"),
-        interface: InterfaceId("magwell"),
-        subslots: &[],
-        mods: &[StatMod {
-            stat: StatId::Damage,
+    // A magazine's three trades, one line each, so the section below reads as a
+    // table instead of as forty-odd struct literals: how many rounds it adds to
+    // the magazine the weapon is issued with, how many seconds it adds to the
+    // change, and how it carries — `MoveScale` below one is a heavier gun.
+    const fn rounds(n: f32) -> StatMod {
+        StatMod {
+            stat: StatId::MagSize,
             kind: ModKind::Add,
-            amount: Value::Range {
-                min: -2.0,
-                max: 6.0,
-            },
-        }],
+            amount: Value::Static(n),
+        }
+    }
+    const fn slower(secs: f32) -> StatMod {
+        StatMod {
+            stat: StatId::ReloadTime,
+            kind: ModKind::Add,
+            amount: Value::Static(secs),
+        }
+    }
+    const fn weight(scale: f32) -> StatMod {
+        StatMod {
+            stat: StatId::MoveScale,
+            kind: ModKind::MulPre,
+            amount: Value::Static(scale),
+        }
+    }
+
+    // --- magazines ---------------------------------------------------------
+    //
+    // Each names the well it fits, because a magazine *is* a fitting of the
+    // round it feeds: the rifle's quad-stack does not go into a 9 mm well, and
+    // a drum does not go into a shotgun's tube. Capacity is bought with weight
+    // and with handling — every extra round is also an extra second in the
+    // open, which is the trade the player is actually making.
+    //
+    // The set follows the real catalogue for each platform rather than a ladder
+    // of round numbers. A 5.56 rifle is fed from 20-round straight magazines,
+    // 30-round STANAGs, 40-round boxes, the 60-round quad-stack and the
+    // hundred-round twin drum; a 9 mm submachine gun from 30- and 40-round
+    // sticks and the two drums; a belt-fed gun from its box *or* a rifle
+    // magazine dropped into the emergency well, which is a real thing the M249
+    // does and the reason its well is shaped the way it is. Each one is
+    // therefore a fitting somebody has actually carried.
+
+    /// 5.56: forty rounds in a longer box.
+    pub const MAG_40_556: PartDef = PartDef {
+        id: PartId("mag_40_556"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_556"),
+        subslots: &[],
+        mods: &[rounds(10.0), slower(0.20)],
+    };
+
+    /// 5.56: the quad-stack — twice the rifle's magazine, and it shows.
+    pub const MAG_60_556: PartDef = PartDef {
+        id: PartId("mag_60_556"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_556"),
+        subslots: &[],
+        mods: &[rounds(30.0), slower(0.45), weight(0.96)],
+    };
+
+    /// 5.56: the hundred-round twin drum — two drums and a feed tower, which is
+    /// what the real one is, and about as much weight as a rifle will take.
+    pub const DRUM_100_556: PartDef = PartDef {
+        id: PartId("drum_100_556"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_556"),
+        subslots: &[],
+        mods: &[rounds(70.0), slower(1.40), weight(0.88)],
+    };
+
+    /// 9 mm: forty rounds in the long stick.
+    pub const MAG_40_9MM: PartDef = PartDef {
+        id: PartId("mag_40_9mm"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_9mm"),
+        subslots: &[],
+        mods: &[rounds(10.0), slower(0.15)],
+    };
+
+    /// 9 mm: a fifty-round drum on a submachine gun that feeds thirty.
+    pub const DRUM_50_9MM: PartDef = PartDef {
+        id: PartId("drum_50_9mm"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_9mm"),
+        subslots: &[],
+        mods: &[rounds(20.0), slower(0.60), weight(0.95)],
+    };
+
+    /// 9 mm: the same twin drum scaled to the round it feeds.
+    pub const DRUM_100_9MM: PartDef = PartDef {
+        id: PartId("drum_100_9mm"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_9mm"),
+        subslots: &[],
+        mods: &[rounds(70.0), slower(1.30), weight(0.88)],
+    };
+
+    /// 7.62: a longer box for the marksman's rifle.
+    pub const MAG_10_762: PartDef = PartDef {
+        id: PartId("mag_10_762"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_762"),
+        subslots: &[],
+        mods: &[rounds(5.0), slower(0.30)],
+    };
+
+    /// 7.62: the twenty-round box the same rifle takes in its full-length form.
+    pub const MAG_20_762: PartDef = PartDef {
+        id: PartId("mag_20_762"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_762"),
+        subslots: &[],
+        mods: &[rounds(15.0), slower(0.60), weight(0.96)],
+    };
+
+    /// The belt box: a hundred more rounds, and a long time to change it.
+    pub const BELT_200: PartDef = PartDef {
+        id: PartId("belt_200"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_belt"),
+        subslots: &[],
+        mods: &[rounds(100.0), slower(1.20), weight(0.93)],
+    };
+
+    /// 9 mm pistol: the seventeen-round magazine the pistol is also sold with.
+    pub const MAG_17_PISTOL: PartDef = PartDef {
+        id: PartId("mag_17_pistol"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_pistol"),
+        subslots: &[],
+        mods: &[rounds(2.0), slower(0.06)],
+    };
+
+    /// 9 mm pistol: five more in the same grip length.
+    pub const MAG_20_PISTOL: PartDef = PartDef {
+        id: PartId("mag_20_pistol"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_pistol"),
+        subslots: &[],
+        mods: &[rounds(5.0), slower(0.15)],
+    };
+
+    /// 9 mm pistol: the thirty-round stick, which is a magazine that hangs out
+    /// of the grip and is carried for exactly that reason.
+    pub const MAG_30_PISTOL: PartDef = PartDef {
+        id: PartId("mag_30_pistol"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_pistol"),
+        subslots: &[],
+        mods: &[rounds(15.0), slower(0.55), weight(0.97)],
+    };
+
+    /// The shotgun's tube: two more shells, and a slower feed.
+    pub const TUBE_8: PartDef = PartDef {
+        id: PartId("tube_8"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_tube"),
+        subslots: &[],
+        mods: &[rounds(2.0), slower(0.30)],
+    };
+
+    /// The shotgun's drum: fourteen more shells in a drum that hangs under the
+    /// barrel, and the weight to go with them.
+    pub const DRUM_20_SHELL: PartDef = PartDef {
+        id: PartId("drum_20_shell"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_tube"),
+        subslots: &[],
+        mods: &[rounds(14.0), slower(1.60), weight(0.90)],
+    };
+
+    /// 7.62x51, FAL well: thirty rounds in the long aftermarket box. The FAL's
+    /// own magazines are twenty and thirty; a twenty-five is an SR-25 magazine,
+    /// which is why it is on the other well.
+    pub const MAG_30_FAL: PartDef = PartDef {
+        id: PartId("mag_30_fal"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_fal"),
+        subslots: &[],
+        mods: &[rounds(10.0), slower(0.55), weight(0.96)],
+    };
+
+    /// 7.62x51, FAL well: the ten-round magazine sold where a twenty is not
+    /// allowed, and carried by hunters everywhere else. Lighter and quicker to
+    /// change, and the first fitting in the game that takes capacity *away* —
+    /// which the replace model is what made possible.
+    pub const MAG_10_FAL: PartDef = PartDef {
+        id: PartId("mag_10_fal"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_fal"),
+        subslots: &[],
+        mods: &[rounds(-10.0), slower(-0.45), weight(1.05)],
+    };
+
+    /// 7.62x51, SR-25 well: twenty-five rounds, which is the marksman's rifle's
+    /// best-known magazine.
+    pub const MAG_25_SR25: PartDef = PartDef {
+        id: PartId("mag_25_sr25"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_sr25"),
+        subslots: &[],
+        mods: &[rounds(5.0), slower(0.35), weight(0.96)],
+    };
+
+    /// 7.62x51, SR-25 well: the ten-round box the same rifle is sold with.
+    pub const MAG_10_SR25: PartDef = PartDef {
+        id: PartId("mag_10_sr25"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_sr25"),
+        subslots: &[],
+        mods: &[rounds(-10.0), slower(-0.45), weight(1.05)],
+    };
+
+    /// 7.62x54R: a stripper clip. The bolt-action's box holds five either way —
+    /// what the clip buys is a second's worth of loading, which on a weapon whose
+    /// whole character is the wait for the next round is the only fitting worth
+    /// carrying.
+    pub const CLIP_54R: PartDef = PartDef {
+        id: PartId("clip_54r"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_54r"),
+        subslots: &[],
+        mods: &[slower(-1.20)],
+    };
+
+    /// 9 mm, MP5 well: the fifteen-round magazine, which is the short one and —
+    /// because the curve is stored per metre — the nearly straight one, which is
+    /// what the real fifteen is. Half the rounds, a lighter gun, a quicker change.
+    pub const MAG_15_MP5: PartDef = PartDef {
+        id: PartId("mag_15_mp5"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_mp5"),
+        subslots: &[],
+        mods: &[rounds(-15.0), slower(-0.45), weight(1.06)],
+    };
+
+    /// 9 mm, MP5 well: the forty-round long magazine.
+    pub const MAG_40_MP5: PartDef = PartDef {
+        id: PartId("mag_40_mp5"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_mp5"),
+        subslots: &[],
+        mods: &[rounds(10.0), slower(0.20)],
+    };
+
+    /// 9 mm, MP5 well: the fifty-round drum. Its own well's drum, not the
+    /// generic 9 mm one's, because an MP5 drum is an MP5 drum.
+    pub const DRUM_50_MP5: PartDef = PartDef {
+        id: PartId("drum_50_mp5"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_mp5"),
+        subslots: &[],
+        mods: &[rounds(20.0), slower(0.60), weight(0.95)],
+    };
+
+    /// 9 mm, MPX well: the ten-round magazine, for the states and the countries
+    /// that cap it.
+    pub const MAG_10_MPX: PartDef = PartDef {
+        id: PartId("mag_10_mpx"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_mpx"),
+        subslots: &[],
+        mods: &[rounds(-20.0), slower(-0.50), weight(1.07)],
+    };
+
+    /// 9 mm, MPX well: twenty rounds in the same tube.
+    pub const MAG_20_MPX: PartDef = PartDef {
+        id: PartId("mag_20_mpx"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_mpx"),
+        subslots: &[],
+        mods: &[rounds(-10.0), slower(-0.25), weight(1.03)],
+    };
+
+    /// 9 mm, MPX well: Magpul's thirty-five, which is the magazine an MPX is
+    /// most often photographed with.
+    pub const MAG_35_MPX: PartDef = PartDef {
+        id: PartId("mag_35_mpx"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_mpx"),
+        subslots: &[],
+        mods: &[rounds(5.0), slower(0.18)],
     };
 
     /// The shipping catalogue, as one list: what the game resolves against
@@ -688,30 +990,53 @@ mod parts {
         COMPENSATOR,
         FLASH_HIDER,
         HEAVY_BARREL,
-        EXTENDED_MAG,
-        QUICK_MAG,
-        SURPLUS_LOT,
+        MAG_40_556,
+        MAG_60_556,
+        DRUM_100_556,
+        MAG_40_9MM,
+        DRUM_50_9MM,
+        DRUM_100_9MM,
+        MAG_10_762,
+        MAG_20_762,
+        BELT_200,
+        MAG_15_MP5,
+        MAG_40_MP5,
+        DRUM_50_MP5,
+        MAG_10_MPX,
+        MAG_20_MPX,
+        MAG_35_MPX,
+        MAG_17_PISTOL,
+        MAG_20_PISTOL,
+        MAG_30_PISTOL,
+        TUBE_8,
+        DRUM_20_SHELL,
+        MAG_30_FAL,
+        MAG_10_FAL,
+        MAG_25_SR25,
+        MAG_10_SR25,
+        CLIP_54R,
     ];
 }
 
 /// The catalogue: what the armory installs, and what a saved build may name.
-#[cfg(not(test))]
+///
+/// One list, and the shipping one: the tests' own probes are searched beside it
+/// (`part_def`) rather than duplicated into it, because the copy this replaces
+/// had to be edited every time a shipping part was added, and forgetting was a
+/// test failure that read as a mystery (`UnknownPart`) instead of a missing
+/// line here.
 static CATALOG: &[PartDef] = parts::SHIPPED;
 
-/// The catalogue the tests resolve against: the shipping parts plus the demo
-/// and probe parts `demo_parts` keeps for exercising the model itself.
+/// The probe parts the model's own tests build with. Not in `CATALOG`: nothing
+/// the game offers may name one of these, and `catalogue()` is what the armory
+/// reads.
 #[cfg(test)]
-static CATALOG: &[PartDef] = &[
-    parts::MICRO_DOT,
-    parts::MARKSMAN_SCOPE,
-    parts::COMPENSATOR,
-    parts::FLASH_HIDER,
-    parts::HEAVY_BARREL,
-    parts::EXTENDED_MAG,
-    parts::QUICK_MAG,
-    parts::SURPLUS_LOT,
+static PROBES: &[PartDef] = &[
     demo_parts::RISER,
     demo_parts::SCOPE,
+    demo_parts::EXTENDED_MAG,
+    demo_parts::QUICK_MAG,
+    demo_parts::SURPLUS_LOT,
     demo_parts::PROBE_FLAT,
     demo_parts::PROBE_X3,
     demo_parts::PROBE_HALF,
@@ -734,9 +1059,31 @@ pub fn part_label(id: PartId) -> Option<(&'static str, &'static str)> {
         "compensator" => ("COMPENSATOR", "补偿器"),
         "flash_hider" => ("FLASH HIDER", "消焰器"),
         "heavy_barrel" => ("HEAVY BARREL", "重枪管"),
-        "extended_mag" => ("EXTENDED MAG", "扩容弹匣"),
-        "quick_mag" => ("QUICK MAG", "快拔弹匣"),
-        "surplus_lot" => ("SURPLUS LOT", "库存弹药"),
+        "mag_40_556" => ("MAG 40 / 5.56", "40 发弹匣"),
+        "mag_60_556" => ("QUAD-STACK 60", "60 发四排弹匣"),
+        "drum_100_556" => ("C-MAG 100 / 5.56", "100 发双鼓"),
+        "mag_40_9mm" => ("MAG 40 / 9MM", "40 发弹匣"),
+        "drum_50_9mm" => ("DRUM 50 / 9MM", "50 发弹鼓"),
+        "mag_15_mp5" => ("MAG 15 / MP5", "15 发弹匣"),
+        "mag_40_mp5" => ("MAG 40 / MP5", "40 发长弹匣"),
+        "drum_50_mp5" => ("DRUM 50 / MP5", "50 发弹鼓"),
+        "mag_10_mpx" => ("MAG 10 / MPX", "10 发弹匣"),
+        "mag_20_mpx" => ("MAG 20 / MPX", "20 发弹匣"),
+        "mag_35_mpx" => ("MAG 35 / MPX", "35 发弹匣"),
+        "drum_100_9mm" => ("C-MAG 100 / 9MM", "100 发双鼓"),
+        "mag_10_762" => ("MAG 10 / 7.62", "10 发弹匣"),
+        "mag_20_762" => ("MAG 20 / 7.62", "20 发弹匣"),
+        "belt_200" => ("BELT BOX 200", "200 发弹链箱"),
+        "mag_17_pistol" => ("MAG 17 / 9MM", "17 发弹匣"),
+        "mag_20_pistol" => ("MAG 20 / 9MM", "20 发手枪弹匣"),
+        "mag_30_pistol" => ("MAG 30 / 9MM", "30 发加长弹匣"),
+        "tube_8" => ("TUBE +2", "加长弹管"),
+        "drum_20_shell" => ("DRUM 20 / 12GA", "20 发霰弹鼓"),
+        "mag_30_fal" => ("MAG 30 / FAL", "30 发弹匣"),
+        "mag_10_fal" => ("MAG 10 / FAL", "10 发弹匣"),
+        "mag_25_sr25" => ("MAG 25 / SR-25", "25 发弹匣"),
+        "mag_10_sr25" => ("MAG 10 / SR-25", "10 发弹匣"),
+        "clip_54r" => ("STRIPPER CLIP", "桥夹"),
         _ => return None,
     })
 }
@@ -938,27 +1285,62 @@ const fn st(v: f32) -> Value {
 /// The slots a gun offers before anything is installed: an optic rail, a
 /// threaded muzzle and a magazine well.
 ///
-/// One table for every gun for now. The standards are the part of this that
-/// matters — a shotgun choke and a rifle brake are different standards the day
-/// a part needs them to be, and splitting one is a line here, not a rewrite.
-/// The knife offers nothing, which is why it is absent.
-const GUN_SLOTS: &[SlotDef] = &[
-    SlotDef {
-        id: SlotId("optic"),
-        accepts: InterfaceId("rail"),
-        max_parts: 1,
-    },
-    SlotDef {
-        id: SlotId("muzzle"),
-        accepts: InterfaceId("threaded_muzzle"),
-        max_parts: 1,
-    },
+/// The rail and the thread are shared — a scope or a brake fits whatever it is
+/// fastened to. The **well is per weapon**, because a magazine is a fitting of
+/// the round it feeds: a 50-round 9 mm drum does not go into a 5.56 mm well, and
+/// a 60-round quad-stack does not go into a shotgun's tube. Splitting the one
+/// table per weapon is what the comment here used to promise, and it is what
+/// makes "the rifle's 60" and "the SMG's 50" the same kind of part.
+const RAIL: SlotDef = SlotDef {
+    id: SlotId("optic"),
+    accepts: InterfaceId("rail"),
+    max_parts: 1,
+};
+
+const MUZZLE: SlotDef = SlotDef {
+    id: SlotId("muzzle"),
+    accepts: InterfaceId("threaded_muzzle"),
+    max_parts: 1,
+};
+
+/// A magazine well, named for what it takes.
+const fn well(name: &'static str) -> SlotDef {
     SlotDef {
         id: SlotId("magazine"),
-        accepts: InterfaceId("magwell"),
+        accepts: InterfaceId(name),
         max_parts: 1,
-    },
-];
+    }
+}
+
+/// The slot ids a settings string may name. The wells differ per weapon; the
+/// ids do not, which is why this is a list of names rather than of slots.
+const SLOT_IDS: [SlotId; 3] = [SlotId("optic"), SlotId("muzzle"), SlotId("magazine")];
+
+const RIFLE_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, well("magwell_556")];
+const SHOTGUN_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, well("magwell_tube")];
+const SMG_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, well("magwell_9mm")];
+/// The MP5's own well. A curved HK magazine does not fit an MPX and an MPX
+/// magazine does not fit an MP5, both facts being about the catch rather than
+/// about the round, so they are two wells and not one. The Viper keeps the
+/// generic 9 mm well it has always had, and its part ids with it — a saved
+/// build naming `drum_50_9mm` has to keep working.
+const MP5_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, well("magwell_mp5")];
+/// And the MPX's: SIG's own magazine, which the aftermarket takes to 35.
+const MPX_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, well("magwell_mpx")];
+const SNIPER_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, well("magwell_762")];
+const LMG_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, well("magwell_belt")];
+const PISTOL_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, well("magwell_pistol")];
+/// The battle rifle's well. Its own, and not the marksman's: a FAL magazine and
+/// an SR-25 magazine are both 7.62x51 and neither fits the other's well, which
+/// is why they are two wells and not one. (Putting both weapons on one well is
+/// what put a twenty-five-round magazine — a real SR-25 magazine, and not a real
+/// FAL one — on the FAL.)
+const FAL_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, well("magwell_fal")];
+
+/// The marksman's rifle's well: the SR-25 pattern, whose magazines go to 25.
+const M110_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, well("magwell_sr25")];
+/// 7.62x54R: the bolt-action, whose five rounds are loaded by clip.
+const MOSIN_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, well("magwell_54r")];
 
 /// The rifle. Every number is the one the pre-resolver table held, pinned by
 /// `the_shipped_tables_survive_the_resolver_bit_for_bit` below.
@@ -987,7 +1369,227 @@ const RIFLE: WeaponDef = WeaponDef {
         st(0.55),   // FalloffMin
         st(3.0),    // BurstCount
     ],
-    slots: GUN_SLOTS,
+    slots: RIFLE_SLOTS,
+};
+
+// --- the 5.56 carbine and rifle ---------------------------------------------
+//
+// Three weapons on one round, separated the way the real ones are: the MK-7 is
+// the issued middle, the M4A1 spends steadiness for rate, and the SCAR-L spends
+// rate for reach and a flatter kick. They share the 5.56 well, so they share its
+// magazines.
+
+/// The carbine: 857 rounds a minute against the MK-7's 682, and each one weaker.
+const M4A1: WeaponDef = WeaponDef {
+    class: SlotClass::Primary,
+    fire_modes: RIFLE_MODES,
+    infinite_ammo: false,
+    melee: false,
+    base: [
+        st(22.0),   // Damage
+        st(1.0),    // Pellets
+        st(0.070),  // FireInterval
+        st(30.0),   // MagSize
+        st(1.25),   // ReloadTime
+        st(0.0044), // BaseSpread
+        st(0.0052), // BloomPerShot
+        st(0.042),  // MaxBloom
+        st(0.090),  // BloomDecay
+        st(0.0150), // RecoilPitch
+        st(0.0040), // RecoilYaw
+        st(42.0),   // AdsFov
+        st(1.03),   // MoveScale
+        st(2.4),    // HeadshotMult
+        st(26.0),   // FalloffStart
+        st(62.0),   // FalloffEnd
+        st(0.52),   // FalloffMin
+        st(3.0),    // BurstCount
+    ],
+    slots: RIFLE_SLOTS,
+};
+
+/// The rifle: half again the MK-7's punch for two thirds of its rate.
+const SCAR: WeaponDef = WeaponDef {
+    class: SlotClass::Primary,
+    fire_modes: RIFLE_MODES,
+    infinite_ammo: false,
+    melee: false,
+    base: [
+        st(27.0),   // Damage
+        st(1.0),    // Pellets
+        st(0.100),  // FireInterval
+        st(30.0),   // MagSize
+        st(1.60),   // ReloadTime
+        st(0.0038), // BaseSpread
+        st(0.0060), // BloomPerShot
+        st(0.038),  // MaxBloom
+        st(0.080),  // BloomDecay
+        st(0.0195), // RecoilPitch
+        st(0.0046), // RecoilYaw
+        st(40.0),   // AdsFov
+        st(0.97),   // MoveScale
+        st(2.4),    // HeadshotMult
+        st(34.0),   // FalloffStart
+        st(78.0),   // FalloffEnd
+        st(0.58),   // FalloffMin
+        st(3.0),    // BurstCount
+    ],
+    slots: RIFLE_SLOTS,
+};
+
+// --- the full-power rifles ---------------------------------------------------
+
+/// The battle rifle. Forty-three a hit is nearly the marksman's round at a
+/// rifleman's rate, and the recoil is what it costs.
+const FAL: WeaponDef = WeaponDef {
+    class: SlotClass::Primary,
+    fire_modes: RIFLE_MODES,
+    infinite_ammo: false,
+    melee: false,
+    base: [
+        st(43.0),   // Damage
+        st(1.0),    // Pellets
+        st(0.090),  // FireInterval
+        st(20.0),   // MagSize
+        st(2.20),   // ReloadTime
+        st(0.0050), // BaseSpread
+        st(0.0075), // BloomPerShot
+        st(0.050),  // MaxBloom
+        st(0.075),  // BloomDecay
+        st(0.0270), // RecoilPitch
+        st(0.0070), // RecoilYaw
+        st(44.0),   // AdsFov
+        st(0.93),   // MoveScale
+        st(2.3),    // HeadshotMult
+        st(40.0),   // FalloffStart
+        st(90.0),   // FalloffEnd
+        st(0.62),   // FalloffMin
+        st(3.0),    // BurstCount
+    ],
+    slots: FAL_SLOTS,
+};
+
+/// The marksman's rifle: one shot per trigger pull, and the next one a beat
+/// later. The middle of the range the campaign had no weapon in.
+const M110: WeaponDef = WeaponDef {
+    class: SlotClass::Primary,
+    fire_modes: SEMI,
+    infinite_ammo: false,
+    melee: false,
+    base: [
+        st(55.0),   // Damage
+        st(1.0),    // Pellets
+        st(0.290),  // FireInterval
+        st(20.0),   // MagSize
+        st(2.10),   // ReloadTime
+        st(0.0016), // BaseSpread
+        st(0.0100), // BloomPerShot
+        st(0.045),  // MaxBloom
+        st(0.070),  // BloomDecay
+        st(0.0300), // RecoilPitch
+        st(0.0060), // RecoilYaw
+        st(26.0),   // AdsFov
+        st(0.95),   // MoveScale
+        st(2.8),    // HeadshotMult
+        st(60.0),   // FalloffStart
+        st(140.0),  // FalloffEnd
+        st(0.75),   // FalloffMin
+        st(3.0),    // BurstCount
+    ],
+    slots: M110_SLOTS,
+};
+
+/// The bolt-action. A hundred and forty a hit is the highest number in the game
+/// and the only one that puts a Juggernaut down outright; forty-three rounds a
+/// minute is the price, and the wait is the weapon.
+const MOSIN: WeaponDef = WeaponDef {
+    class: SlotClass::Primary,
+    fire_modes: SEMI,
+    infinite_ammo: false,
+    melee: false,
+    base: [
+        st(140.0),  // Damage
+        st(1.0),    // Pellets
+        st(1.40),   // FireInterval
+        st(5.0),    // MagSize
+        st(3.10),   // ReloadTime
+        st(0.0012), // BaseSpread
+        st(0.0200), // BloomPerShot
+        st(0.060),  // MaxBloom
+        st(0.060),  // BloomDecay
+        st(0.0450), // RecoilPitch
+        st(0.0090), // RecoilYaw
+        st(22.0),   // AdsFov
+        st(0.90),   // MoveScale
+        st(3.0),    // HeadshotMult
+        st(80.0),   // FalloffStart
+        st(200.0),  // FalloffEnd
+        st(0.85),   // FalloffMin
+        st(3.0),    // BurstCount
+    ],
+    slots: MOSIN_SLOTS,
+};
+
+// --- the 9 mm machine pistols -------------------------------------------------
+
+/// The accurate one: seven hundred and seventy a minute with a spread the Viper
+/// does not have.
+const MP5: WeaponDef = WeaponDef {
+    class: SlotClass::Primary,
+    fire_modes: SMG_MODES,
+    infinite_ammo: false,
+    melee: false,
+    base: [
+        st(16.0),   // Damage
+        st(1.0),    // Pellets
+        st(0.078),  // FireInterval
+        st(30.0),   // MagSize
+        st(1.40),   // ReloadTime
+        st(0.0072), // BaseSpread
+        st(0.0038), // BloomPerShot
+        st(0.040),  // MaxBloom
+        st(0.095),  // BloomDecay
+        st(0.0110), // RecoilPitch
+        st(0.0030), // RecoilYaw
+        st(46.0),   // AdsFov
+        st(1.04),   // MoveScale
+        st(2.0),    // HeadshotMult
+        st(18.0),   // FalloffStart
+        st(46.0),   // FalloffEnd
+        st(0.45),   // FalloffMin
+        st(3.0),    // BurstCount
+    ],
+    slots: MP5_SLOTS,
+};
+
+/// The fast one: nine hundred and twenty-three a minute, and the bloom that goes
+/// with it.
+const MPX: WeaponDef = WeaponDef {
+    class: SlotClass::Primary,
+    fire_modes: SMG_MODES,
+    infinite_ammo: false,
+    melee: false,
+    base: [
+        st(15.0),   // Damage
+        st(1.0),    // Pellets
+        st(0.065),  // FireInterval
+        st(30.0),   // MagSize
+        st(1.35),   // ReloadTime
+        st(0.0080), // BaseSpread
+        st(0.0050), // BloomPerShot
+        st(0.048),  // MaxBloom
+        st(0.090),  // BloomDecay
+        st(0.0125), // RecoilPitch
+        st(0.0036), // RecoilYaw
+        st(44.0),   // AdsFov
+        st(1.05),   // MoveScale
+        st(2.0),    // HeadshotMult
+        st(16.0),   // FalloffStart
+        st(42.0),   // FalloffEnd
+        st(0.42),   // FalloffMin
+        st(3.0),    // BurstCount
+    ],
+    slots: MPX_SLOTS,
 };
 
 const SHOTGUN: WeaponDef = WeaponDef {
@@ -1015,7 +1617,7 @@ const SHOTGUN: WeaponDef = WeaponDef {
         st(0.25),  // FalloffMin
         st(3.0),   // BurstCount
     ],
-    slots: GUN_SLOTS,
+    slots: SHOTGUN_SLOTS,
 };
 
 const SMG: WeaponDef = WeaponDef {
@@ -1027,7 +1629,7 @@ const SMG: WeaponDef = WeaponDef {
         st(14.0),   // Damage
         st(1.0),    // Pellets
         st(0.055),  // FireInterval
-        st(40.0),   // MagSize
+        st(30.0),   // MagSize — thirty in the gun, fifty in the drum
         st(1.50),   // ReloadTime
         st(0.0105), // BaseSpread
         st(0.0045), // BloomPerShot
@@ -1043,7 +1645,7 @@ const SMG: WeaponDef = WeaponDef {
         st(0.50),   // FalloffMin
         st(3.0),    // BurstCount
     ],
-    slots: GUN_SLOTS,
+    slots: SMG_SLOTS,
 };
 
 const SNIPER: WeaponDef = WeaponDef {
@@ -1071,7 +1673,7 @@ const SNIPER: WeaponDef = WeaponDef {
         st(1.0),    // FalloffMin
         st(3.0),    // BurstCount
     ],
-    slots: GUN_SLOTS,
+    slots: SNIPER_SLOTS,
 };
 
 const LMG: WeaponDef = WeaponDef {
@@ -1099,7 +1701,7 @@ const LMG: WeaponDef = WeaponDef {
         st(0.60),   // FalloffMin
         st(3.0),    // BurstCount
     ],
-    slots: GUN_SLOTS,
+    slots: LMG_SLOTS,
 };
 
 const PISTOL: WeaponDef = WeaponDef {
@@ -1127,7 +1729,7 @@ const PISTOL: WeaponDef = WeaponDef {
         st(0.45),   // FalloffMin
         st(3.0),    // BurstCount
     ],
-    slots: GUN_SLOTS,
+    slots: PISTOL_SLOTS,
 };
 
 const KNIFE: WeaponDef = WeaponDef {
@@ -1168,6 +1770,13 @@ pub fn def(kind: WeaponKind) -> &'static WeaponDef {
         WeaponKind::Lmg => &LMG,
         WeaponKind::Pistol => &PISTOL,
         WeaponKind::Knife => &KNIFE,
+        WeaponKind::M4a1 => &M4A1,
+        WeaponKind::Scar => &SCAR,
+        WeaponKind::Fal => &FAL,
+        WeaponKind::Mp5 => &MP5,
+        WeaponKind::Mpx => &MPX,
+        WeaponKind::M110 => &M110,
+        WeaponKind::Mosin => &MOSIN,
     }
 }
 
@@ -1181,6 +1790,13 @@ impl WeaponKind {
             WeaponKind::Lmg => Key::WeaponLmg,
             WeaponKind::Pistol => Key::WeaponPistol,
             WeaponKind::Knife => Key::WeaponKnife,
+            WeaponKind::M4a1 => Key::WeaponM4a1,
+            WeaponKind::Scar => Key::WeaponScar,
+            WeaponKind::Fal => Key::WeaponFal,
+            WeaponKind::Mp5 => Key::WeaponMp5,
+            WeaponKind::Mpx => Key::WeaponMpx,
+            WeaponKind::M110 => Key::WeaponM110,
+            WeaponKind::Mosin => Key::WeaponMosin,
         }
     }
 
@@ -1202,6 +1818,15 @@ impl WeaponKind {
             WeaponKind::Lmg => 0.85,
             WeaponKind::Pistol => 0.45,
             WeaponKind::Knife => 1.0,
+            // 5.56 through a carbine's barrel; then the full-power 7.62 case,
+            // which is what plate is for; and a 7.62x54R that barely notices it.
+            WeaponKind::M4a1 => 0.76,
+            WeaponKind::Scar => 0.82,
+            WeaponKind::Fal => 0.90,
+            WeaponKind::Mp5 => 0.57,
+            WeaponKind::Mpx => 0.52,
+            WeaponKind::M110 => 0.90,
+            WeaponKind::Mosin => 0.98,
         }
     }
 
@@ -1215,21 +1840,25 @@ impl WeaponKind {
             WeaponKind::Lmg => "LMG",
             WeaponKind::Pistol => "PST",
             WeaponKind::Knife => "KNF",
+            WeaponKind::M4a1 => "M4",
+            WeaponKind::Scar => "SCA",
+            WeaponKind::Fal => "FAL",
+            WeaponKind::Mp5 => "MP5",
+            WeaponKind::Mpx => "MPX",
+            WeaponKind::M110 => "M11",
+            WeaponKind::Mosin => "MOS",
         }
     }
 
     /// Position in `ALL_KINDS`: the index of every per-kind table the game
     /// keeps — the armory's kit, the viewmodel's model cache.
     pub fn index(self) -> usize {
-        match self {
-            WeaponKind::Rifle => 0,
-            WeaponKind::Shotgun => 1,
-            WeaponKind::Smg => 2,
-            WeaponKind::Sniper => 3,
-            WeaponKind::Lmg => 4,
-            WeaponKind::Pistol => 5,
-            WeaponKind::Knife => 6,
-        }
+        // `self as usize` rather than a match: the enum has no explicit
+        // discriminants, so this is the declaration order, which is the order
+        // `ALL_KINDS` is written in and the order every per-kind table is indexed
+        // by. The match this replaces had to be edited by hand for every new
+        // variant, and forgetting it indexed another weapon's data.
+        self as usize
     }
 
     /// The name a settings key is built from: `build_rifle`, `paint_rifle`.
@@ -1242,6 +1871,13 @@ impl WeaponKind {
             WeaponKind::Lmg => "lmg",
             WeaponKind::Pistol => "pistol",
             WeaponKind::Knife => "knife",
+            WeaponKind::M4a1 => "m4a1",
+            WeaponKind::Scar => "scar",
+            WeaponKind::Fal => "fal",
+            WeaponKind::Mp5 => "mp5",
+            WeaponKind::Mpx => "mpx",
+            WeaponKind::M110 => "m110",
+            WeaponKind::Mosin => "mosin",
         }
     }
 
@@ -1260,13 +1896,24 @@ impl WeaponKind {
 
 pub struct Weapon {
     pub kind: WeaponKind,
+    /// Rounds in the magazine that is in the gun.
     pub mag: u32,
-    /// Rounds carried outside the magazine — what a reload draws on. The stash
-    /// decides how much a weapon goes into a mission with; ammo pickups top it
-    /// up.
-    pub reserve: u32,
+    /// The spare magazines, one round count per magazine, in the order they
+    /// were packed. `mag` is the one in the gun.
+    ///
+    /// This is what a magazine *is*: a container with its own count, not a
+    /// number of loose rounds. A reload swaps containers, so the rounds left in
+    /// a half-empty magazine are carried rather than thrown away — the old
+    /// field (`reserve`) let a reload quietly destroy them, which is why a
+    /// reservist's ammunition never added up to whole magazines.
+    mags: Vec<u32>,
     pub cooldown: f32,
     pub reload_t: f32,
+    /// Set for the frame a reload finishes and the magazine is seated,
+    /// consumed by [`Weapon::take_reload_done`]. `reload_t` says a reload is
+    /// happening; this says it has stopped being true, which is the half a
+    /// player behind cover is actually listening for.
+    reload_done: bool,
     pub bloom: f32,
     pub kick: f32,
     pub flash: f32,
@@ -1275,6 +1922,13 @@ pub struct Weapon {
     pub fire_mode: usize,
     burst_left: u32,
     pub inspect_t: f32,
+    /// Set when something interrupts an inspect, and cleared when the motion has
+    /// run back to rest. The timer is wound down at `INSPECT_REWIND` times its
+    /// usual rate while this is set, so a trigger pull retracts the arm over a
+    /// tenth of a second instead of teleporting it home. Cutting straight to the
+    /// rest pose is the one thing that reads as an animation being cancelled
+    /// rather than as a hand putting a weapon down.
+    inspect_rewind: bool,
     pub mag_check_t: f32,
     /// What this instance is built with, and the numbers that came out of it.
     /// Both belong here rather than to the def, which is shared by every weapon
@@ -1300,9 +1954,10 @@ impl Weapon {
         Self {
             kind,
             mag: resolved.as_stats().mag_size,
-            reserve: 0,
+            mags: Vec::new(),
             cooldown: 0.0,
             reload_t: 0.0,
+            reload_done: false,
             bloom: 0.0,
             kick: 0.0,
             flash: 0.0,
@@ -1310,6 +1965,7 @@ impl Weapon {
             fire_mode: 0,
             burst_left: 0,
             inspect_t: 0.0,
+            inspect_rewind: false,
             mag_check_t: 0.0,
             build,
             resolved,
@@ -1350,9 +2006,20 @@ impl Weapon {
         1.0 - (self.reload_t / t).clamp(0.0, 1.0)
     }
 
+    /// Whether a reload seated a magazine on this frame, reported once.
+    ///
+    /// A reload is three events, not one: it starts, it is halfway, and it is
+    /// over. Only the last one lets the player leave cover, and it cannot be
+    /// read off `reload_t` from outside without polling it — so it is a signal,
+    /// like `Enemy::take_footfall`, and taking it clears it.
+    pub fn take_reload_done(&mut self) -> bool {
+        std::mem::take(&mut self.reload_done)
+    }
+
     pub fn start_inspect(&mut self) {
         if !self.is_reloading() {
-            self.inspect_t = 2.2;
+            self.inspect_t = INSPECT_TIME;
+            self.inspect_rewind = false;
         }
     }
 
@@ -1378,18 +2045,59 @@ impl Weapon {
         }
     }
 
-    /// Rounds found in the field: the magazine fills first and the rest goes
-    /// into the reserve, so a pickup is never wasted on a full magazine.
-    /// Returns how many were taken.
+    /// Rounds in the spare magazines. This is the number the HUD shows beside
+    /// the magazine in the gun, and it is a sum, not a pool: the rounds are in
+    /// specific magazines (`magazine_count` of them).
+    pub fn reserve(&self) -> u32 {
+        self.mags.iter().sum()
+    }
+
+    /// How many spare magazines are carried, empty ones included — the count a
+    /// player reads to know how many times they can reload.
+    pub fn magazine_count(&self) -> usize {
+        self.mags.len()
+    }
+
+    /// Packs `count` full spare magazines, in the space the resolved build
+    /// gives them. What the armory hands over at the start of a mission; the
+    /// magazine in the gun is already seated by `with_build`.
+    pub fn pack_magazines(&mut self, count: usize) {
+        let size = self.stats().mag_size;
+        self.mags = vec![size; count];
+    }
+
+    /// Rounds found in the field: the magazine in the gun fills first, then the
+    /// fullest spare that still has room, so a pickup is never wasted on a full
+    /// magazine and never leaves more half-empty magazines behind than it has
+    /// to. Returns how many were taken.
     pub fn add_ammo(&mut self, rounds: u32) -> u32 {
         if self.stats().infinite_ammo {
             return 0;
         }
-        let into_mag = self.stats().mag_size.saturating_sub(self.mag).min(rounds);
+        let size = self.stats().mag_size;
+        let mut left = rounds;
+        let into_mag = size.saturating_sub(self.mag).min(left);
         self.mag += into_mag;
-        let into_reserve = rounds - into_mag;
-        self.reserve += into_reserve;
-        into_mag + into_reserve
+        left -= into_mag;
+
+        while left > 0 {
+            let next = self
+                .mags
+                .iter()
+                .enumerate()
+                .filter(|(_, held)| **held < size)
+                .max_by_key(|(_, held)| **held)
+                .map(|(i, _)| i);
+            let Some(i) = next else {
+                // Every magazine is full: the rest of the pickup stays on the
+                // ground, which is what a full load means.
+                break;
+            };
+            let take = (size - self.mags[i]).min(left);
+            self.mags[i] += take;
+            left -= take;
+        }
+        rounds - left
     }
 
     /// Spread in radians for the next shot.
@@ -1444,17 +2152,32 @@ impl Weapon {
         self.kick = (self.kick + 1.0).min(2.4);
         self.flash = 1.0;
         self.shots += 1;
-        self.inspect_t = 0.0;
+        // Firing takes the weapon back off the player's eye, but not instantly:
+        // the arm retracts over the next tenth of a second, which is what a hand
+        // doing it looks like. See `inspect_rewind`.
+        self.inspect_rewind = true;
         true
     }
 
+    /// Whether a spare magazine holds a round — what a reload would take.
+    fn fullest_spare(&self) -> Option<usize> {
+        self.mags
+            .iter()
+            .enumerate()
+            .filter(|(_, held)| **held > 0)
+            .max_by_key(|(_, held)| **held)
+            .map(|(i, _)| i)
+    }
+
     pub fn start_reload(&mut self) -> bool {
-        // A reload moves rounds *from the reserve into the magazine*: with an
-        // empty reserve there is nothing to move, and the click is dry.
+        // A reload swaps the magazine in the gun for a spare. With no spare
+        // holding a round there is nothing to swap in, and the click is dry —
+        // where this used to ask whether any loose rounds were left, which is
+        // not the same question once magazines are containers.
         if self.stats().infinite_ammo
             || self.is_reloading()
             || self.mag >= self.stats().mag_size
-            || self.reserve == 0
+            || self.fullest_spare().is_none()
         {
             return false;
         }
@@ -1470,21 +2193,38 @@ impl Weapon {
         self.flash = approach(self.flash, 0.0, dt * 16.0);
         self.bloom = approach(self.bloom, 0.0, dt * s.bloom_decay);
         self.kick = approach(self.kick, 0.0, dt * 9.0);
-        self.inspect_t = (self.inspect_t - dt).max(0.0);
+        // An interrupted inspect runs back to rest rather than being cut off, so
+        // the arm retracts instead of teleporting home. The timer still ends at
+        // zero either way; only the rate differs.
+        let rate = if self.inspect_rewind {
+            INSPECT_REWIND
+        } else {
+            1.0
+        };
+        self.inspect_t = (self.inspect_t - dt * rate).max(0.0);
+        if self.inspect_t <= 0.0 {
+            self.inspect_rewind = false;
+        }
         self.mag_check_t = (self.mag_check_t - dt).max(0.0);
 
         if self.reload_t > 0.0 {
             self.reload_t -= dt;
             if self.reload_t <= 0.0 {
                 self.reload_t = 0.0;
-                // The magazine takes what the reserve has: a reload out of a
-                // short reserve loads a partial magazine, which is what a
-                // finite reserve means.
-                let want = s.mag_size.saturating_sub(self.mag);
-                let take = want.min(self.reserve);
-                self.mag += take;
-                self.reserve -= take;
+                // The swap. The fullest spare goes in, and the magazine that
+                // came out goes back into the spares with whatever it still
+                // held — so a reload conserves ammunition instead of destroying
+                // the rounds in a half-empty magazine, and a magazine emptied
+                // later in the mission is a magazine with nothing in it, not a
+                // magazine that never existed.
+                if let Some(i) = self.fullest_spare() {
+                    let incoming = self.mags.remove(i);
+                    let outgoing = std::mem::take(&mut self.mag);
+                    self.mags.push(outgoing);
+                    self.mag = incoming;
+                }
                 self.bloom = 0.0;
+                self.reload_done = true;
             }
         }
     }
@@ -1526,7 +2266,7 @@ impl Arsenal {
     /// build the armory gave its kind, kept on the instance so no kind-mate
     /// sees it. `Kit` screens the builds before they get here; `carry` checks
     /// them again on the way in.
-    pub fn with_builds(loadout: [Option<WeaponKind>; 2], builds: &[WeaponBuild; 7]) -> Self {
+    pub fn with_builds(loadout: [Option<WeaponKind>; 2], builds: &[WeaponBuild; KIND_COUNT]) -> Self {
         let mut ars = Self {
             slots: [None, None, None, None],
             active: 0,
@@ -1566,7 +2306,7 @@ impl Arsenal {
     }
 
     /// The weapon in slot `i`, for the few things that stock it directly —
-    /// the stash's spare magazines, at mission start.
+    /// the armory's spare magazines, at mission start.
     pub fn slot_mut(&mut self, i: usize) -> Option<&mut Weapon> {
         self.slots.get_mut(i).and_then(|w| w.as_mut())
     }
@@ -1608,12 +2348,17 @@ impl Arsenal {
         // `active_weapon_mut`), so cancelling this one is cancelling the reload.
         if let Some(w) = self.slots[self.held_index()].as_mut() {
             w.reload_t = 0.0;
+            // A reload that was cancelled must not report finishing later.
+            w.reload_done = false;
         }
         self.active = i;
         self.switch_t = 0.34;
         // The weapon being drawn starts clean too: no carry-over inspect pose.
+        // The switch's own drop-and-rise covers the change, so this one is a cut
+        // by design.
         if let Some(w) = self.slots[i].as_mut() {
             w.inspect_t = 0.0;
+            w.inspect_rewind = false;
         }
     }
 
@@ -1768,6 +2513,69 @@ mod demo_parts {
                 amount: Value::Static(1.5),
             },
         ],
+    };
+    // The three generic magazine probes. They used to ship; the shipping
+    // magazine slot is per well now (see `parts`), and these stay where the
+    // model's own tests can reach them: one that adds capacity, one that trades
+    // capacity for speed through `MulPost`, and one whose numbers are rolled
+    // per copy.
+    pub const EXTENDED_MAG: PartDef = PartDef {
+        id: PartId("extended_mag"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_556"),
+        subslots: &[],
+        mods: &[
+            StatMod {
+                stat: StatId::MagSize,
+                kind: ModKind::Add,
+                amount: Value::Static(10.0),
+            },
+            StatMod {
+                stat: StatId::ReloadTime,
+                kind: ModKind::Add,
+                amount: Value::Static(0.15),
+            },
+        ],
+    };
+
+    /// A magazine that comes out faster, for a magazine that holds less.
+    pub const QUICK_MAG: PartDef = PartDef {
+        id: PartId("quick_mag"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_556"),
+        subslots: &[],
+        mods: &[
+            StatMod {
+                stat: StatId::ReloadTime,
+                // `MulPost`: the reload time is snapped into its envelope and
+                // rounded first, then shortened — the stage that reads "after
+                // the design bounds, this is what handling buys".
+                kind: ModKind::MulPost,
+                amount: Value::Static(0.72),
+            },
+            StatMod {
+                stat: StatId::MagSize,
+                kind: ModKind::MulPre,
+                amount: Value::Static(0.85),
+            },
+        ],
+    };
+
+    /// Surplus ammunition: the same crate, a different lot. A range is what
+    /// makes two copies of one part feel different without a second part.
+    pub const SURPLUS_LOT: PartDef = PartDef {
+        id: PartId("surplus_lot"),
+        slot: SlotId("magazine"),
+        interface: InterfaceId("magwell_556"),
+        subslots: &[],
+        mods: &[StatMod {
+            stat: StatId::Damage,
+            kind: ModKind::Add,
+            amount: Value::Range {
+                min: -2.0,
+                max: 6.0,
+            },
+        }],
     };
 }
 
@@ -2177,7 +2985,7 @@ mod tests {
                 falloff_end: 45.0,
                 falloff_min: 0.50,
                 fire_modes: SMG_MODES,
-                ..base(SlotClass::Primary, 14.0, 1, 0.055, 40, 1.50)
+                ..base(SlotClass::Primary, 14.0, 1, 0.055, 30, 1.50)
             },
             WeaponKind::Sniper => WeaponStats {
                 base_spread: 0.0009,
@@ -2220,6 +3028,118 @@ mod tests {
                 falloff_end: 45.0,
                 falloff_min: 0.45,
                 ..base(SlotClass::Pistol, 26.0, 1, 0.160, 15, 1.25)
+            },
+            WeaponKind::M4a1 => WeaponStats {
+                base_spread: 0.0044,
+                bloom_per_shot: 0.0052,
+                max_bloom: 0.042,
+                bloom_decay: 0.090,
+                recoil_pitch: 0.0150,
+                recoil_yaw: 0.0040,
+                ads_fov: 42.0,
+                move_scale: 1.03,
+                headshot_mult: 2.4,
+                falloff_start: 26.0,
+                falloff_end: 62.0,
+                falloff_min: 0.52,
+                fire_modes: RIFLE_MODES,
+                ..base(SlotClass::Primary, 22.0, 1, 0.070, 30, 1.25)
+            },
+            WeaponKind::Scar => WeaponStats {
+                base_spread: 0.0038,
+                bloom_per_shot: 0.0060,
+                max_bloom: 0.038,
+                bloom_decay: 0.080,
+                recoil_pitch: 0.0195,
+                recoil_yaw: 0.0046,
+                ads_fov: 40.0,
+                move_scale: 0.97,
+                headshot_mult: 2.4,
+                falloff_start: 34.0,
+                falloff_end: 78.0,
+                falloff_min: 0.58,
+                fire_modes: RIFLE_MODES,
+                ..base(SlotClass::Primary, 27.0, 1, 0.100, 30, 1.60)
+            },
+            WeaponKind::Fal => WeaponStats {
+                base_spread: 0.0050,
+                bloom_per_shot: 0.0075,
+                max_bloom: 0.050,
+                bloom_decay: 0.075,
+                recoil_pitch: 0.0270,
+                recoil_yaw: 0.0070,
+                ads_fov: 44.0,
+                move_scale: 0.93,
+                headshot_mult: 2.3,
+                falloff_start: 40.0,
+                falloff_end: 90.0,
+                falloff_min: 0.62,
+                fire_modes: RIFLE_MODES,
+                ..base(SlotClass::Primary, 43.0, 1, 0.090, 20, 2.20)
+            },
+            WeaponKind::Mp5 => WeaponStats {
+                base_spread: 0.0072,
+                bloom_per_shot: 0.0038,
+                max_bloom: 0.040,
+                bloom_decay: 0.095,
+                recoil_pitch: 0.0110,
+                recoil_yaw: 0.0030,
+                ads_fov: 46.0,
+                move_scale: 1.04,
+                headshot_mult: 2.0,
+                falloff_start: 18.0,
+                falloff_end: 46.0,
+                falloff_min: 0.45,
+                fire_modes: SMG_MODES,
+                ..base(SlotClass::Primary, 16.0, 1, 0.078, 30, 1.40)
+            },
+            WeaponKind::Mpx => WeaponStats {
+                base_spread: 0.0080,
+                bloom_per_shot: 0.0050,
+                max_bloom: 0.048,
+                bloom_decay: 0.090,
+                recoil_pitch: 0.0125,
+                recoil_yaw: 0.0036,
+                ads_fov: 44.0,
+                move_scale: 1.05,
+                headshot_mult: 2.0,
+                falloff_start: 16.0,
+                falloff_end: 42.0,
+                falloff_min: 0.42,
+                fire_modes: SMG_MODES,
+                ..base(SlotClass::Primary, 15.0, 1, 0.065, 30, 1.35)
+            },
+            WeaponKind::M110 => WeaponStats {
+                base_spread: 0.0016,
+                bloom_per_shot: 0.0100,
+                max_bloom: 0.045,
+                bloom_decay: 0.070,
+                recoil_pitch: 0.0300,
+                recoil_yaw: 0.0060,
+                ads_fov: 26.0,
+                move_scale: 0.95,
+                headshot_mult: 2.8,
+                falloff_start: 60.0,
+                falloff_end: 140.0,
+                falloff_min: 0.75,
+                fire_modes: SEMI,
+                ..base(SlotClass::Primary, 55.0, 1, 0.290, 20, 2.10)
+            },
+            WeaponKind::Mosin => WeaponStats {
+                base_spread: 0.0012,
+                bloom_per_shot: 0.0200,
+                max_bloom: 0.060,
+                bloom_decay: 0.060,
+                recoil_pitch: 0.0450,
+                recoil_yaw: 0.0090,
+                ads_fov: 22.0,
+                move_scale: 0.90,
+                headshot_mult: 3.0,
+                falloff_start: 80.0,
+                falloff_end: 200.0,
+                falloff_min: 0.85,
+                fire_modes: SEMI,
+                ..base(SlotClass::Primary, 140.0, 1, 1.40, 5, 3.10)
             },
             WeaponKind::Knife => WeaponStats {
                 base_spread: 0.0,
@@ -2352,7 +3272,7 @@ mod tests {
         let mut ars = Arsenal::new([Some(WeaponKind::Rifle), None]);
         let rifle = SlotClass::Primary as usize;
         ars.active_weapon_mut().mag = 12;
-        ars.active_weapon_mut().reserve = 30;
+        ars.active_weapon_mut().pack_magazines(1);
         assert!(
             ars.active_weapon_mut().start_reload(),
             "the reload did not start"
@@ -2380,64 +3300,189 @@ mod tests {
         assert_eq!(ars.active_weapon().mag, 30);
     }
 
-    /// The reserve is finite and a reload draws from it: a short reserve loads
-    /// a short magazine, an empty one refuses to load at all, and a pickup
-    /// fills the magazine before it tops the reserve up.
+    /// A reload reports finishing on the frame it finishes, and only then: the
+    /// signal `main.rs` turns into the "magazine in, weapon live" cue. Nothing
+    /// else in the weapon can say when it is safe to come out of cover.
     #[test]
-    fn a_reload_draws_from_the_reserve() {
+    fn a_reload_reports_finishing_exactly_once() {
         let mut w = Weapon::new(WeaponKind::Rifle);
-        assert_eq!(w.reserve, 0, "a weapon out of the crate carries no spares");
-        w.mag = 5;
-        assert!(!w.start_reload(), "an empty reserve loaded anyway");
+        w.mag = 4;
+        w.pack_magazines(1);
+        assert!(!w.take_reload_done(), "a fresh weapon reported a reload");
 
-        w.reserve = 7;
-        assert!(w.start_reload());
-        w.update(2.0);
-        assert_eq!(w.mag, 12, "the magazine took more than the reserve had");
-        assert_eq!(w.reserve, 0, "the reserve kept what it gave");
+        assert!(w.start_reload(), "the reload did not start");
+        w.update(w.stats().reload_time - FRAME * 0.5);
+        assert!(
+            !w.take_reload_done(),
+            "the reload was reported before the magazine was in"
+        );
 
-        // A full magazine is not reloaded, reserve or not.
-        w.mag = w.stats().mag_size;
-        w.reserve = 30;
+        w.update(FRAME);
+        assert!(w.take_reload_done(), "the finished reload went unreported");
+        assert!(!w.take_reload_done(), "the same reload was reported twice");
+    }
+
+    /// The other side of the same signal: a reload that was cancelled must not
+    /// fire the cue later, or the player hears "ready" from a weapon that never
+    /// finished loading.
+    #[test]
+    fn a_cancelled_reload_never_reports_finishing() {
+        let mut ars = Arsenal::new([Some(WeaponKind::Rifle), None]);
+        let rifle = SlotClass::Primary as usize;
+        ars.active_weapon_mut().mag = 4;
+        ars.active_weapon_mut().pack_magazines(1);
+        assert!(ars.active_weapon_mut().start_reload());
+
+        ars.select(SlotClass::Melee as usize);
+        ars.update(10.0);
+        ars.select(rifle);
+        assert!(
+            !ars.active_weapon_mut().take_reload_done(),
+            "a cancelled reload reported finishing"
+        );
+    }
+
+    /// The magazine is a container, and a reload swaps containers: what is left
+    /// in the magazine that comes out goes back into the spares. Rounds are
+    /// conserved, which the pool-of-loose-rounds model this replaced did not
+    /// manage — a reload out of a half-empty magazine destroyed the half that
+    /// was in it.
+    #[test]
+    fn a_reload_swaps_magazines_and_conserves_rounds() {
+        let mut w = Weapon::new(WeaponKind::Rifle);
+        assert_eq!(w.mag, 30, "a weapon out of the crate has a magazine seated");
+        assert_eq!(
+            w.reserve(),
+            0,
+            "a weapon out of the crate carries no spares"
+        );
+        assert_eq!(w.magazine_count(), 0);
+
+        // Half the magazine gone, then two full spares packed.
+        w.mag = 12;
+        w.pack_magazines(2);
+        assert_eq!(w.reserve(), 60);
+        assert_eq!(w.magazine_count(), 2);
+
+        let total = w.mag + w.reserve();
+        assert!(w.start_reload(), "the reload did not start");
+        w.update(w.stats().reload_time + 0.01);
+        assert_eq!(w.mag, 30, "the spare did not go into the gun");
+        assert_eq!(
+            w.mag + w.reserve(),
+            total,
+            "the rounds in the magazine that came out went missing"
+        );
+        assert_eq!(w.reserve(), 42, "the half-empty magazine was not kept");
+        assert_eq!(
+            w.magazine_count(),
+            2,
+            "a magazine changed hands into thin air"
+        );
+        // A full gun is not reloaded, spares or not.
         assert!(!w.start_reload());
 
-        // Pickups: the magazine first, the rest into the reserve.
+        // The next reload takes the fullest spare, not whatever is next in line.
+        w.mag = 4;
+        w.mags = vec![9, 30];
+        assert!(w.start_reload());
+        w.update(w.stats().reload_time + 0.01);
+        assert_eq!(w.mag, 30, "the reload did not reach for the fullest spare");
+        assert_eq!(w.mags, vec![9, 4], "what came out did not go back in");
+    }
+
+    /// A reload needs a spare that holds a round, and an empty magazine is
+    /// still carried: it is a container, and the armory's count of them does not
+    /// shrink when one is emptied. That is what a later pickup has to fill.
+    #[test]
+    fn a_reload_needs_a_spare_with_a_round_in_it() {
+        let mut w = Weapon::new(WeaponKind::Smg);
+        w.pack_magazines(1);
         w.mag = 0;
+        w.mags = vec![0];
+        assert!(!w.start_reload(), "a reload loaded from an empty magazine");
+        assert_eq!(w.magazine_count(), 1, "the empty magazine was dropped");
+
+        // A pickup fills the gun first, then the spare.
         assert_eq!(w.add_ammo(40), 40);
         assert_eq!(w.mag, 30);
-        assert_eq!(w.reserve, 40);
-        // A full magazine wastes nothing.
-        assert_eq!(w.add_ammo(10), 10);
-        assert_eq!(w.reserve, 50);
+        assert_eq!(w.reserve(), 10, "the pickup did not go into the spare");
+
+        // A full load takes nothing.
+        w.mag = 30;
+        w.mags = vec![30];
+        let total = w.mag + w.reserve();
+        assert_eq!(w.add_ammo(60), 0, "a full load took more ammunition");
+        assert_eq!(w.mag + w.reserve(), total);
     }
 
     /// The catalogue the game ships is a set of choices, and every part seats
     /// somewhere: ids unique, each part built for a slot some gun offers, each
     /// standard matching the slot it names — and a fully-kitted rifle legal.
+    ///
+    /// "Some gun" rather than "every gun" since the wells split: a 60-round
+    /// 5.56 quad-stack is meant to fit the rifle and nothing else, and this is
+    /// where that stops being an accident.
     #[test]
     fn the_shipped_catalogue_is_sound() {
         let mut seen = Vec::new();
         for p in SHIPPED {
             assert!(!seen.contains(&p.id.0), "duplicate part id {}", p.id.0);
             seen.push(p.id.0);
-            let slot = GUN_SLOTS
-                .iter()
-                .find(|s| s.id == p.slot)
-                .unwrap_or_else(|| panic!("{} is built for an unknown slot", p.id.0));
-            assert_eq!(
-                p.interface, slot.accepts,
-                "{} declares the wrong standard for {}",
-                p.id.0, p.slot.0
+
+            let fits = ALL_KINDS.iter().any(|kind| {
+                def(*kind)
+                    .slots
+                    .iter()
+                    .any(|s| s.id == p.slot && s.accepts == p.interface)
+            });
+            assert!(
+                fits,
+                "{} fits no gun: {} on {}",
+                p.id.0, p.interface.0, p.slot.0
             );
         }
+
+        // A magazine is the interesting case: every weapon has a well, and every
+        // well takes at least one magazine we ship — otherwise that weapon's
+        // magazine row is a single entry, which reads as a weapon with one
+        // magazine.
+        //
+        // Weapons *may* share a well, and now do: an M4A1, a SCAR-L and the
+        // MK-7 all take STANAG 5.56 magazines, and the two 9 mm machine pistols
+        // take the same sticks as the Viper. This used to assert that no two
+        // weapons shared a well, on the theory that a shared well let the
+        // rifle's sixty fit the shotgun; it never could, because the resolver
+        // checks the interface at fit time, and the rule that actually matters —
+        // a well with nothing written for it — is the assertion below.
+        for kind in ALL_KINDS {
+            let slots = def(kind).slots;
+            if slots.is_empty() {
+                assert_eq!(kind, WeaponKind::Knife, "{kind:?} offers no slots at all");
+                continue;
+            }
+            let well = slots
+                .iter()
+                .find(|s| s.id == SlotId("magazine"))
+                .unwrap_or_else(|| panic!("{kind:?} offers no magazine well"));
+            assert!(
+                SHIPPED
+                    .iter()
+                    .any(|p| p.slot == SlotId("magazine") && p.interface == well.accepts),
+                "{kind:?}'s well takes none of the magazines we ship"
+            );
+        }
+
+        // And the rifle's every slot can be filled from the shipping catalogue.
         let kit = WeaponBuild {
-            entries: GUN_SLOTS
+            entries: def(WeaponKind::Rifle)
+                .slots
                 .iter()
                 .map(|slot| BuildEntry {
                     slot: slot.id,
                     part: SHIPPED
                         .iter()
-                        .find(|p| p.slot == slot.id)
+                        .find(|p| p.slot == slot.id && p.interface == slot.accepts)
                         .expect("a slot with nothing to go in it")
                         .id,
                     roll: 0.4,
@@ -2507,8 +3552,8 @@ mod tests {
                 p.id.0
             );
         }
-        for slot in GUN_SLOTS {
-            assert!(slot_label(slot.id).is_some(), "{} has no name", slot.id.0);
+        for id in SLOT_IDS {
+            assert!(slot_label(id).is_some(), "{} has no name", id.0);
         }
     }
 }

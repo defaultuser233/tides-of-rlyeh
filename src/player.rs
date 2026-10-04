@@ -226,6 +226,11 @@ pub struct Player {
     /// Smoothed lean, -1..1.
     pub lean: f32,
     pub walk: bool,
+    /// True while the run is actually on: sprint held, pushing forward,
+    /// standing, not leaning and not aiming. The sprint gate wants this and not
+    /// the raw key, because holding the key while standing still is not a
+    /// sprint.
+    pub sprinting: bool,
 
     /// Offsets applied only to the camera while free-looking.
     pub free_yaw: f32,
@@ -282,6 +287,7 @@ impl Player {
             eye_smooth: Stance::Stand.eye(),
             lean: 0.0,
             walk: false,
+            sprinting: false,
             free_yaw: 0.0,
             free_pitch: 0.0,
             breath: 1.0,
@@ -607,6 +613,7 @@ impl Player {
             && self.ads < 0.4
             && stance == Stance::Stand
             && input.lean.abs() < 0.5;
+        self.sprinting = sprinting;
 
         let base_speed = if self.ads > 0.4 {
             AIM_SPEED * stance.height() / PLAYER_HEIGHT

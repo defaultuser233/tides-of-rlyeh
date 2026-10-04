@@ -129,9 +129,9 @@ pub struct Config {
     /// the text the file holds. Parsing is `weapon`'s job and is lossy in the
     /// kind way settings are: a line this build cannot read is repaired, the
     /// way one bad setting costs its own line and no more.
-    pub builds: [String; 7],
-    pub paints: [String; 7],
-    /// The loadout the stash carries into the field: the two long-gun slots
+    pub builds: [String; crate::weapon::KIND_COUNT],
+    pub paints: [String; crate::weapon::KIND_COUNT],
+    /// The loadout the armory carries into the field: the two long-gun slots
     /// (kind keys, or `none`), how many spare magazines each slot brings, and
     /// the consumable counts. `Kit` turns these into kinds and clamps them.
     pub primary: String,
@@ -640,12 +640,12 @@ mod tests {
             // numbering and the absence of a score distinguishable.
             best: [0, 1500, 325, 0, 0, 0],
             builds: {
-                let mut v: [String; 7] = std::array::from_fn(|_| String::new());
+                let mut v: [String; crate::weapon::KIND_COUNT] = std::array::from_fn(|_| String::new());
                 v[0] = "magazine=extended_mag@0.50".to_string();
                 v
             },
             paints: {
-                let mut v: [String; 7] = std::array::from_fn(|_| String::new());
+                let mut v: [String; crate::weapon::KIND_COUNT] = std::array::from_fn(|_| String::new());
                 v[2] = "desert@0.41:2718".to_string();
                 v
             },

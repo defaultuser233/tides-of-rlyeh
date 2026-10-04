@@ -7,10 +7,23 @@ use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 const GRAVITY: f32 = 23.0;
 
+/// How long a unit may spend pushing in a direction without going anywhere, and
+/// off the navigation field, before it is put back on the field. Long enough
+/// that a unit grinding along a wall on its way somewhere is never touched.
+const STUCK_LIMIT: f32 = 3.0;
+
 /// How close to the last known position counts as having searched it. A unit
 /// that has lost sight of the player walks back to where it last saw them and
 /// then holds; this is the radius that counts as "there".
 const SEARCH_REACH: f32 = 1.5;
+
+/// How long a unit stands at the last known position, looking, before it gives
+/// the memory up and goes back to hunting. This is the whole of the disengaging
+/// player's head start, so it is deliberately a beat rather than a moment: a
+/// squad that gave up the instant it arrived would make breaking contact worth
+/// nothing, and one that never gave up is what left hostiles standing in
+/// corridors for a whole mission.
+const SEARCH_HOLD: f32 = 4.0;
 
 /// Ground covered per full two-step cycle, in metres. Dividing a unit's speed
 /// by this is what ties the legs to how fast it is actually travelling, and
@@ -1284,6 +1297,12 @@ pub struct Enemy {
     /// the player instead of searching that spot.
     pub seen_player: bool,
     pub aware_t: f32,
+    /// Seconds spent pushing in a direction and going nowhere, off the walkable
+    /// field. At `STUCK_LIMIT` the unit is put back on the field.
+    stuck_t: f32,
+    /// Seconds spent standing at the last known position with nothing there.
+    /// Runs up to `SEARCH_HOLD`, at which point the memory is given up.
+    search_t: f32,
     pub dead: bool,
     pub death_t: f32,
     pub spawned_t: f32,
@@ -1336,6 +1355,8 @@ impl Enemy {
             last_seen: pos,
             seen_player: false,
             aware_t: 99.0,
+            stuck_t: 0.0,
+            search_t: 0.0,
             dead: false,
             death_t: 0.0,
             spawned_t: 0.0,
@@ -1354,20 +1375,16 @@ impl Enemy {
         }
     }
 
-    /// Tells this unit where the player was and starts it hunting.
+    /// Tells this unit where the player was and sends it after them.
     ///
     /// A freshly spawned enemy has never seen anything (`aware_t` starts at
     /// 99), and `pick_spawn` deliberately places reinforcements out of sight —
     /// so without this they stand at their spawn until the player happens to
-    /// walk into view. On an open arena that resolves itself; inside R'LYEH's
-    /// labyrinth it never does, and seven hostiles sat 20 m away for a full
-    /// minute doing nothing. `pursue` is how many seconds they keep coming
-    /// before giving up and returning to an idle state, so breaking contact is
-    /// still a real defence.
-    ///
-    /// A unit that has not laid eyes on the player yet has no memory to search,
-    /// only a place to go, so it keeps walking the flow field toward wherever
-    /// the player is now — see `search_dir` for what happens once it has.
+    /// walk into view. They do not stand there for long either way: a unit that
+    /// has never had eyes on the player keeps walking the flow field toward
+    /// wherever the player is now until it arrives. `pursue` is how long it
+    /// counts as having been *told* where the player was, which is what the map
+    /// reads when deciding whether to plot it — not a deadline on the hunt.
     pub fn alert_to(&mut self, pos: Vec3, pursue: f32) {
         self.last_seen = pos;
         self.aware_t = -pursue;
@@ -1550,6 +1567,7 @@ impl Enemy {
             self.last_seen = player.pos;
             self.seen_player = true;
             self.aware_t = 0.0;
+            self.search_t = 0.0;
         } else {
             self.aware_t += dt;
         }
@@ -1561,49 +1579,80 @@ impl Enemy {
         );
 
         // --- desired velocity -------------------------------------------------
-        // With neither sight nor recent contact the squad holds position. That
-        // is what makes crouching, going prone and walking worth doing.
-        let aware = player.alive && (los || self.aware_t < 6.0);
-        // A unit that has actually had eyes on the player searches the memory of
-        // where it last saw them. One that was merely *told* where the player was
-        // — a reinforcement, alerted at spawn — has no memory to search, only a
-        // place to go, so it keeps walking the flow field toward the player as
-        // before: that is what makes it arrive at the fight at all.
+        // The order the squad closes in is what matters here. A unit with eyes
+        // on the player fights; one that has lost them walks back to where it
+        // last saw them; and one with nothing to remember — a reinforcement,
+        // which was only *told* where the player was when it spawned — follows
+        // the flow field to wherever the player is now.
+        //
+        // What used to be here was a hard cap on all of it: `aware` lasted six
+        // seconds past the end of a twenty-second entry budget, so a hostile
+        // came for twenty-six seconds and then stood still for the rest of the
+        // mission. On a small arena that resolves itself; in R'LYEH's labyrinth
+        // the path is longer than the budget, and hostiles froze in corridors
+        // the player had no reason to walk down while the objective counter went
+        // on counting them — which is exactly what "I ran laps and never saw an
+        // enemy" was. Breaking contact still buys real distance, because the
+        // squad is briefly walking to the wrong place; it no longer ends the
+        // engagement.
+        if self.seen_player && !los && self.search_dir(level) == Vec2::ZERO {
+            // Standing where the player was last seen, with nothing there. Look
+            // for a beat, then give the memory up and join the hunt rather than
+            // holding the spot for the rest of the wave.
+            self.search_t += dt;
+            if self.search_t >= SEARCH_HOLD {
+                self.seen_player = false;
+                self.search_t = 0.0;
+            }
+        } else if self.search_t > 0.0 {
+            // Still walking to the memory, or eyes back on the player: the beat
+            // starts over the next time it arrives.
+            self.search_t = 0.0;
+        }
         let searching = !los && self.seen_player;
+        let hunting = !los && !self.seen_player;
         let mut desired = Vec2::ZERO;
-        if aware && self.spawned_t > 0.35 {
+        if player.alive && self.spawned_t > 0.35 {
             if s.reach > 0.0 {
                 // Melee: close the distance. An archetype with a standoff
                 // lashes from the edge of its reach instead of pressing in.
                 desired = if searching {
                     self.search_dir(level)
-                } else if !los {
+                } else if hunting {
                     level.flow.dir_at(self.pos)
                 } else if self.standoff > 0.0 && dist < self.standoff {
                     -flat.normalize_or_zero() * 0.8
                 } else {
                     flat.normalize_or_zero()
                 } * self.speed;
-            } else if searching {
-                // Lost contact: walk back to the last known position and hold
-                // there — slower than a charge, and without shooting.
-                desired = self.search_dir(level) * self.speed * 0.8;
-            } else if !los {
-                desired = level.flow.dir_at(self.pos) * self.speed * 0.8;
-            } else if dist > self.range * 0.9 || dist > self.standoff * 1.6 {
-                desired = level.flow.dir_at(self.pos) * self.speed;
-            } else if dist < self.standoff * 0.55 {
-                desired = -flat.normalize_or_zero() * self.speed * 0.8;
-            } else {
-                self.strafe_t -= dt;
-                if self.strafe_t <= 0.0 {
-                    self.strafe_t = rng.range(0.7, 2.1);
-                    if rng.chance(0.45) {
-                        self.strafe_dir = -self.strafe_dir;
+            } else if los {
+                if dist > self.range * 0.9 || dist > self.standoff * 1.6 {
+                    desired = level.flow.dir_at(self.pos) * self.speed;
+                } else if dist < self.standoff * 0.55 {
+                    desired = -flat.normalize_or_zero() * self.speed * 0.8;
+                } else {
+                    self.strafe_t -= dt;
+                    if self.strafe_t <= 0.0 {
+                        self.strafe_t = rng.range(0.7, 2.1);
+                        if rng.chance(0.45) {
+                            self.strafe_dir = -self.strafe_dir;
+                        }
                     }
+                    let perp = vec2(-flat.y, flat.x).normalize_or_zero();
+                    desired = perp * self.strafe_dir * self.speed * 0.7;
                 }
-                let perp = vec2(-flat.y, flat.x).normalize_or_zero();
-                desired = perp * self.strafe_dir * self.speed * 0.7;
+            } else if searching {
+                // Lost contact: walk back to the last known position — slower
+                // than a charge, and without shooting.
+                desired = self.search_dir(level) * self.speed * 0.8;
+            } else {
+                // Hunting: still walking to a place rather than to a memory, so
+                // it comes on without shooting — and it picks the pace up when
+                // the player is a long way off, which is the case the old cap
+                // was hiding. A body that spawned 65 m away across a labyrinth
+                // should not take half a minute to become a threat.
+                let hurry = ((dist - 22.0) / 18.0).clamp(0.0, 1.0);
+                desired = level.flow.dir_at(self.pos) * self.speed * (0.8 + 0.2 * hurry);
             }
         }
 
@@ -1682,6 +1731,27 @@ impl Enemy {
             0.0
         };
         self.advance_gait(dt, ground_speed);
+
+        // --- getting unstuck --------------------------------------------------
+        // A unit that is pushing in a direction, going nowhere, and standing on
+        // a cell the navigation field knows nothing about is not on its way
+        // anywhere: it is off the field, and it will still be there when the
+        // mission is over. `has_flow` is what tells the two apart — a unit
+        // grinding along a wall on a route the field does have is left alone,
+        // however slow it looks, because a long way round is not a stuck unit.
+        let pushing = desired.length() > self.speed * 0.25;
+        if pushing && ground_speed < self.speed * 0.15 && !level.has_flow(self.pos) {
+            self.stuck_t += dt;
+        } else {
+            self.stuck_t = 0.0;
+        }
+        if self.stuck_t >= STUCK_LIMIT {
+            self.stuck_t = 0.0;
+            if let Some(at) = level.navigable_near(self.pos, self.radius, self.height) {
+                self.pos = at;
+                self.vel = Vec3::ZERO;
+            }
+        }
 
         // --- facing -----------------------------------------------------------
         let face = if los && player.alive {
@@ -1834,6 +1904,7 @@ fn angle_toward(current: f32, target: f32, t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::maps;
 
     /// Orthographic silhouette of a prototype, as text.
     ///
@@ -2295,6 +2366,182 @@ mod tests {
         assert_eq!(
             e.gait, settled,
             "the phase crept on after the cycle stopped"
+        );
+    }
+
+    /// Flat distance from a point to the player, which is the distance every
+    /// steering decision in here is made in.
+    fn flat_to(p: Vec3, player: &Player) -> f32 {
+        vec2(p.x - player.pos.x, p.z - player.pos.z).length()
+    }
+
+    /// The farthest spawn in the campaign's largest arena, which is the worst
+    /// case the encounter rate ever has to survive.
+    fn worst_case() -> (Level, Player, Vec3) {
+        let campaign = maps::campaign();
+        let level = Level::from_layout(campaign.last().expect("six missions"));
+        let player = Player::new(level.player_start);
+        let far = level
+            .spawns
+            .iter()
+            .copied()
+            .max_by(|a, b| flat_to(*a, &player).total_cmp(&flat_to(*b, &player)))
+            .expect("the arena has spawns");
+        (level, player, far)
+    }
+
+    /// A hostile that cannot see the player does not stop coming.
+    ///
+    /// This is the one that made "I ran laps and never met anybody" possible:
+    /// the pursuit was capped by `alert_to`'s twenty seconds plus six, and after
+    /// that a unit held position for the rest of the mission. On an open arena
+    /// the player walks into them anyway; in R'LYEH's labyrinth the cap expired
+    /// somewhere in a corridor, with the objective counter still counting the
+    /// body. Ninety seconds is far past both the old cap and the length of the
+    /// maze.
+    #[test]
+    fn a_hostile_that_cannot_see_the_player_keeps_coming() {
+        let (mut level, player, far) = worst_case();
+        let mut rng = Rng::new(5);
+        let mut e = Enemy::spawn(Kind::Grunt, far, 1, &mut rng);
+        e.alert_to(player.pos, 20.0);
+        let start = flat_to(e.pos, &player);
+        assert!(start > 40.0, "the farthest spawn is only {start} m away");
+
+        let dt = 1.0 / 60.0;
+        for frame in 0..(90 * 60) {
+            // The field is the navigator and the game rebuilds it four times a
+            // second; a test that never rebuilds it is steering by nothing.
+            if frame % 15 == 0 {
+                level.flow.update(player.pos);
+            }
+            let _ = e.update(&level, &player, &[], 0, dt, &mut rng);
+        }
+        let now = flat_to(e.pos, &player);
+        assert!(
+            now < start - 20.0,
+            "a hostile with no sight of the player closed only {} of {start} m in ninety seconds",
+            start - now
+        );
+    }
+
+    /// And a unit that has finished searching where it last saw the player goes
+    /// back to hunting, instead of holding the spot for the rest of the wave.
+    #[test]
+    fn a_searched_memory_is_given_up_for_a_hunt() {
+        let (mut level, player, far) = worst_case();
+        let mut rng = Rng::new(9);
+        let mut e = Enemy::spawn(Kind::Grunt, far, 1, &mut rng);
+        // It has seen the player, and it is standing where it saw them: there is
+        // nothing left to search, so the only thing left to do is hunt.
+        e.seen_player = true;
+        e.last_seen = e.pos;
+        let start = flat_to(e.pos, &player);
+
+        let dt = 1.0 / 60.0;
+        level.flow.update(player.pos);
+        // The beat at the memory is deliberate, so the give-up is not on the
+        // first frame — but it is well inside a few seconds.
+        for frame in 0..(6 * 60) {
+            if frame % 15 == 0 {
+                level.flow.update(player.pos);
+            }
+            let _ = e.update(&level, &player, &[], 0, dt, &mut rng);
+        }
+        assert!(
+            !e.seen_player,
+            "a memory the unit was standing on was never given up"
+        );
+
+        for frame in 0..(60 * 60) {
+            if frame % 15 == 0 {
+                level.flow.update(player.pos);
+            }
+            let _ = e.update(&level, &player, &[], 0, dt, &mut rng);
+        }
+        let now = flat_to(e.pos, &player);
+        assert!(
+            now < start - 15.0,
+            "a unit that had finished searching froze: {start} m to {now} m"
+        );
+    }
+
+    /// A unit that ends up somewhere it cannot walk out of is put back on the
+    /// field, and steering never leaves it with nothing at all.
+    ///
+    /// This is the failure that costs a whole mission rather than a wave: the
+    /// release gate holds while `max_alive` is full, and a wave does not end
+    /// until every body it released is down — so one unit wedged in geometry, or
+    /// in a pocket the navigation grid has no route through, stops the wave, and
+    /// the wave stops the mission. It is also invisible from the player's side:
+    /// the objective counter still counts the body, and there is nothing on the
+    /// map to go and find.
+    #[test]
+    fn a_hostile_inside_geometry_gets_itself_out() {
+        let (mut level, player, _) = worst_case();
+        let mut rng = Rng::new(21);
+        let s = stats(Kind::Grunt);
+        // Somewhere the arena is solid, found by asking rather than guessed.
+        let mut stuck_at = None;
+        let mut x = -30.0;
+        'scan: while x < 30.0 {
+            let mut z = -30.0;
+            while z < 30.0 {
+                let p = vec3(x, 1.0, z);
+                if !level.point_free(p, s.radius, s.height) {
+                    stuck_at = Some(p);
+                    break 'scan;
+                }
+                z += 0.25;
+            }
+            x += 0.25;
+        }
+        let stuck_at = stuck_at.expect("the arena has solids");
+        assert!(
+            !level.point_free(stuck_at, s.radius, s.height),
+            "the scan did not find a solid"
+        );
+
+        // Steering first: off the field, the answer is the way to the player
+        // rather than none at all.
+        level.flow.update(player.pos);
+        let to_player = vec2(player.pos.x - stuck_at.x, player.pos.z - stuck_at.z).normalize();
+        let steer = level.flow.dir_at(stuck_at);
+        assert!(steer != Vec2::ZERO, "a unit off the field had nowhere to go");
+        assert!(
+            steer.dot(to_player) > 0.9,
+            "the fallback pointed {steer:?} rather than at the player"
+        );
+
+        let mut e = Enemy::spawn(Kind::Grunt, stuck_at, 1, &mut rng);
+        e.alert_to(player.pos, 20.0);
+        let dt = 1.0 / 60.0;
+        let mut out_at = None;
+        for frame in 0..(30 * 60) {
+            if frame % 15 == 0 {
+                level.flow.update(player.pos);
+            }
+            let _ = e.update(&level, &player, &[], 0, dt, &mut rng);
+            if level.point_free(e.pos, s.radius, s.height) {
+                out_at = Some(frame);
+                break;
+            }
+        }
+        let frames = out_at.expect("a hostile that started inside geometry never got out");
+        let _ = frames;
+
+        // And once out, it keeps going rather than settling where it landed.
+        let start = flat_to(e.pos, &player);
+        for frame in 0..(60 * 60) {
+            if frame % 15 == 0 {
+                level.flow.update(player.pos);
+            }
+            let _ = e.update(&level, &player, &[], 0, dt, &mut rng);
+        }
+        let now = flat_to(e.pos, &player);
+        assert!(
+            now < start - 5.0,
+            "a unit lifted out of geometry did not move on: {start} m to {now} m"
         );
     }
 }
