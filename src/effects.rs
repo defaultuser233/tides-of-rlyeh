@@ -4,6 +4,12 @@ use crate::util::{Rng, approach};
 use macroquad::prelude::*;
 
 const MAX_PARTICLES: usize = 900;
+/// How fast a flashbang's white gives the screen back: 1 per this many seconds,
+/// so `0.33` is the three seconds `grenade::FLASH_BLIND` blinds an enemy for.
+/// The two are deliberately the same length — a flash that took your screen for
+/// longer than it took an enemy's eyes would be a different thing than the one
+/// the description promises.
+const FLASH_FADE: f32 = 0.33;
 /// Debris settles this far above the surface it lands on. The arena floor sits
 /// at y = 0, so on flat ground this reproduces the bounce plane the bounce used
 /// to be hard-coded to; it is also the fallback when the level reports no
@@ -37,6 +43,12 @@ pub struct Effects {
     pub hit_marker: f32,
     pub head_marker: f32,
     pub kill_flash: f32,
+    /// How much of the screen a flashbang still owns, 1 down to 0.
+    ///
+    /// Its own field rather than a second use of `kill_flash`, because the two
+    /// are not the same light: a kill flash is a beat of white on the frame
+    /// something dies, and this is a screen you have to wait out.
+    pub flash_bang: f32,
     pub damage_numbers: Vec<(Vec3, f32, f32, bool)>,
 }
 
@@ -48,6 +60,7 @@ impl Effects {
             hit_marker: 0.0,
             head_marker: 0.0,
             kill_flash: 0.0,
+            flash_bang: 0.0,
             damage_numbers: Vec::new(),
         }
     }
@@ -59,6 +72,7 @@ impl Effects {
         self.hit_marker = 0.0;
         self.head_marker = 0.0;
         self.kill_flash = 0.0;
+        self.flash_bang = 0.0;
     }
 
     pub fn update(&mut self, dt: f32, level: &Level) {
@@ -96,6 +110,11 @@ impl Effects {
         self.hit_marker = approach(self.hit_marker, 0.0, dt * 4.5);
         self.head_marker = approach(self.head_marker, 0.0, dt * 4.5);
         self.kill_flash = approach(self.kill_flash, 0.0, dt * 3.0);
+        // Slower than the kill flash by a factor of five, and that is the whole
+        // difference between the two: a kill flash is a beat, and this is the
+        // seconds you spend unable to see. `FLASH_FADE` is the time from full
+        // white to nothing, so it matches `grenade::FLASH_BLIND`.
+        self.flash_bang = approach(self.flash_bang, 0.0, dt * FLASH_FADE);
 
         for d in &mut self.damage_numbers {
             d.0.y += dt * 0.85;

@@ -77,12 +77,14 @@ Useful as arena cover; `src/level.rs` already works in AABBs.
 
 ## 2. Sounds — `assets/sounds/`
 
-28 files, 1.05 MB total (1,049,528 B) in three groups: the six Kenney one-shots
-that were kept (§2), the thirteen weapon and combat cues re-cut from CC0 field
-recordings on 2026-10-03 (§2a), and the nine mostly-WAV files found for the
-effects that used to be synthesiser-only (§2b). Mono or stereo, 44.1 kHz
-throughout except the three §2b Oggs (`healing`, `pickup_health`,
-`mission_failed`), which are 48 kHz.
+35 files, 1.15 MB total (1,156,225 B) in four groups: the six Kenney
+one-shots that were kept (§2), the thirteen weapon and combat cues re-cut from
+CC0 field recordings on 2026-10-03 (§2a), the nine mostly-WAV files found for
+the effects that used to be synthesiser-only (§2b), and the seven surface and
+range takes promoted out of `variants/` on 2026-10-04 and 2026-10-05 (§2c). Two
+more takes were dropped rather than wired; that decision is §2d. Mono or
+stereo, 44.1 kHz throughout except the three §2b Oggs (`healing`,
+`pickup_health`, `mission_failed`), which are 48 kHz.
 
 **They are named after the `Sfx::file_name()` slots in `src/audio.rs`**, so
 `load_effect()` finds them automatically and they replace the built-in synth.
@@ -99,6 +101,33 @@ path is `assets/_downloads/<pack>/Audio/<stem>.ogg`. These six are unchanged.
 | `ui_back.ogg` | U | `click2` | 0.06 s | 2 | `Sfx::UiBack` |
 | `explosion.ogg` | S | `explosionCrunch_000` | 0.78 s | 1 | `Sfx::Explosion` |
 | `spawn.ogg` | S | `forceField_000` | 0.95 s | 1 | `Sfx::Spawn` |
+
+### 2c. Seven more Kenney takes, promoted from `variants/`
+
+These six were downloaded with the rest of the packs and parked in
+`assets/sounds/variants/` — named after a *material* or a *range* rather than
+after an engine slot, so nothing auto-loaded them. Four had no slot to load
+into at all: the mixer had one `hit_world`, and which of them a round should
+play is a question about the wall, which the level could not answer until
+`Level` started keeping the material of every solid. The other two are the
+ends of the explosion range.
+
+| Copied file | Pack | Source stem | Len | Engine slot |
+| --- | :-: | --- | ---: | --- |
+| `impact_concrete.ogg` | I | `impactPlate_light_000` | 0.54 s | `Sfx::HitConcrete` |
+| `impact_metal_light.ogg` | I | `impactMetal_light_000` | 0.35 s | `Sfx::HitMetal` |
+| `impact_metal_heavy.ogg` | I | `impactMetal_heavy_000` | 0.17 s | `Sfx::HitMetalHeavy` |
+| `impact_wood.ogg` | I | `impactPlank_medium_000` | 0.78 s | `Sfx::HitWood` |
+| `explosion_large.ogg` | S | `explosionCrunch_003` | 1.55 s | `Sfx::ExplosionLarge` |
+| `explosion_distant.ogg` | S | `lowFrequency_explosion_001` | 1.00 s | `Sfx::ExplosionDistant` |
+| `impact_glass.ogg` | I | `impactGlass_medium_000` | 0.54 s | `Sfx::HitGlass` |
+
+The choice is `impact_sfx()` in `src/main.rs`: the material of the solid the
+round stopped in, with `Sfx::HitWorld` — the field recording of a shooting
+gallery — as what a wall with no material of its own plays. `Sfx::Explosion` is
+still the bang across the middle of the arena; `ExplosionLarge` takes over
+within 12 m and `ExplosionDistant` past 35 m, where the crack never reaches the
+player and the tail does.
 
 ### 2a. The thirteen weapon and combat cues re-cut from field recordings
 
@@ -212,25 +241,30 @@ The four event cues the player has to place by ear (reference §19.4-10) live in
 | `Sfx::SanityCritical` | `sanity_critical` | the mind crosses into the critical band |
 | `Sfx::ReloadDone` | `reload_done` | the magazine is seated — synthesised, see above |
 
-### `assets/sounds/variants/` — 10 extra one-shots, not auto-loaded
+### 2d. Two takes that were dropped, and why they must not come back
 
-The engine has a single `hit_world` slot, so it cannot vary by surface. These
-are named *after a surface, not after a slot*, so nothing here is picked up by
-accident. Optional material for a future surface-aware impact system.
-10 files, 140 KB.
+These two were downloaded with the packs above, carried no slot, and are **no
+longer in the tree**: on 2026-10-05 they were moved to
+`assets/_downloads/rejected-takes/`, which is ignored by git. What is kept here is
+the decision, because the reason not to wire them is the part that would be
+expensive to rediscover.
 
-| File | Pack | Source stem | Len |
-| --- | :-: | --- | ---: |
-| `impact_metal_light.ogg` | I | `impactMetal_light_000` | 0.35 s |
-| `impact_metal_heavy.ogg` | I | `impactMetal_heavy_000` | 0.17 s |
-| `impact_concrete.ogg` | I | `impactPlate_light_000` | 0.54 s |
-| `impact_wood.ogg` | I | `impactPlank_medium_000` | 0.78 s |
-| `impact_glass.ogg` | I | `impactGlass_medium_000` | 0.54 s |
-| `footstep_concrete_02.ogg` | I | `footstep_concrete_002` | 0.11 s |
-| `explosion_large.ogg` | S | `explosionCrunch_003` | 1.55 s |
-| `explosion_deep.ogg` | S | `lowFrequency_explosion_000` | 2.00 s |
-| `explosion_distant.ogg` | S | `lowFrequency_explosion_001` | 1.00 s |
-| `enemy_shot_alt.ogg` | S | `laserRetro_003` | 0.25 s |
+| File | Pack | Source stem | Len | Why it must not be wired |
+| --- | :-: | --- | ---: | --- |
+| `footstep_concrete_02.ogg` | I | `footstep_concrete_002` | 0.11 s | a second *Kenney* footstep. `Sfx::Footstep` was deliberately re-cut to a field recording of boots on stone (§2a); this would put the library take back into the pool |
+| `enemy_shot_alt.ogg` | S | `laserRetro_003` | 0.25 s | the same story: §2a replaced the enemy gunshot's Kenney `laser*` material with a real recording, and this is one of the "pew" beams it was replaced *for* |
+
+**Do not bring these two back** as extra voices for their slots. They are the
+material those two slots were deliberately moved off (§2a); a pool that plays
+them some of the time is that decision undone. They were left out of the tree
+rather than merely documented out of it, because a take sitting in
+`assets/sounds/` reads as one that is shipped — every other file in that
+directory is compiled into the executable, and a directory that is one thing for
+35 files and another thing for two is how the next person wires the wrong sound.
+
+The other two takes that were parked alongside these are both accounted for:
+`explosion_deep.ogg` was byte-identical to `elite_arrival.ogg` and was deleted,
+and `impact_glass.ogg` is now `Sfx::HitGlass` in §2c — a molotov is what breaks.
 
 ---
 

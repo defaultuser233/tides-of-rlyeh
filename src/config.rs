@@ -35,6 +35,9 @@
 //! lean_toggle = true
 //! invert_y = false
 //! show_fps = false
+//! show_arc = true
+//! auto_pickup = true
+//! auto_use = false
 //! lang = zh
 //! unlocked = 1
 //! last_mission = 0
@@ -52,6 +55,13 @@
 //! of nonsense loads as [`Config::default`], and a save that fails prints one
 //! line to stderr and changes nothing else. Nothing in this module panics: the
 //! file is user-editable text that the game has to survive.
+//!
+//! A save never writes the file in place. The text goes to `config.tmp` beside
+//! it and is moved onto the name afterwards, so a save that is interrupted —
+//! by a crash, a power cut, or a scanner holding the handle — leaves the file
+//! it was replacing exactly as it was rather than half of the new one. This
+//! file holds the only copy of the player's progress, and `unlocked`, `best_*`,
+//! `build_*` and `paint_*` are not reconstructible from anywhere else.
 
 use std::io::Write;
 use std::ops::RangeInclusive;
@@ -110,6 +120,19 @@ pub struct Config {
     pub lean_toggle: bool,
     pub invert_y: bool,
     pub show_fps: bool,
+    /// Whether a throwable in hand draws the path it would take. On by default:
+    /// the line is the only thing that answers "where does this land", and the
+    /// setting exists for the players who would rather read the world.
+    pub show_arc: bool,
+    /// Whether a crate on the ground is taken on contact, or only while `F` is
+    /// held. Ammunition, armour and medical crates alike.
+    pub auto_pickup: bool,
+    /// Whether a medical crate is spent where it lies or carried. Automatic
+    /// means the heal lands the moment the crate is picked up; manual means it
+    /// goes into the bandage slot and `V` is what spends it. Nothing else on the
+    /// ground has a "use" to separate from its "pick up", so this is the
+    /// medical crate's own setting.
+    pub auto_use: bool,
     pub lang: Lang,
     /// How many missions the player has reached, one-based: `1` is a fresh
     /// save and `3` means missions 1 and 2 are done. The file is the only
@@ -140,6 +163,8 @@ pub struct Config {
     pub secondary_mags: u32,
     pub frags: u32,
     pub smokes: u32,
+    pub flashes: u32,
+    pub molotovs: u32,
     pub bandages: u32,
     pub medkits: u32,
     pub painkillers: u32,
@@ -164,6 +189,12 @@ impl Default for Config {
             lean_toggle: true,
             invert_y: false,
             show_fps: false,
+            show_arc: true,
+            // Taking what you walk over is the shipped feel. Spending a medical
+            // crate the instant it is touched is not: the crate is worth more as
+            // something carried to cover and used when the player decides.
+            auto_pickup: true,
+            auto_use: false,
             lang: Lang::Zh,
             unlocked: 1,
             last_mission: 0,
@@ -180,6 +211,8 @@ impl Default for Config {
             secondary_mags: 0,
             frags: 2,
             smokes: 1,
+            flashes: 1,
+            molotovs: 1,
             bandages: 3,
             medkits: 1,
             painkillers: 1,
@@ -249,11 +282,21 @@ pub fn load() -> Config {
 /// Which file to read: the current one, or the pre-rename one when the current
 /// one has never been written. Split out so the rule can be tested with two
 /// files in a temporary directory rather than by renaming the reader.
+///
+/// "Never written" counts a file of no bytes. That is what an interrupted save
+/// leaves behind, and reading it as a real file would abandon a pre-rename
+/// save that is still whole on the disk (review R3).
 fn source_path(current: PathBuf, legacy: Option<PathBuf>) -> PathBuf {
     match legacy {
-        Some(old) if !current.exists() && old.exists() => old,
+        Some(old) if !has_contents(&current) && old.exists() => old,
         _ => current,
     }
+}
+
+/// Whether anything has ever been written to `path`. Unreadable and absent both
+/// answer no.
+fn has_contents(path: &Path) -> bool {
+    path.metadata().map(|m| m.len() > 0).unwrap_or(false)
 }
 
 /// The pre-rename settings path, from the same environment `path` reads.
@@ -269,18 +312,26 @@ pub fn legacy_path() -> Option<PathBuf> {
 
 /// Writes the settings, creating the settings directory on the first save.
 ///
-/// A failed write is one line on stderr: the settings are still in memory and
-/// the session carries on with them, because a read-only home directory is not a
-/// reason to interrupt a game.
-pub fn save(config: &Config) {
+/// A failed write is one line on stderr and a `false`: the settings are still in
+/// memory and the session carries on with them, because a read-only home
+/// directory is not a reason to interrupt a game. The return value exists for the
+/// settings screen — the one place the player asked for the save — so that a
+/// write which did not happen can be admitted rather than passed over in
+/// silence (review R3).
+pub fn save(config: &Config) -> bool {
     let Some(path) = path() else {
         // No settings directory in the environment: the game runs, the setting
         // simply does not outlive the session. There is nowhere to report this
-        // to either, so it is silent.
-        return;
+        // to either, so the file is silent about it — but the caller is told,
+        // because "there is nowhere to put this" is still not a save.
+        return false;
     };
-    if let Err(e) = save_to(&path, config) {
-        eprintln!("tides-of-rlyeh: cannot write {}: {e}", path.display());
+    match save_to(&path, config) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("tides-of-rlyeh: cannot write {}: {e}", path.display());
+            false
+        }
     }
 }
 
@@ -298,11 +349,35 @@ fn load_from(path: &Path) -> Config {
 }
 
 /// `save` for a path the caller resolved: see `load_from`.
+///
+/// The file is written beside its own name and then moved into place, because
+/// `File::create` truncates before it writes and this file holds the only copy
+/// of the player's progress: a crash, a `kill -9`, a power cut or an antivirus
+/// scanner holding the handle between those two moments would leave a
+/// truncated or empty `config`, and `unlocked`, `best_*`, `build_*` and
+/// `paint_*` would silently come back as defaults next launch (review R3). The
+/// move gives a reader the whole old file or the whole new one and never a
+/// half of either.
 fn save_to(path: &Path, config: &Config) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::File::create(path)?.write_all(render(config).as_bytes())
+    let tmp = path.with_extension("tmp");
+    {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(render(config).as_bytes())?;
+        // On the disk before the move: a rename can be durable while the bytes
+        // it would point at are still only in the cache.
+        file.sync_all()?;
+    }
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Leave nothing beside the file for the next save to trip over.
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
 }
 
 /// The text a settings file holds for these settings. See the module docs for
@@ -326,6 +401,9 @@ fn render(config: &Config) -> String {
     let _ = writeln!(out, "lean_toggle = {}", config.lean_toggle);
     let _ = writeln!(out, "invert_y = {}", config.invert_y);
     let _ = writeln!(out, "show_fps = {}", config.show_fps);
+    let _ = writeln!(out, "show_arc = {}", config.show_arc);
+    let _ = writeln!(out, "auto_pickup = {}", config.auto_pickup);
+    let _ = writeln!(out, "auto_use = {}", config.auto_use);
     let _ = writeln!(
         out,
         "lang = {}",
@@ -375,6 +453,12 @@ fn render(config: &Config) -> String {
     if config.smokes != issued.smokes {
         let _ = writeln!(out, "smokes = {}", config.smokes);
     }
+    if config.flashes != issued.flashes {
+        let _ = writeln!(out, "flashes = {}", config.flashes);
+    }
+    if config.molotovs != issued.molotovs {
+        let _ = writeln!(out, "molotovs = {}", config.molotovs);
+    }
     if config.bandages != issued.bandages {
         let _ = writeln!(out, "bandages = {}", config.bandages);
     }
@@ -415,6 +499,9 @@ fn parse(text: &str) -> Config {
             "lean_toggle" => set_bool(&mut config.lean_toggle, value),
             "invert_y" => set_bool(&mut config.invert_y, value),
             "show_fps" => set_bool(&mut config.show_fps, value),
+            "show_arc" => set_bool(&mut config.show_arc, value),
+            "auto_pickup" => set_bool(&mut config.auto_pickup, value),
+            "auto_use" => set_bool(&mut config.auto_use, value),
             "lang" => {
                 if let Some(lang) = parse_lang(value) {
                     config.lang = lang;
@@ -446,6 +533,11 @@ fn parse(text: &str) -> Config {
             "secondary_mags" => set_count(&mut config.secondary_mags, value, 0..=8),
             "frags" => set_count(&mut config.frags, value, 0..=4),
             "smokes" => set_count(&mut config.smokes, value, 0..=3),
+            // The two newer throwables are capped lower than the two older ones:
+            // the caps are the whole cost of stocking up, and a pouch that could
+            // carry everything at once would have no loadout to choose.
+            "flashes" => set_count(&mut config.flashes, value, 0..=2),
+            "molotovs" => set_count(&mut config.molotovs, value, 0..=2),
             "bandages" => set_count(&mut config.bandages, value, 0..=5),
             "medkits" => set_count(&mut config.medkits, value, 0..=5),
             "painkillers" => set_count(&mut config.painkillers, value, 0..=5),
@@ -633,6 +725,9 @@ mod tests {
             lean_toggle: false,
             invert_y: true,
             show_fps: true,
+            show_arc: false,
+            auto_pickup: false,
+            auto_use: true,
             lang: Lang::En,
             unlocked: 4,
             last_mission: 3,
@@ -640,12 +735,14 @@ mod tests {
             // numbering and the absence of a score distinguishable.
             best: [0, 1500, 325, 0, 0, 0],
             builds: {
-                let mut v: [String; crate::weapon::KIND_COUNT] = std::array::from_fn(|_| String::new());
+                let mut v: [String; crate::weapon::KIND_COUNT] =
+                    std::array::from_fn(|_| String::new());
                 v[0] = "magazine=extended_mag@0.50".to_string();
                 v
             },
             paints: {
-                let mut v: [String; crate::weapon::KIND_COUNT] = std::array::from_fn(|_| String::new());
+                let mut v: [String; crate::weapon::KIND_COUNT] =
+                    std::array::from_fn(|_| String::new());
                 v[2] = "desert@0.41:2718".to_string();
                 v
             },
@@ -655,6 +752,8 @@ mod tests {
             secondary_mags: 3,
             frags: 0,
             smokes: 3,
+            flashes: 2,
+            molotovs: 1,
             bandages: 5,
             medkits: 2,
             painkillers: 0,
@@ -771,11 +870,48 @@ mod tests {
         save_to(&new, &Config::default()).expect("write the current file");
         assert_eq!(source_path(new.clone(), Some(old.clone())), new);
 
+        // A save cut off before it wrote anything leaves a file of no bytes
+        // behind; that is not a file the player has written, so the pre-rename
+        // one is read rather than being abandoned for good.
+        std::fs::write(&new, "").expect("truncate the current file");
+        assert_eq!(source_path(new.clone(), Some(old.clone())), old);
+
         // No legacy file at all (a first run, or one already migrated): the
         // current path is the answer whether or not it exists.
         assert_eq!(source_path(new.clone(), None), new);
         let _ = std::fs::remove_file(&old);
         let _ = std::fs::remove_file(&new);
+    }
+
+    /// A save replaces the file whole: the second save is what is read back, and
+    /// the file it went through on the way is not left lying beside it.
+    #[test]
+    fn a_save_replaces_the_file_whole() {
+        let path = temp_file("whole-replace");
+        let first = Config {
+            volume: 0.2,
+            unlocked: 3,
+            ..Config::default()
+        };
+        save_to(&path, &first).expect("write the first save");
+
+        let second = Config {
+            volume: 0.9,
+            unlocked: 6,
+            ..Config::default()
+        };
+        save_to(&path, &second).expect("write over the first save");
+
+        let text = std::fs::read_to_string(&path).expect("read the file back");
+        let got = parse(&text);
+        assert_eq!(got.volume, 0.9);
+        assert_eq!(got.unlocked, 6);
+        assert_eq!(text, render(&second), "the file is one whole save, not two");
+        assert!(
+            !path.with_extension("tmp").exists(),
+            "the temporary file was left behind"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Best scores come back by mission number, and a mission number the
@@ -842,11 +978,22 @@ mod tests {
     }
 
     /// A save that cannot be written reports an error instead of taking the game
-    /// down with it. A directory is the cheapest unwritable path: it exists, so
-    /// nothing can be created at its own name.
+    /// down with it, and does not leave its temporary file behind for the next
+    /// save to trip over. A directory is the cheapest unwritable target: it
+    /// exists, so nothing can be moved onto its name.
     #[test]
     fn a_failed_write_is_an_error_not_a_panic() {
-        assert!(save_to(&std::env::temp_dir(), &Config::default()).is_err());
+        let dir = std::env::temp_dir().join("tides-of-rlyeh-cannot-write");
+        let _ = std::fs::remove_dir_all(&dir);
+        let target = dir.join("config-is-a-directory");
+        std::fs::create_dir_all(&target).expect("make the temporary directory");
+
+        assert!(save_to(&target, &Config::default()).is_err());
+        assert!(
+            !target.with_extension("tmp").exists(),
+            "the temporary file was left behind"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The sample in the module docs is the file this build writes. If a field
@@ -865,6 +1012,9 @@ mod tests {
                       lean_toggle = true\n\
                       invert_y = false\n\
                       show_fps = false\n\
+                      show_arc = true\n\
+                      auto_pickup = true\n\
+                      auto_use = false\n\
                       lang = zh\n\
                       unlocked = 1\n\
                       last_mission = 0\n";

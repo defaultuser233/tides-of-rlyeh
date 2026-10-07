@@ -19,6 +19,7 @@
 //! wins. Depth and roll move the weapon without moving the line its sights sit
 //! on, so they stay at full strength whatever the aim.
 
+use crate::grenade::GrenadeKind;
 use crate::player::{Player, Stance};
 use crate::util::approach;
 use crate::weapon::{ALL_KINDS, Arsenal, Weapon, WeaponBuild, WeaponKind};
@@ -40,6 +41,44 @@ const STANCE_RATE: f32 = 5.5;
 const WALK_BOB: f32 = 0.50;
 /// Length of the grenade throw motion, in seconds.
 const GRENADE_TIME: f32 = 0.50;
+
+/// How fast the weapon leaves the eye when a throwable comes to hand, and comes
+/// back when it goes.
+const HOLD_RATE: f32 = 6.0;
+
+/// Where a throwable is held, in the view's own space: right, down, and metres
+/// forward of the eye.
+///
+/// Written down once, because two things have to agree about it: the viewmodel
+/// draws the thing here, and the game throws it from here — `main.rs` maps this
+/// into the world with the camera's own basis (`hand_pos`), which is why there is
+/// one mark on screen and one starting point for the arc rather than two that
+/// nearly line up.
+///
+/// The right hand, because the gun is not in it: a throwable in hand puts the
+/// weapon away (see `HOLD_DROP`), so the hand that was holding the rifle is the
+/// hand that throws. Down and out of the middle as well, so the arc — which
+/// leaves this point — is not drawn through the thing it leaves.
+pub const HAND_OFFSET: Vec3 = vec3(0.129, -0.126, 0.335);
+
+/// How far the weapon is put away while a throwable is in the throwing hand:
+/// down, back towards the eye, and a little outboard, with the muzzle canted
+/// over. How far is not a matter of taste — the test
+/// `the_weapon_is_put_away_while_a_throwable_is_in_hand` measures every vertex
+/// of every weapon against the frame, and "put away" means none of them is in
+/// it.
+const HOLD_DROP: f32 = 0.62;
+const HOLD_BACK: f32 = 0.080;
+const HOLD_OUT: f32 = 0.040;
+const HOLD_CANT: Vec3 = vec3(0.34, 0.16, 0.30);
+
+/// How far the throwing hand has to rise into the frame with the thing in it,
+/// and how far it is carried off the bottom of the frame by the throw.
+const HAND_RISE: f32 = 0.30;
+const HAND_FALL: f32 = 0.45;
+/// How much of the throw motion the arm takes to clear the frame — the whole of
+/// the time the weapon waits for it. See `arm_falling`.
+const THROW_CLEAR: f32 = 0.45;
 
 /// How far the sights have to be up before the sniper's scope tube is left out
 /// of the in-hand model, as a share of the ADS weight. Halfway is where the eye
@@ -83,6 +122,19 @@ const BRASS: Color = Color::new(0.52, 0.39, 0.17, 1.0);
 const GLOVE: Color = Color::new(0.30, 0.25, 0.19, 1.0);
 const GLOVE_DARK: Color = Color::new(0.19, 0.16, 0.12, 1.0);
 const SLEEVE: Color = Color::new(0.31, 0.33, 0.26, 1.0);
+/// A throwable's openings — a smoke grenade's vents, the perforations an M84 is
+/// made of. Its body is the kind's own colour (`GrenadeKind::color`), which is
+/// the part that says which one is in the hand; this is what is behind the
+/// wall of it.
+const CASE: Color = Color::new(0.09, 0.10, 0.12, 1.0);
+/// The rag in a bottle's neck, which is cloth and not steel.
+const RAG: Color = Color::new(0.66, 0.62, 0.50, 1.0);
+/// The lever's and the rag's own thicknesses, from the world's constants: they
+/// are drawn here at `HELD_HALF` instead of `HALF`, and a part that did not
+/// shrink with the object would be a full-sized spoon in a hand-sized grenade.
+const LEVER_HALF: f32 = crate::grenade::LEVER_HALF;
+const WICK_HALF: f32 = crate::grenade::WICK_HALF;
+const WICK_STRAND: f32 = crate::grenade::WICK_STRAND;
 
 /// A finish: the colour each paintable role is drawn in.
 ///
@@ -892,55 +944,226 @@ fn sniper_scope(out: &mut Vec<Tri>) {
 /// A carbine: the rifle's receiver shortened, a flat-top rail, a telescoping
 /// stock and a barrel short enough to come up fast.
 fn m4a1(out: &mut Vec<Tri>, _d: &Def) {
-    box3(out, vec3(-0.036, -0.120, -0.190), vec3(0.036, -0.034, 0.200), STEEL);
-    box3(out, vec3(-0.030, -0.034, -0.140), vec3(0.030, -0.020, 0.235), RAIL);
-    box3(out, vec3(-0.028, -0.110, 0.200), vec3(0.028, -0.056, 0.415), POLY);
-    box3(out, vec3(-0.012, -0.098, 0.415), vec3(0.012, -0.064, 0.610), STEEL_DARK);
-    box3(out, vec3(-0.018, -0.102, 0.610), vec3(0.018, -0.060, 0.672), BLACK);
-    front_sight(out, vec3(-0.012, -0.056, 0.566), vec3(0.012, -0.032, 0.598), 0.582);
+    box3(
+        out,
+        vec3(-0.036, -0.120, -0.190),
+        vec3(0.036, -0.034, 0.200),
+        STEEL,
+    );
+    box3(
+        out,
+        vec3(-0.030, -0.034, -0.140),
+        vec3(0.030, -0.020, 0.235),
+        RAIL,
+    );
+    box3(
+        out,
+        vec3(-0.028, -0.110, 0.200),
+        vec3(0.028, -0.056, 0.415),
+        POLY,
+    );
+    box3(
+        out,
+        vec3(-0.012, -0.098, 0.415),
+        vec3(0.012, -0.064, 0.610),
+        STEEL_DARK,
+    );
+    box3(
+        out,
+        vec3(-0.018, -0.102, 0.610),
+        vec3(0.018, -0.060, 0.672),
+        BLACK,
+    );
+    front_sight(
+        out,
+        vec3(-0.012, -0.056, 0.566),
+        vec3(0.012, -0.032, 0.598),
+        0.582,
+    );
     rear_sight(out, -0.062, -0.034, 0.004, -0.030);
-    bar(out, vec3(0.0, -0.120, -0.056), vec2(0.016, 0.024), vec3(0.0, -0.196, -0.104), vec2(0.014, 0.021), POLY);
+    bar(
+        out,
+        vec3(0.0, -0.120, -0.056),
+        vec2(0.016, 0.024),
+        vec3(0.0, -0.196, -0.104),
+        vec2(0.014, 0.021),
+        POLY,
+    );
     // The buffer tube, and the stock sliding on it.
-    bar(out, vec3(0.0, -0.086, -0.190), vec2(0.016, 0.020), vec3(0.0, -0.092, -0.296), vec2(0.014, 0.017), STEEL_DARK);
-    box3(out, vec3(-0.030, -0.128, -0.300), vec3(0.030, -0.050, -0.272), POLY);
-    box3(out, vec3(-0.008, -0.132, -0.268), vec3(0.008, -0.046, -0.206), RAIL);
+    bar(
+        out,
+        vec3(0.0, -0.086, -0.190),
+        vec2(0.016, 0.020),
+        vec3(0.0, -0.092, -0.296),
+        vec2(0.014, 0.017),
+        STEEL_DARK,
+    );
+    box3(
+        out,
+        vec3(-0.030, -0.128, -0.300),
+        vec3(0.030, -0.050, -0.272),
+        POLY,
+    );
+    box3(
+        out,
+        vec3(-0.008, -0.132, -0.268),
+        vec3(0.008, -0.046, -0.206),
+        RAIL,
+    );
 }
 
 /// A rifle with a folding stock and a long railed handguard: the MK-7's round,
 /// fired slower and harder.
+#[allow(clippy::approx_constant)] // the folded stock's length, not a constant
 fn scar(out: &mut Vec<Tri>, _d: &Def) {
-    box3(out, vec3(-0.040, -0.126, -0.196), vec3(0.040, -0.030, 0.230), STEEL);
-    box3(out, vec3(-0.032, -0.030, -0.150), vec3(0.032, -0.014, 0.300), RAIL);
-    box3(out, vec3(-0.030, -0.116, 0.230), vec3(0.030, -0.052, 0.470), POLY);
-    box3(out, vec3(-0.030, -0.052, 0.230), vec3(0.030, -0.040, 0.470), RAIL);
-    box3(out, vec3(-0.013, -0.100, 0.470), vec3(0.013, -0.062, 0.700), STEEL_DARK);
-    box3(out, vec3(-0.019, -0.104, 0.700), vec3(0.019, -0.058, 0.762), BLACK);
-    front_sight(out, vec3(-0.013, -0.058, 0.652), vec3(0.013, -0.032, 0.686), 0.668);
+    box3(
+        out,
+        vec3(-0.040, -0.126, -0.196),
+        vec3(0.040, -0.030, 0.230),
+        STEEL,
+    );
+    box3(
+        out,
+        vec3(-0.032, -0.030, -0.150),
+        vec3(0.032, -0.014, 0.300),
+        RAIL,
+    );
+    box3(
+        out,
+        vec3(-0.030, -0.116, 0.230),
+        vec3(0.030, -0.052, 0.470),
+        POLY,
+    );
+    box3(
+        out,
+        vec3(-0.030, -0.052, 0.230),
+        vec3(0.030, -0.040, 0.470),
+        RAIL,
+    );
+    box3(
+        out,
+        vec3(-0.013, -0.100, 0.470),
+        vec3(0.013, -0.062, 0.700),
+        STEEL_DARK,
+    );
+    box3(
+        out,
+        vec3(-0.019, -0.104, 0.700),
+        vec3(0.019, -0.058, 0.762),
+        BLACK,
+    );
+    front_sight(
+        out,
+        vec3(-0.013, -0.058, 0.652),
+        vec3(0.013, -0.032, 0.686),
+        0.668,
+    );
     rear_sight(out, -0.066, -0.030, 0.006, -0.026);
-    bar(out, vec3(0.0, -0.126, -0.052), vec2(0.017, 0.026), vec3(0.0, -0.204, -0.104), vec2(0.015, 0.022), POLY);
+    bar(
+        out,
+        vec3(0.0, -0.126, -0.052),
+        vec2(0.017, 0.026),
+        vec3(0.0, -0.204, -0.104),
+        vec2(0.015, 0.022),
+        POLY,
+    );
     // The folding stock: a hinge block, then a slab that folds against the side.
-    box3(out, vec3(-0.024, -0.106, -0.230), vec3(0.024, -0.056, -0.196), STEEL_DARK);
-    box3(out, vec3(-0.026, -0.120, -0.318), vec3(0.026, -0.048, -0.230), POLY);
-    box3(out, vec3(-0.028, -0.118, -0.322), vec3(0.028, -0.050, -0.310), BLACK);
+    box3(
+        out,
+        vec3(-0.024, -0.106, -0.230),
+        vec3(0.024, -0.056, -0.196),
+        STEEL_DARK,
+    );
+    box3(
+        out,
+        vec3(-0.026, -0.120, -0.318),
+        vec3(0.026, -0.048, -0.230),
+        POLY,
+    );
+    box3(
+        out,
+        vec3(-0.028, -0.118, -0.322),
+        vec3(0.028, -0.050, -0.310),
+        BLACK,
+    );
     // A cheek piece, which is most of what tells it from the carbine.
-    box3(out, vec3(-0.022, -0.048, -0.300), vec3(0.022, -0.020, -0.230), POLY);
+    box3(
+        out,
+        vec3(-0.022, -0.048, -0.300),
+        vec3(0.022, -0.020, -0.230),
+        POLY,
+    );
 }
 
 /// A battle rifle: a long receiver, a wooden stock and a carry handle, which is
 /// what the full-power rifles were.
 fn fal(out: &mut Vec<Tri>, _d: &Def) {
-    box3(out, vec3(-0.038, -0.130, -0.230), vec3(0.038, -0.030, 0.250), STEEL);
-    box3(out, vec3(-0.026, -0.030, -0.070), vec3(0.026, -0.010, 0.130), STEEL_DARK);
-    box3(out, vec3(-0.026, -0.116, 0.250), vec3(0.026, -0.056, 0.520), POLY);
-    box3(out, vec3(-0.014, -0.102, 0.520), vec3(0.014, -0.062, 0.790), STEEL_DARK);
-    box3(out, vec3(-0.021, -0.106, 0.790), vec3(0.021, -0.058, 0.856), BLACK);
-    front_sight(out, vec3(-0.014, -0.060, 0.742), vec3(0.014, -0.034, 0.776), 0.758);
+    box3(
+        out,
+        vec3(-0.038, -0.130, -0.230),
+        vec3(0.038, -0.030, 0.250),
+        STEEL,
+    );
+    box3(
+        out,
+        vec3(-0.026, -0.030, -0.070),
+        vec3(0.026, -0.010, 0.130),
+        STEEL_DARK,
+    );
+    box3(
+        out,
+        vec3(-0.026, -0.116, 0.250),
+        vec3(0.026, -0.056, 0.520),
+        POLY,
+    );
+    box3(
+        out,
+        vec3(-0.014, -0.102, 0.520),
+        vec3(0.014, -0.062, 0.790),
+        STEEL_DARK,
+    );
+    box3(
+        out,
+        vec3(-0.021, -0.106, 0.790),
+        vec3(0.021, -0.058, 0.856),
+        BLACK,
+    );
+    front_sight(
+        out,
+        vec3(-0.014, -0.060, 0.742),
+        vec3(0.014, -0.034, 0.776),
+        0.758,
+    );
     // The carry handle sits where a rear sight would.
-    box3(out, vec3(-0.008, -0.048, -0.070), vec3(0.008, -0.026, 0.100), STEEL_DARK);
-    bar(out, vec3(0.0, -0.130, -0.060), vec2(0.016, 0.026), vec3(0.0, -0.212, -0.116), vec2(0.014, 0.022), WOOD_DARK);
+    box3(
+        out,
+        vec3(-0.008, -0.048, -0.070),
+        vec3(0.008, -0.026, 0.100),
+        STEEL_DARK,
+    );
+    bar(
+        out,
+        vec3(0.0, -0.130, -0.060),
+        vec2(0.016, 0.026),
+        vec3(0.0, -0.212, -0.116),
+        vec2(0.014, 0.022),
+        WOOD_DARK,
+    );
     // A solid wooden stock, the thing an issued rifle no longer has.
-    bar(out, vec3(0.0, -0.086, -0.230), vec2(0.030, 0.044), vec3(0.0, -0.104, -0.400), vec2(0.032, 0.050), WOOD);
-    box3(out, vec3(-0.032, -0.150, -0.408), vec3(0.032, -0.058, -0.396), WOOD_DARK);
+    bar(
+        out,
+        vec3(0.0, -0.086, -0.230),
+        vec2(0.030, 0.044),
+        vec3(0.0, -0.104, -0.400),
+        vec2(0.032, 0.050),
+        WOOD,
+    );
+    box3(
+        out,
+        vec3(-0.032, -0.150, -0.408),
+        vec3(0.032, -0.058, -0.396),
+        WOOD_DARK,
+    );
 }
 
 /// A roller-locked machine pistol, drawn from the reference photograph: a rolled
@@ -950,87 +1173,346 @@ fn fal(out: &mut Vec<Tri>, _d: &Def) {
 /// here, because a magazine in this game is a fitting.
 fn mp5(out: &mut Vec<Tri>, _d: &Def) {
     // The receiver: round, with the flat top the sights sit on.
-    tube(out, vec3(0.0, -0.084, -0.150), 0.042, vec3(0.0, -0.084, 0.170), 0.042, STEEL);
-    box3(out, vec3(-0.036, -0.050, -0.150), vec3(0.036, -0.036, 0.186), STEEL);
+    tube(
+        out,
+        vec3(0.0, -0.084, -0.150),
+        0.042,
+        vec3(0.0, -0.084, 0.170),
+        0.042,
+        STEEL,
+    );
+    box3(
+        out,
+        vec3(-0.036, -0.050, -0.150),
+        vec3(0.036, -0.036, 0.186),
+        STEEL,
+    );
     // The cocking-handle tube, forward along the left of the barrel, with the
     // handle at its front end. It is the one line that says MP5 at a glance.
-    tube(out, vec3(-0.026, -0.040, 0.120), 0.014, vec3(-0.026, -0.040, 0.372), 0.012, STEEL_DARK);
-    box3(out, vec3(-0.042, -0.052, 0.356), vec3(-0.022, -0.028, 0.392), BLACK);
+    tube(
+        out,
+        vec3(-0.026, -0.040, 0.120),
+        0.014,
+        vec3(-0.026, -0.040, 0.372),
+        0.012,
+        STEEL_DARK,
+    );
+    box3(
+        out,
+        vec3(-0.042, -0.052, 0.356),
+        vec3(-0.022, -0.028, 0.392),
+        BLACK,
+    );
     // The handguard: slim, and slotted along its underside.
-    tube(out, vec3(0.0, -0.092, 0.170), 0.034, vec3(0.0, -0.092, 0.372), 0.030, POLY);
+    tube(
+        out,
+        vec3(0.0, -0.092, 0.170),
+        0.034,
+        vec3(0.0, -0.092, 0.372),
+        0.030,
+        POLY,
+    );
     for i in 0..3 {
         let z = 0.208 + i as f32 * 0.052;
-        box3(out, vec3(-0.030, -0.118, z), vec3(0.030, -0.062, z + 0.014), STEEL_DARK);
+        box3(
+            out,
+            vec3(-0.030, -0.118, z),
+            vec3(0.030, -0.062, z + 0.014),
+            STEEL_DARK,
+        );
     }
     // The barrel, and the muzzle out of the front of the handguard.
-    tube(out, vec3(0.0, -0.086, 0.372), 0.014, vec3(0.0, -0.086, 0.452), 0.012, STEEL_DARK);
+    tube(
+        out,
+        vec3(0.0, -0.086, 0.372),
+        0.014,
+        vec3(0.0, -0.086, 0.452),
+        0.012,
+        STEEL_DARK,
+    );
     // The front sight sits on the cocking tube, not on the barrel.
-    box3(out, vec3(-0.012, -0.048, 0.336), vec3(0.012, -0.024, 0.368), BLACK);
-    spire(out, vec3(0.0, -0.024, 0.352), vec2(0.005, 0.006), vec3(0.0, 0.0, 0.352), BLACK);
+    box3(
+        out,
+        vec3(-0.012, -0.048, 0.336),
+        vec3(0.012, -0.024, 0.368),
+        BLACK,
+    );
+    spire(
+        out,
+        vec3(0.0, -0.024, 0.352),
+        vec2(0.005, 0.006),
+        vec3(0.0, 0.0, 0.352),
+        BLACK,
+    );
     rear_sight(out, -0.116, -0.098, 0.007, -0.036);
     // The trigger housing, the guard and the grip.
-    box3(out, vec3(-0.030, -0.130, -0.062), vec3(0.030, -0.096, 0.040), POLY);
-    bar(out, vec3(0.0, -0.150, -0.010), vec2(0.006, 0.008), vec3(0.0, -0.150, 0.052), vec2(0.006, 0.008), STEEL);
-    bar(out, vec3(0.0, -0.150, 0.052), vec2(0.006, 0.008), vec3(0.0, -0.126, 0.036), vec2(0.006, 0.008), STEEL);
-    bar(out, vec3(0.0, -0.126, -0.036), vec2(0.016, 0.024), vec3(0.0, -0.204, -0.086), vec2(0.014, 0.021), POLY);
+    box3(
+        out,
+        vec3(-0.030, -0.130, -0.062),
+        vec3(0.030, -0.096, 0.040),
+        POLY,
+    );
+    bar(
+        out,
+        vec3(0.0, -0.150, -0.010),
+        vec2(0.006, 0.008),
+        vec3(0.0, -0.150, 0.052),
+        vec2(0.006, 0.008),
+        STEEL,
+    );
+    bar(
+        out,
+        vec3(0.0, -0.150, 0.052),
+        vec2(0.006, 0.008),
+        vec3(0.0, -0.126, 0.036),
+        vec2(0.006, 0.008),
+        STEEL,
+    );
+    bar(
+        out,
+        vec3(0.0, -0.126, -0.036),
+        vec2(0.016, 0.024),
+        vec3(0.0, -0.204, -0.086),
+        vec2(0.014, 0.021),
+        POLY,
+    );
     // The A2 stock: a solid polymer wedge, tallest at the butt, with the sling
     // loop cut through it.
-    bar(out, vec3(0.0, -0.088, -0.150), vec2(0.030, 0.044), vec3(0.0, -0.118, -0.288), vec2(0.034, 0.062), POLY);
-    box3(out, vec3(-0.036, -0.190, -0.302), vec3(0.036, -0.046, -0.288), BLACK);
-    box3(out, vec3(-0.026, -0.146, -0.276), vec3(0.026, -0.106, -0.244), STEEL_DARK);
+    bar(
+        out,
+        vec3(0.0, -0.088, -0.150),
+        vec2(0.030, 0.044),
+        vec3(0.0, -0.118, -0.288),
+        vec2(0.034, 0.062),
+        POLY,
+    );
+    box3(
+        out,
+        vec3(-0.036, -0.190, -0.302),
+        vec3(0.036, -0.046, -0.288),
+        BLACK,
+    );
+    box3(
+        out,
+        vec3(-0.026, -0.146, -0.276),
+        vec3(0.026, -0.106, -0.244),
+        STEEL_DARK,
+    );
 }
 
 /// A boxier machine pistol: a squared receiver, a short slotted handguard and a
 /// stock that folds to the side.
 fn mpx(out: &mut Vec<Tri>, _d: &Def) {
-    box3(out, vec3(-0.036, -0.124, -0.160), vec3(0.036, -0.030, 0.196), STEEL);
-    box3(out, vec3(-0.032, -0.030, -0.130), vec3(0.032, -0.018, 0.210), RAIL);
-    box3(out, vec3(-0.028, -0.110, 0.196), vec3(0.028, -0.052, 0.352), POLY);
+    box3(
+        out,
+        vec3(-0.036, -0.124, -0.160),
+        vec3(0.036, -0.030, 0.196),
+        STEEL,
+    );
+    box3(
+        out,
+        vec3(-0.032, -0.030, -0.130),
+        vec3(0.032, -0.018, 0.210),
+        RAIL,
+    );
+    box3(
+        out,
+        vec3(-0.028, -0.110, 0.196),
+        vec3(0.028, -0.052, 0.352),
+        POLY,
+    );
     for i in 0..3 {
         let z = 0.216 + i as f32 * 0.046;
-        box3(out, vec3(-0.030, -0.106, z), vec3(0.030, -0.078, z + 0.028), STEEL_DARK);
+        box3(
+            out,
+            vec3(-0.030, -0.106, z),
+            vec3(0.030, -0.078, z + 0.028),
+            STEEL_DARK,
+        );
     }
-    box3(out, vec3(-0.012, -0.098, 0.352), vec3(0.012, -0.064, 0.430), STEEL_DARK);
-    box3(out, vec3(-0.017, -0.102, 0.430), vec3(0.017, -0.060, 0.470), BLACK);
-    front_sight(out, vec3(-0.012, -0.058, 0.388), vec3(0.012, -0.036, 0.416), 0.402);
+    box3(
+        out,
+        vec3(-0.012, -0.098, 0.352),
+        vec3(0.012, -0.064, 0.430),
+        STEEL_DARK,
+    );
+    box3(
+        out,
+        vec3(-0.017, -0.102, 0.430),
+        vec3(0.017, -0.060, 0.470),
+        BLACK,
+    );
+    front_sight(
+        out,
+        vec3(-0.012, -0.058, 0.388),
+        vec3(0.012, -0.036, 0.416),
+        0.402,
+    );
     rear_sight(out, -0.062, -0.030, 0.008, -0.026);
-    bar(out, vec3(0.0, -0.124, -0.044), vec2(0.016, 0.025), vec3(0.0, -0.202, -0.092), vec2(0.014, 0.022), POLY);
-    box3(out, vec3(-0.022, -0.104, -0.196), vec3(0.022, -0.052, -0.160), STEEL_DARK);
-    box3(out, vec3(-0.024, -0.112, -0.286), vec3(0.024, -0.046, -0.196), POLY);
+    bar(
+        out,
+        vec3(0.0, -0.124, -0.044),
+        vec2(0.016, 0.025),
+        vec3(0.0, -0.202, -0.092),
+        vec2(0.014, 0.022),
+        POLY,
+    );
+    box3(
+        out,
+        vec3(-0.022, -0.104, -0.196),
+        vec3(0.022, -0.052, -0.160),
+        STEEL_DARK,
+    );
+    box3(
+        out,
+        vec3(-0.024, -0.112, -0.286),
+        vec3(0.024, -0.046, -0.196),
+        POLY,
+    );
 }
 
 /// A marksman's rifle: a heavy barrel, a long rail over it, a cheek riser and
 /// the short bipod stubs a rifle of this length has.
 fn m110(out: &mut Vec<Tri>, _d: &Def) {
-    box3(out, vec3(-0.038, -0.132, -0.240), vec3(0.038, -0.030, 0.220), STEEL);
-    box3(out, vec3(-0.030, -0.030, -0.190), vec3(0.030, -0.012, 0.300), RAIL);
-    box3(out, vec3(-0.030, -0.122, 0.220), vec3(0.030, -0.056, 0.520), POLY);
-    box3(out, vec3(-0.017, -0.108, 0.520), vec3(0.017, -0.062, 0.900), STEEL_DARK);
-    box3(out, vec3(-0.025, -0.114, 0.900), vec3(0.025, -0.056, 0.980), BLACK);
-    front_sight(out, vec3(-0.017, -0.062, 0.836), vec3(0.017, -0.034, 0.876), 0.856);
-    bar(out, vec3(0.0, -0.132, -0.070), vec2(0.017, 0.026), vec3(0.0, -0.208, -0.126), vec2(0.015, 0.022), POLY);
-    bar(out, vec3(0.0, -0.090, -0.240), vec2(0.028, 0.042), vec3(0.0, -0.102, -0.402), vec2(0.030, 0.046), POLY);
-    box3(out, vec3(-0.024, -0.052, -0.360), vec3(0.024, -0.028, -0.262), POLY);
-    box3(out, vec3(-0.030, -0.150, -0.410), vec3(0.030, -0.056, -0.398), BLACK);
+    box3(
+        out,
+        vec3(-0.038, -0.132, -0.240),
+        vec3(0.038, -0.030, 0.220),
+        STEEL,
+    );
+    box3(
+        out,
+        vec3(-0.030, -0.030, -0.190),
+        vec3(0.030, -0.012, 0.300),
+        RAIL,
+    );
+    box3(
+        out,
+        vec3(-0.030, -0.122, 0.220),
+        vec3(0.030, -0.056, 0.520),
+        POLY,
+    );
+    box3(
+        out,
+        vec3(-0.017, -0.108, 0.520),
+        vec3(0.017, -0.062, 0.900),
+        STEEL_DARK,
+    );
+    box3(
+        out,
+        vec3(-0.025, -0.114, 0.900),
+        vec3(0.025, -0.056, 0.980),
+        BLACK,
+    );
+    front_sight(
+        out,
+        vec3(-0.017, -0.062, 0.836),
+        vec3(0.017, -0.034, 0.876),
+        0.856,
+    );
+    bar(
+        out,
+        vec3(0.0, -0.132, -0.070),
+        vec2(0.017, 0.026),
+        vec3(0.0, -0.208, -0.126),
+        vec2(0.015, 0.022),
+        POLY,
+    );
+    bar(
+        out,
+        vec3(0.0, -0.090, -0.240),
+        vec2(0.028, 0.042),
+        vec3(0.0, -0.102, -0.402),
+        vec2(0.030, 0.046),
+        POLY,
+    );
+    box3(
+        out,
+        vec3(-0.024, -0.052, -0.360),
+        vec3(0.024, -0.028, -0.262),
+        POLY,
+    );
+    box3(
+        out,
+        vec3(-0.030, -0.150, -0.410),
+        vec3(0.030, -0.056, -0.398),
+        BLACK,
+    );
     for side in [-1.0f32, 1.0] {
-        bar(out, vec3(side * 0.024, -0.106, 0.560), vec2(0.006, 0.006), vec3(side * 0.062, -0.216, 0.470), vec2(0.005, 0.005), BLACK);
+        bar(
+            out,
+            vec3(side * 0.024, -0.106, 0.560),
+            vec2(0.006, 0.006),
+            vec3(side * 0.062, -0.216, 0.470),
+            vec2(0.005, 0.005),
+            BLACK,
+        );
     }
 }
 
 /// A bolt-action: a long barrel out of a full wooden stock, with the bolt handle
 /// standing out of the side, which is the one thing that has to read.
 fn mosin(out: &mut Vec<Tri>, _d: &Def) {
-    box3(out, vec3(-0.030, -0.124, -0.240), vec3(0.030, -0.048, 0.260), STEEL);
-    box3(out, vec3(-0.026, -0.112, 0.260), vec3(0.026, -0.060, 0.560), WOOD);
-    box3(out, vec3(-0.011, -0.096, 0.560), vec3(0.011, -0.070, 1.040), STEEL_DARK);
-    box3(out, vec3(-0.017, -0.100, 1.040), vec3(0.017, -0.062, 1.092), BLACK);
-    front_sight(out, vec3(-0.011, -0.066, 0.988), vec3(0.011, -0.040, 1.022), 1.004);
+    box3(
+        out,
+        vec3(-0.030, -0.124, -0.240),
+        vec3(0.030, -0.048, 0.260),
+        STEEL,
+    );
+    box3(
+        out,
+        vec3(-0.026, -0.112, 0.260),
+        vec3(0.026, -0.060, 0.560),
+        WOOD,
+    );
+    box3(
+        out,
+        vec3(-0.011, -0.096, 0.560),
+        vec3(0.011, -0.070, 1.040),
+        STEEL_DARK,
+    );
+    box3(
+        out,
+        vec3(-0.017, -0.100, 1.040),
+        vec3(0.017, -0.062, 1.092),
+        BLACK,
+    );
+    front_sight(
+        out,
+        vec3(-0.011, -0.066, 0.988),
+        vec3(0.011, -0.040, 1.022),
+        1.004,
+    );
     rear_sight(out, -0.052, -0.034, 0.006, -0.030);
     // The bolt: a straight handle out to the right and the knob on its end.
-    bar(out, vec3(0.022, -0.076, 0.096), vec2(0.007, 0.007), vec3(0.062, -0.074, 0.056), vec2(0.006, 0.006), STEEL_DARK);
-    box3(out, vec3(0.058, -0.086, 0.040), vec3(0.074, -0.064, 0.060), RAIL);
-    bar(out, vec3(0.0, -0.124, -0.240), vec2(0.026, 0.040), vec3(0.0, -0.150, -0.400), vec2(0.030, 0.048), WOOD);
-    box3(out, vec3(-0.032, -0.198, -0.412), vec3(0.032, -0.140, -0.398), WOOD_DARK);
+    bar(
+        out,
+        vec3(0.022, -0.076, 0.096),
+        vec2(0.007, 0.007),
+        vec3(0.062, -0.074, 0.056),
+        vec2(0.006, 0.006),
+        STEEL_DARK,
+    );
+    box3(
+        out,
+        vec3(0.058, -0.086, 0.040),
+        vec3(0.074, -0.064, 0.060),
+        RAIL,
+    );
+    bar(
+        out,
+        vec3(0.0, -0.124, -0.240),
+        vec2(0.026, 0.040),
+        vec3(0.0, -0.150, -0.400),
+        vec2(0.030, 0.048),
+        WOOD,
+    );
+    box3(
+        out,
+        vec3(-0.032, -0.198, -0.412),
+        vec3(0.032, -0.140, -0.398),
+        WOOD_DARK,
+    );
 }
 
 /// Bulky support weapon with a drum magazine.
@@ -1286,31 +1768,49 @@ fn issued_magazine(out: &mut Vec<Tri>, d: &Def) {
     magazine(out, d.well, d.well_len, d.well_half, d.well_curve, POLY);
 }
 
-/// One gloved hand closed around `at`, with the forearm running back and
-/// outboard. `side` is +1 for the right hand and -1 for the left, and is the
-/// only thing that differs between the two.
-fn hand(out: &mut Vec<Tri>, at: Vec3, side: f32) {
+/// The fingers, closed round whatever is at `at`: the fist, the knuckles and the
+/// thumb, and nothing else.
+///
+/// `side` is +1 for the right hand and -1 for the left, and is the only thing
+/// that differs between the two. `fingers` is how much of what it is holding the
+/// fingers close over: 1 for a weapon's grip, which is a shape a hand is made
+/// for, and less for a grenade. A fist the size of the thing inside it leaves the
+/// player looking at their own knuckles — which is what the four casings were:
+/// four colours of fist, each with the top two centimetres of a grenade on it, so
+/// the shapes that tell the four of them apart were the one part of them nobody
+/// could see.
+///
+/// Apart from the arm because the casings sheet draws this: what a player sees of
+/// a grenade in their hand is the fingers and the thing, and the arm is off the
+/// bottom of the frame.
+fn fist(out: &mut Vec<Tri>, at: Vec3, side: f32, fingers: f32) {
     // Fist, wrapped round whatever it is holding.
     box3(
         out,
-        at + vec3(-0.036, -0.050, -0.044),
-        at + vec3(0.036, 0.034, 0.044),
+        at + vec3(-0.036, -0.050, -0.044) * fingers,
+        at + vec3(0.036, 0.034, 0.044) * fingers,
         GLOVE,
     );
     // Knuckles on top, so it reads as a hand rather than a cube.
     box3(
         out,
-        at + vec3(-0.030, 0.030, -0.028),
-        at + vec3(0.030, 0.046, 0.028),
+        at + vec3(-0.030, 0.030, -0.028) * fingers,
+        at + vec3(0.030, 0.046, 0.028) * fingers,
         GLOVE_DARK,
     );
     // Thumb, folded over the near side of the grip.
     box3(
         out,
-        at + vec3(side * 0.020, -0.014, 0.024),
-        at + vec3(side * 0.047, 0.024, 0.062),
+        at + vec3(side * 0.020, -0.014, 0.024) * fingers,
+        at + vec3(side * 0.047, 0.024, 0.062) * fingers,
         GLOVE_DARK,
     );
+}
+
+/// One gloved hand closed around `at`, with the forearm running back and
+/// outboard. See `fist` for `side` and `fingers`.
+fn hand(out: &mut Vec<Tri>, at: Vec3, side: f32, fingers: f32) {
+    fist(out, at, side, fingers);
     // The forearm leaves the frame low and outboard, which is where an arm
     // holding a weapon at the hip actually goes. It stops well short of the eye
     // so that no corner of it crosses the near plane — one vertex behind the
@@ -1327,34 +1827,262 @@ fn hand(out: &mut Vec<Tri>, at: Vec3, side: f32) {
     );
 }
 
-fn hands_for(kind: WeaponKind) -> Vec<Tri> {
-    let d = def(kind);
+fn grip_hand(kind: WeaponKind) -> Vec<Tri> {
     let mut out = Vec::new();
-    hand(&mut out, d.grip, 1.0);
-    if let Some(at) = d.support {
-        hand(&mut out, at, -1.0);
+    hand(&mut out, def(kind).grip, 1.0, 1.0);
+    out
+}
+
+/// The hand on the foregrip, or nothing where the weapon has no place to put
+/// one — a pistol and a knife are held in one hand.
+fn support_hand(kind: WeaponKind) -> Vec<Tri> {
+    let mut out = Vec::new();
+    if let Some(at) = def(kind).support {
+        hand(&mut out, at, -1.0, 1.0);
     }
     out
+}
+
+/// How big the thing in the throwing hand is: the half-extent its profile is a
+/// fraction of. Fourteen centimetres top to bottom, which is a *large* grenade —
+/// the same object `grenade::casing` puts in the air at the size collision gives
+/// it (17 cm), drawn smaller than that and larger than a hand holds it.
+///
+/// Oversized on purpose, and the one place in this file that is. A casing drawn
+/// at the size a hand really holds one is small enough that the hand is the
+/// bigger object, and what a player reads at a glance is then the hand. If it
+/// ever wants to be honest, it is this one number.
+const HELD_HALF: f32 = 0.072;
+/// The casing's facet count, taken from the world's own constant rather than
+/// written again: the openings a casing breathes through sit in the middle of
+/// those facets (`ports`), so two counts that disagreed would put holes on the
+/// corners of the wall instead of on its faces.
+const CASING_FACETS: usize = crate::grenade::CASING_SIDES;
+/// And how big an opening in a casing's wall is, from the same place.
+const PORT_HALF: f32 = crate::grenade::PORT_HALF;
+/// How far above the point the throw comes out of the thing in the hand sits.
+/// Small, because that point is where the arc starts and where the body leaves
+/// the hand: the line has to come off the thing rather than out of the middle of
+/// it.
+const HELD_LIFT: f32 = 0.022;
+
+/// A throwable in the throwing hand: the thing, and the hand *under* it.
+///
+/// The thing is the one `grenade::casing_shape` describes — an M67 is a ball
+/// with a fuze in the top of it, an M18 a tin can, an M84 a cylinder of
+/// openings, a bottle a bottle — drawn here out of the viewmodel's own
+/// primitives, because one is a `Mesh` in the world and this is a triangle list
+/// in the view. The two cannot share code; they share the *shape*, which is
+/// what keeps the grenade in the hand and the grenade in the air the same
+/// object. The fallback when they disagree is a player throwing one thing and
+/// watching another land.
+fn held_throwable(out: &mut Vec<Tri>, kind: GrenadeKind, at: Vec3) {
+    let shape = crate::grenade::casing_shape(kind);
+    let centre = at + vec3(0.0, HELD_LIFT, 0.0);
+    held_casing(out, kind, centre);
+    throw_hand(
+        out,
+        centre,
+        1.0,
+        shape.widest() * HELD_HALF,
+        shape.bottom() * HELD_HALF,
+    );
+}
+
+/// The arm that throws, with nothing in it: what is left of the motion after the
+/// thing has gone. Drawn while that arm is still on its way out of the frame, so
+/// the throw ends with a hand falling away rather than with a hand that was there
+/// one frame and not the next.
+///
+/// Sized off the frag, since there is nothing in it to be sized off: the hand is a
+/// cupped shape either way, and the difference between one grenade's cradle and
+/// another's is a centimetre, for a fifth of a second, while it leaves the frame.
+fn throwing_hand(out: &mut Vec<Tri>, at: Vec3) {
+    let shape = crate::grenade::casing_shape(GrenadeKind::Frag);
+    throw_hand(
+        out,
+        at + vec3(0.0, HELD_LIFT, 0.0),
+        1.0,
+        shape.widest() * HELD_HALF,
+        shape.bottom() * HELD_HALF,
+    );
+}
+
+/// The hand that holds a throwable, drawn around the thing's own centre `at`: the
+/// fingers as a cradle under its body, the back of the hand below them, the wrist
+/// and the forearm from there.
+///
+/// `r` is the thing's widest radius and `bottom` how far its body runs below `at`,
+/// both in view metres, so the cradle sits *against* whatever is in it rather than
+/// at a size of its own. Everything here is at or below `bottom` — the one place
+/// the body cannot be — so no part of the hand is inside the thing, and the test
+/// `no_part_of_the_hand_is_inside_the_throwable` is what holds that.
+///
+/// It used to be a fist closed *round* the thing, which is what a hand really
+/// does, and it is exactly why the four casings could not be told apart: a ball
+/// sunk into a mitten is a mitten with a dark shape on it — "投掷物和手重合了，所以
+/// 我看不出来", as it was put. Holding it from below is also what the throw wants.
+/// Fingers wrapped round a body have to be drawn *through* it to open; fingers
+/// under it simply let go.
+fn throw_hand(out: &mut Vec<Tri>, at: Vec3, side: f32, r: f32, bottom: f32) {
+    // The fingers: three bars across the underside, back to front, so the thing
+    // rests on the middle joints of them.
+    let top = bottom - 0.002;
+    for (i, z) in [-0.55f32, 0.0, 0.55].iter().enumerate() {
+        // The front finger is the shortest, which is what stops three bars
+        // reading as a shelf.
+        let half = r * (0.52 - 0.05 * i as f32);
+        let y = top - 0.010 - 0.004 * (i as f32 % 2.0);
+        tube(
+            out,
+            at + vec3(-half, y, z * r),
+            0.011,
+            at + vec3(half, y, z * r),
+            0.011,
+            GLOVE,
+        );
+    }
+    // The back of the hand under them, and the thumb along the near side of it:
+    // the two things that make this a hand and not a bracket. The thumb stays
+    // *below* the body like everything else — an earlier one curled up the side
+    // of it and the test caught it inside a smoke grenade, whose wall is nearly
+    // at its full width by the time it reaches its own base.
+    box3(
+        out,
+        at + vec3(-0.60 * r, top - 0.056, -0.70 * r),
+        at + vec3(0.60 * r, top - 0.014, 0.70 * r),
+        GLOVE,
+    );
+    tube(
+        out,
+        at + vec3(0.50 * r, top - 0.028, -0.30 * r),
+        0.011,
+        at + vec3(0.86 * r, top - 0.008, 0.42 * r),
+        0.009,
+        GLOVE_DARK,
+    );
+    // The forearm leaves the frame low and outboard, which is where an arm held
+    // out in front of the body goes. It stops well short of the eye so that no
+    // corner of it crosses the near plane — one vertex behind the eye drops the
+    // whole triangle, and the arm would wink out mid-swing.
+    let wrist = at + vec3(side * 0.012, top - 0.046, -0.34 * r);
+    let elbow = wrist + vec3(side * 0.115, -0.165, -0.105);
+    bar(
+        out,
+        wrist,
+        vec2(0.036, 0.040),
+        elbow,
+        vec2(0.052, 0.050),
+        SLEEVE,
+    );
+}
+
+/// The throwable itself, at the size a hand holds it.
+fn held_casing(out: &mut Vec<Tri>, kind: GrenadeKind, at: Vec3) {
+    let shape = crate::grenade::casing_shape(kind);
+    let color = kind.color();
+    lathe(out, at, HELD_HALF, shape.profile, color);
+    for &(wall, y) in shape.ports {
+        ports(out, at, HELD_HALF, wall, y);
+    }
+    let of = |x: f32, y: f32| at + vec3(x * HELD_HALF, y * HELD_HALF, 0.0);
+    // Thicknesses in fractions of `HELD_HALF` and not in metres: the lever and
+    // the rag are parts of the object, so they have to shrink with it. Written
+    // in metres they stay the world's size, and a hand-sized grenade grows a
+    // full-sized spoon.
+    //
+    // `tube` and not `bar`, because a tube's cross-section is a beam's: a `bar`
+    // with the same half-extents is a *box*, and a box's corners stand out
+    // √2 further than a beam's do. Two renderers drawing one object should
+    // disagree about nothing, and that one showed up as 1.5 cm of spoon.
+    if let Some((x0, y0, x1, y1)) = shape.lever {
+        let r = LEVER_HALF * HELD_HALF;
+        tube(out, of(x0, y0), r, of(x1, y1), r, STEEL);
+    }
+    if let Some((r, y)) = shape.wick {
+        let (bx, by) = *shape.profile.last().unwrap_or(&(0.15, 0.8));
+        // Two strands rather than one: a rag in a neck is not a rod, and a rod
+        // is what the first bottle would have had.
+        let ra = WICK_HALF * HELD_HALF;
+        let rb = WICK_HALF * WICK_STRAND * HELD_HALF;
+        tube(out, of(bx, by), ra, of(r, y), ra, RAG);
+        tube(
+            out,
+            of(bx - 0.04, by - 0.10),
+            rb,
+            of(r + 0.07, y - 0.09),
+            rb,
+            RAG,
+        );
+    }
+}
+
+/// A body of revolution about the local up axis, `profile` bottom first in
+/// fractions of `half`, closed at both ends.
+///
+/// The view's copy of `grenade::lathe`: the primitives differ (a `MeshBuilder`
+/// quad in the world, a `Tri` here) and the profiles do not, which is the point
+/// of `casing_shape`. Winding is left alone — `Tri::shaded` flips the normal
+/// towards the eye, so a face of this is lit from whichever side is looked at.
+fn lathe(out: &mut Vec<Tri>, at: Vec3, half: f32, profile: &[(f32, f32)], color: Color) {
+    let step = TAU / CASING_FACETS as f32;
+    let ring = |i: usize, r: f32, y: f32| {
+        let a = step * i as f32;
+        at + vec3(a.cos() * r * half, y * half, a.sin() * r * half)
+    };
+    for w in profile.windows(2) {
+        let ((r0, y0), (r1, y1)) = (w[0], w[1]);
+        for i in 0..CASING_FACETS {
+            let j = (i + 1) % CASING_FACETS;
+            quad(
+                out,
+                ring(i, r0, y0),
+                ring(j, r0, y0),
+                ring(j, r1, y1),
+                ring(i, r1, y1),
+                color,
+            );
+        }
+    }
+    for (r, y) in [profile[0], profile[profile.len() - 1]] {
+        let hub = at + Vec3::Y * (y * half);
+        for k in 0..CASING_FACETS {
+            let j = (k + 1) % CASING_FACETS;
+            out.push(Tri::new(hub, ring(k, r, y), ring(j, r, y), color));
+        }
+    }
+}
+
+/// A row of openings around the thing's wall: one per facet, lying in the wall's
+/// own plane. The view's copy of `grenade::ports`, and dark for the same reason
+/// — what is behind the wall is a hole, not a panel. The openings are
+/// `PORT_HALF` big, the world's own number: a hole that grew on the way into the
+/// hand would be a second kind of hole.
+fn ports(out: &mut Vec<Tri>, at: Vec3, half: f32, wall: f32, y: f32) {
+    let step = TAU / CASING_FACETS as f32;
+    let r = (wall * (std::f32::consts::PI / CASING_FACETS as f32).cos() + 0.006) * half;
+    let (h, v) = (PORT_HALF * half, PORT_HALF * 1.15 * half);
+    for i in 0..CASING_FACETS {
+        // Mid-facet azimuth, which is where a facet's own surface plane is.
+        let a = step * (i as f32 + 0.5);
+        let out_w = vec3(a.cos(), 0.0, a.sin());
+        let side = vec3(-a.sin(), 0.0, a.cos());
+        let mid = at + out_w * r + Vec3::Y * (y * half);
+        quad(
+            out,
+            mid - side * h - Vec3::Y * v,
+            mid + side * h - Vec3::Y * v,
+            mid + side * h + Vec3::Y * v,
+            mid - side * h + Vec3::Y * v,
+            CASE,
+        );
+    }
 }
 
 /// Eased 0..1 ramp, flat at both ends.
 fn smooth(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
-}
-
-/// Smooth 0 -> 1 -> 0 window over `t` in 0..1: swells out over the first `out`,
-/// holds, and falls back over the last `back`. Used by every timed motion, so
-/// none of them can start or stop with a jerk.
-fn swing(t: f32, out: f32, back: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    if t < out {
-        smooth(t / out)
-    } else if t > 1.0 - back {
-        smooth((1.0 - t) / back)
-    } else {
-        1.0
-    }
 }
 
 /// Resting and aimed poses for one weapon. `aim` lies on the sight line, so its
@@ -2046,15 +2774,26 @@ pub struct ViewModel {
     prone: f32,
     /// Countdown for the grenade throw motion; zero when idle.
     grenade_t: f32,
+    /// How much of the "something is in my other hand" pose is on, eased so the
+    /// weapon comes back up rather than being cut back.
+    hold_t: f32,
+    /// The throwable in the other hand, if any. Its *kind* is here because the
+    /// thing drawn in the hand is that kind's, and the pose is the same for all
+    /// of them.
+    grabbed: Option<GrenadeKind>,
     parts: [Vec<Tri>; crate::weapon::KIND_COUNT],
     /// The same, with the issued magazine left off. A magazine fitting replaces
     /// the magazine rather than extending it, so the weapon it is fitted to is
     /// the one without: keeping both means the swap costs a lookup instead of a
     /// rebuild.
     bare: [Vec<Tri>; crate::weapon::KIND_COUNT],
-    /// The hands that hold each weapon. Kept apart from `parts` because they do
-    /// not move with it — see `HAND_LAG`.
-    hands: [Vec<Tri>; crate::weapon::KIND_COUNT],
+    /// The hands that hold each weapon, kept apart from `parts` because they do
+    /// not move with it — see `HAND_LAG`. Split into shooting hand and support
+    /// hand because a throwable in the off hand takes the support hand's place:
+    /// the fist that would be on the foregrip is the fist that is holding the
+    /// grenade.
+    grip: [Vec<Tri>; crate::weapon::KIND_COUNT],
+    support: [Vec<Tri>; crate::weapon::KIND_COUNT],
     /// The sniper's scope, which `parts` deliberately leaves out. It is the one
     /// piece of a weapon the player looks through rather than at, so it is
     /// drawn only while the sights are down; see `ViewModel::draw`.
@@ -2067,6 +2806,9 @@ pub struct ViewModel {
     /// Scratch for the attachments of whatever is in hand, rebuilt per frame
     /// like the body and for the same reason.
     kit: Vec<Tri>,
+    /// Scratch for the throwable in the off hand, which changes kind and so
+    /// cannot be built once per weapon kind like the rest.
+    held: Vec<Tri>,
 }
 
 impl ViewModel {
@@ -2077,10 +2819,13 @@ impl ViewModel {
             crouch: 0.0,
             prone: 0.0,
             grenade_t: 0.0,
+            hold_t: 0.0,
+            grabbed: None,
             // One entry per kind, in `WeaponKind::index` order.
             parts: ALL_KINDS.map(|k| build_held(k, true)),
             bare: ALL_KINDS.map(|k| build_held(k, false)),
-            hands: ALL_KINDS.map(hands_for),
+            grip: ALL_KINDS.map(grip_hand),
+            support: ALL_KINDS.map(support_hand),
             scope: {
                 let mut out = Vec::new();
                 sniper_scope(&mut out);
@@ -2089,6 +2834,7 @@ impl ViewModel {
             body: Vec::new(),
             flash: Vec::new(),
             kit: Vec::new(),
+            held: Vec::new(),
         }
     }
 
@@ -2118,16 +2864,75 @@ impl ViewModel {
         self.prone = approach(self.prone, prone, dt * STANCE_RATE);
 
         self.grenade_t = (self.grenade_t - dt).max(0.0);
+        // The weapon is away while the throwing hand is out, and the hand is out
+        // until the throw has carried it off the bottom of the frame — see
+        // `arm_falling`. The weapon waits for the arm rather than rising through
+        // it, because both hands are the same hand and two of them on screen at
+        // once is worse than a rifle that comes back a moment late.
+        let want = if self.holding() || self.arm_falling() {
+            1.0
+        } else {
+            0.0
+        };
+        self.hold_t = approach(self.hold_t, want, dt * HOLD_RATE);
     }
 
-    /// Plays a short lob/throw motion. Called when the player throws a grenade.
+    /// Called once a frame with what is in the throwing hand, if anything.
+    pub fn set_grabbed(&mut self, grabbed: Option<GrenadeKind>) {
+        self.grabbed = grabbed;
+    }
+
+    /// Whether a throwable is in the hand — which is what the weapon's own pose
+    /// is waiting on.
+    fn holding(&self) -> bool {
+        self.grabbed.is_some()
+    }
+
+    /// Whether the arm that threw is still on its way out of the frame: the
+    /// front of the throw motion, and the whole of the time the weapon waits for
+    /// it. Past this the hand is below the frame, and the weapon's own hand can
+    /// take over from it without there being two of them.
+    fn arm_falling(&self) -> bool {
+        self.grenade_t > GRENADE_TIME * (1.0 - THROW_CLEAR)
+    }
+
+    /// Where the throwing hand is drawn, in the view's own right/up/forward
+    /// metres: `HAND_OFFSET`, raised into the frame as the thing comes to hand
+    /// and carried off the bottom of it by the throw.
+    ///
+    /// Read by the drawing *and* by `main.rs`, which throws from here and draws
+    /// the arc from here — so the line leaves the thing in the hand on every
+    /// frame and not only on the finished pose.
+    ///
+    /// The way out is a one-way ramp rather than the window the rest of the
+    /// poses use: a window has to come back to where it started, and a hand that
+    /// came back up to the middle of the screen after a throw — and then went out
+    /// in one frame when the motion ended — would be a worse cut than the one
+    /// this exists to hide.
+    pub fn throw_hand(&self) -> Vec3 {
+        let rise = if self.holding() { self.hold_t } else { 1.0 };
+        let fall = if self.grenade_t > 0.0 {
+            let t = 1.0 - (self.grenade_t / GRENADE_TIME).clamp(0.0, 1.0);
+            smooth(t / THROW_CLEAR)
+        } else {
+            0.0
+        };
+        HAND_OFFSET + vec3(0.0, -((1.0 - rise) * HAND_RISE + fall * HAND_FALL), 0.0)
+    }
+
+    /// Plays a short throw motion. Called when the player throws a grenade.
     pub fn trigger_grenade_throw(&mut self) {
         self.grenade_t = GRENADE_TIME;
     }
 
     /// Call in the 2D pass, after `set_default_camera()`. `paints` is the
     /// armory's finish per weapon kind.
-    pub fn draw(&mut self, player: &Player, arsenal: &Arsenal, paints: &[Paint; crate::weapon::KIND_COUNT]) {
+    pub fn draw(
+        &mut self,
+        player: &Player,
+        arsenal: &Arsenal,
+        paints: &[Paint; crate::weapon::KIND_COUNT],
+    ) {
         let viewport = vec2(screen_width(), screen_height());
         let fovy = player.fovy();
         if viewport.x < 1.0 || viewport.y < 1.0 || fovy <= 0.0 {
@@ -2138,52 +2943,9 @@ impl ViewModel {
 
         let weapon = arsenal.active_weapon();
         let paint = paints[weapon.kind.index()];
-        let pose = self.pose(player, weapon);
-        let mat = pose.matrix();
-
-        let parts = if fits_a_magazine(weapon.build()) {
-            &self.bare[weapon.kind.index()]
-        } else {
-            &self.parts[weapon.kind.index()]
-        };
-        let hand_parts = &self.hands[weapon.kind.index()];
-        let kit = &mut self.kit;
-        kit.clear();
-        kit_into(kit, weapon.kind, weapon.build());
-        let body = &mut self.body;
-        body.clear();
-        // The finish is applied in local space, before the pose: the wear
-        // pattern hashes to the weapon, not to the world it is moving through.
-        body.extend(
-            parts
-                .iter()
-                .chain(kit.iter())
-                .map(|t| painted_tri(*t, paint))
-                .map(|t| t.map(mat))
-                .filter(Tri::finite),
-        );
-        // The sniper's scope belongs to the rifle everywhere except at the
-        // eyepiece. Once the eye is inside the tube the only thing the tube can
-        // do is block the view the scope exists to provide, so it is left out
-        // and `hud::draw_scope_overlay` draws a round aperture in its place —
-        // the two swap on the same frame, off the same constant.
-        if weapon.kind == WeaponKind::Sniper && player.ads < SCOPE_HIDE_ADS {
-            body.extend(
-                self.scope
-                    .iter()
-                    .map(|t| painted_tri(*t, paint))
-                    .map(|t| t.map(mat))
-                    .filter(Tri::finite),
-            );
-        }
-        // The hands are held slightly back from the weapon's sway, so a weapon
-        // being swung around does not read as one rigid object with arms welded
-        // to it.
-        let lag = mat * Mat4::from_translation(vec3(-self.sway.x, -self.sway.y, 0.0) * HAND_LAG);
-        body.extend(hand_parts.iter().map(|t| t.map(lag)).filter(Tri::finite));
+        let mat = self.assemble(player, weapon, paint);
         // Painter's algorithm: farthest faces first, nearer ones cover them.
-        body.sort_by(|x, y| y.depth().total_cmp(&x.depth()));
-        for t in body.iter() {
+        for t in self.body.iter() {
             if let Some(p) = project(t, viewport, f) {
                 draw_triangle(p[0], p[1], p[2], t.shaded());
             }
@@ -2201,6 +2963,111 @@ impl ViewModel {
                 }
             }
         }
+    }
+
+    /// Everything the viewmodel draws for one frame of holding `weapon`, posed
+    /// and finished, into `self.body`: the weapon, its fittings, and whichever
+    /// hands are on it — sorted back to front, ready to be projected.
+    ///
+    /// Apart from `draw` because the tests have to measure *this* list and not a
+    /// second one assembled beside it: "the weapon is put away while a throwable
+    /// is in hand" is a claim about what is on the screen, and a test that built
+    /// its own triangles would be measuring a pose that is nearly the drawn one.
+    ///
+    /// Returns the weapon's own matrix, which the flash needs and which casting
+    /// from the body would be guesswork about.
+    fn assemble(&mut self, player: &Player, weapon: &Weapon, paint: Paint) -> Mat4 {
+        let mat = self.weapon_into(player, weapon, paint);
+        let kind = weapon.kind;
+        // The hands, which are the weapon's only while they are on it.
+        //
+        // A throwable in the throwing hand takes the *right* hand off the
+        // weapon: it is the hand that throws, and the weapon is put away
+        // (`HOLD_DROP`), so the fist that was on the grip is the fist holding
+        // the grenade. The support hand goes with it — a hand on a foregrip
+        // that is down by the shooter's knee is a hand on nothing — and both
+        // come back when the throwing arm is out of the frame and the weapon
+        // has risen again.
+        //
+        // Until then the throwing arm is drawn at its own place rather than
+        // through the weapon's pose: it is not holding the gun and does not
+        // follow it down. It keeps the hands' same lag, so the two stay a pair
+        // when the view swings.
+        let lag = mat * Mat4::from_translation(vec3(-self.sway.x, -self.sway.y, 0.0) * HAND_LAG);
+        let hand_mat = Mat4::from_translation(vec3(-self.sway.x, -self.sway.y, 0.0) * HAND_LAG);
+        if self.holding() || self.arm_falling() {
+            let at = self.throw_hand();
+            let grabbed = self.grabbed;
+            let held = &mut self.held;
+            held.clear();
+            match grabbed {
+                Some(grenade) => held_throwable(held, grenade, at),
+                None => throwing_hand(held, at),
+            }
+            let body = &mut self.body;
+            body.extend(held.iter().map(|t| t.map(hand_mat)).filter(Tri::finite));
+        } else {
+            let grip = &self.grip[kind.index()];
+            let support = &self.support[kind.index()];
+            let body = &mut self.body;
+            body.extend(
+                grip.iter()
+                    .chain(support.iter())
+                    .map(|t| t.map(lag))
+                    .filter(Tri::finite),
+            );
+        }
+        // Painter's algorithm: farthest faces first, nearer ones cover them.
+        self.body.sort_by(|x, y| y.depth().total_cmp(&x.depth()));
+        mat
+    }
+
+    /// The gun half of [`ViewModel::assemble`], into `self.body`: the weapon, its
+    /// fittings and the scope, posed and finished, and no hands.
+    ///
+    /// Split out so a test can measure the weapon alone. "The weapon is put
+    /// away" is a claim about the gun, and the hand holding the throwable is
+    /// supposed to be on the screen at the same moment — so a test that measured
+    /// the whole list would be measuring the wrong thing.
+    fn weapon_into(&mut self, player: &Player, weapon: &Weapon, paint: Paint) -> Mat4 {
+        let kind = weapon.kind;
+        let mat = self.pose(player, weapon).matrix();
+        let kit = &mut self.kit;
+        kit.clear();
+        kit_into(kit, kind, weapon.build());
+        let body = &mut self.body;
+        body.clear();
+        // The finish is applied in local space, before the pose: the wear
+        // pattern hashes to the weapon, not to the world it is moving through.
+        let parts = if fits_a_magazine(weapon.build()) {
+            &self.bare[kind.index()]
+        } else {
+            &self.parts[kind.index()]
+        };
+        body.extend(
+            parts
+                .iter()
+                .chain(kit.iter())
+                .map(|t| painted_tri(*t, paint))
+                .map(|t| t.map(mat))
+                .filter(Tri::finite),
+        );
+        // The sniper's scope belongs to the rifle everywhere except at the
+        // eyepiece. Once the eye is inside the tube the only thing the tube can
+        // do is block the view the scope exists to provide, so it is left out
+        // and `hud::draw_scope_overlay` draws a round aperture in its place —
+        // the two swap on the same frame, off the same constant.
+        if kind == WeaponKind::Sniper && player.ads < SCOPE_HIDE_ADS {
+            let scope = &self.scope;
+            body.extend(
+                scope
+                    .iter()
+                    .map(|t| painted_tri(*t, paint))
+                    .map(|t| t.map(mat))
+                    .filter(Tri::finite),
+            );
+        }
+        mat
     }
 
     fn pose(&self, player: &Player, weapon: &Weapon) -> Pose {
@@ -2272,36 +3139,36 @@ impl ViewModel {
         rotation.y += drop * 0.300;
         rotation.z += drop * 0.450;
 
-        // Inspecting and throwing are the two things the hands do on their own.
-        // The throw is the louder of the two, so it takes over from the inspect
-        // rather than adding to it, and neither one fights a reload — both are
-        // weighted by what the reload has taken.
-        let throw_w = if self.grenade_t > 0.0 {
-            let t = 1.0 - (self.grenade_t / GRENADE_TIME).clamp(0.0, 1.0);
-            // Out fast and back slow: the throw itself is a flick of the arm.
-            swing(t, 0.28, 0.58) * (1.0 - reload)
-        } else {
-            0.0
-        };
-        if throw_w > 0.0 {
-            // The weapon falls away as the off hand lobs the grenade: dropped,
-            // rolled over and tipped muzzle-down. Most of the drop is in the
-            // tip, so the grip stays near the eye where the hand is.
-            offset += vec3(0.045 * hip, -0.220 * hip, 0.020) * throw_w;
-            rotation += vec3(-0.170 * hip, 0.420 * hip, -0.420) * throw_w;
+        // A throwable in hand puts the weapon away — not lowered to the hip, but
+        // *away*, out of the frame, because the hand that was holding it is the
+        // hand that is now holding the grenade and a rifle left in the other one
+        // is a rifle between the eye and the throw. What is holding it now is a
+        // sling: the hand has let go of it, which is why its own pose has no
+        // throwing motion any more. The throw is the arm's.
+        //
+        // The drop is not weighted by `hip`. A weapon being aimed at the moment
+        // the throwable comes to hand has to leave by the same road as one at
+        // the hip; `main.rs` drops the aim at the same time, and a pose that
+        // only moved off a sight line that was already gone would leave the
+        // sights up over a stowed rifle.
+        let hold_w = self.hold_t;
+        if hold_w > 0.0 {
+            offset += vec3(HOLD_OUT * hip, -HOLD_DROP, -HOLD_BACK) * hold_w;
+            rotation += HOLD_CANT * hold_w;
         }
 
-        // Inspect and the magazine check are two different motions, because they
-        // are two different things: `U` turns the weapon over to be read, and
-        // `Alt`+`T` is a look at the well. Both are paths of keyframes rather
-        // than summed windows — a path can hold still at a feature, which is
-        // where the reading happens, and both turn about the grip rather than
+        // Inspecting and the magazine check are two different motions, because
+        // they are two different things: `U` turns the weapon over to be read,
+        // and `Alt`+`T` is a look at the well. Both are paths of keyframes
+        // rather than summed windows — a path can hold still at a feature, which
+        // is where the reading happens, and both turn about the grip rather than
         // about the weapon, which is what makes them the arm's doing.
         //
-        // The two hands' own motions are mutually exclusive: the throw is the
-        // louder of them, so it takes over from the inspect rather than adding
-        // to it, and neither one fights a reload.
-        let damp = (1.0 - reload) * (1.0 - throw_w) * hip;
+        // Both are the same hand's work as the throwable would be, so a hand
+        // that is holding one is not free for either: an inspect that was
+        // already running when the thing came to hand fades out with the weapon
+        // rather than turning a rifle that is down by the shooter's knee.
+        let damp = (1.0 - reload) * (1.0 - self.hold_t) * hip;
         let mut arms = None;
         if weapon.inspect_t > 0.0 {
             let t = 1.0 - weapon.inspect_t / crate::weapon::INSPECT_TIME;
@@ -2357,68 +3224,174 @@ struct InspectFlavour {
 /// Two holds on the same side of the weapon, however far apart in angle, read
 /// as the same view twice.
 const INSPECT_TURN: &[InspectKey] = &[
-    InspectKey { t: 0.00, offset: Vec3::new(0.0, 0.0, 0.0), rotation: Vec3::new(0.0, 0.0, 0.0) },
+    InspectKey {
+        t: 0.00,
+        offset: Vec3::new(0.0, 0.0, 0.0),
+        rotation: Vec3::new(0.0, 0.0, 0.0),
+    },
     // The wrist rolls in and the muzzle drops a little: the hand starts the
     // turn before the weapon has finished it.
-    InspectKey { t: 0.08, offset: Vec3::new(-0.022, 0.006, -0.014), rotation: Vec3::new(-0.07, 0.10, -0.14) },
+    InspectKey {
+        t: 0.08,
+        offset: Vec3::new(-0.022, 0.006, -0.014),
+        rotation: Vec3::new(-0.07, 0.10, -0.14),
+    },
     // One flank toward the eye, with the optic and the fore-end on show.
-    InspectKey { t: 0.30, offset: Vec3::new(-0.080, 0.052, -0.072), rotation: Vec3::new(-0.34, 0.16, -0.62) },
+    InspectKey {
+        t: 0.30,
+        offset: Vec3::new(-0.080, 0.052, -0.072),
+        rotation: Vec3::new(-0.34, 0.16, -0.62),
+    },
     // Held while the rail and the optic are read.
-    InspectKey { t: 0.44, offset: Vec3::new(-0.080, 0.052, -0.072), rotation: Vec3::new(-0.34, 0.16, -0.62) },
+    InspectKey {
+        t: 0.44,
+        offset: Vec3::new(-0.080, 0.052, -0.072),
+        rotation: Vec3::new(-0.34, 0.16, -0.62),
+    },
     // Over the top and the other way: the far flank, the stock joint, the
     // furniture on the side the eye never sees. The yaw is kept small and the
     // roll does the work — a big yaw here swings the muzzle up past the
     // crosshair, and a weapon being read is not pointed at anything.
-    InspectKey { t: 0.66, offset: Vec3::new(-0.084, 0.030, -0.066), rotation: Vec3::new(0.16, -0.06, 0.52) },
-    InspectKey { t: 0.79, offset: Vec3::new(-0.084, 0.030, -0.066), rotation: Vec3::new(0.16, -0.06, 0.52) },
+    InspectKey {
+        t: 0.66,
+        offset: Vec3::new(-0.084, 0.030, -0.066),
+        rotation: Vec3::new(0.16, -0.06, 0.52),
+    },
+    InspectKey {
+        t: 0.79,
+        offset: Vec3::new(-0.084, 0.030, -0.066),
+        rotation: Vec3::new(0.16, -0.06, 0.52),
+    },
     // Back, and a hair past: the weight carries it before it settles.
-    InspectKey { t: 0.93, offset: Vec3::new(0.010, -0.006, 0.008), rotation: Vec3::new(0.04, 0.03, 0.06) },
-    InspectKey { t: 1.00, offset: Vec3::new(0.0, 0.0, 0.0), rotation: Vec3::new(0.0, 0.0, 0.0) },
+    InspectKey {
+        t: 0.93,
+        offset: Vec3::new(0.010, -0.006, 0.008),
+        rotation: Vec3::new(0.04, 0.03, 0.06),
+    },
+    InspectKey {
+        t: 1.00,
+        offset: Vec3::new(0.0, 0.0, 0.0),
+        rotation: Vec3::new(0.0, 0.0, 0.0),
+    },
 ];
 
 /// A tipped-down look at the magazine well: muzzle down and the well rolled
 /// toward the eye, hold, a roll the other way, hold, and back.
 const INSPECT_WELL: &[InspectKey] = &[
-    InspectKey { t: 0.00, offset: Vec3::new(0.0, 0.0, 0.0), rotation: Vec3::new(0.0, 0.0, 0.0) },
-    InspectKey { t: 0.08, offset: Vec3::new(-0.016, 0.006, -0.012), rotation: Vec3::new(-0.06, 0.10, -0.10) },
+    InspectKey {
+        t: 0.00,
+        offset: Vec3::new(0.0, 0.0, 0.0),
+        rotation: Vec3::new(0.0, 0.0, 0.0),
+    },
+    InspectKey {
+        t: 0.08,
+        offset: Vec3::new(-0.016, 0.006, -0.012),
+        rotation: Vec3::new(-0.06, 0.10, -0.10),
+    },
     // Muzzle down: this is the whole point of the motion.
-    InspectKey { t: 0.32, offset: Vec3::new(-0.058, 0.016, -0.078), rotation: Vec3::new(-0.20, 0.44, -0.30) },
-    InspectKey { t: 0.52, offset: Vec3::new(-0.058, 0.016, -0.078), rotation: Vec3::new(-0.20, 0.44, -0.30) },
+    InspectKey {
+        t: 0.32,
+        offset: Vec3::new(-0.058, 0.016, -0.078),
+        rotation: Vec3::new(-0.20, 0.44, -0.30),
+    },
+    InspectKey {
+        t: 0.52,
+        offset: Vec3::new(-0.058, 0.016, -0.078),
+        rotation: Vec3::new(-0.20, 0.44, -0.30),
+    },
     // And the other face of the frame, briefly.
-    InspectKey { t: 0.70, offset: Vec3::new(-0.048, 0.030, -0.058), rotation: Vec3::new(0.16, 0.16, 0.44) },
-    InspectKey { t: 0.80, offset: Vec3::new(-0.048, 0.030, -0.058), rotation: Vec3::new(0.16, 0.16, 0.44) },
-    InspectKey { t: 0.92, offset: Vec3::new(0.008, -0.005, 0.006), rotation: Vec3::new(0.03, -0.02, 0.05) },
-    InspectKey { t: 1.00, offset: Vec3::new(0.0, 0.0, 0.0), rotation: Vec3::new(0.0, 0.0, 0.0) },
+    InspectKey {
+        t: 0.70,
+        offset: Vec3::new(-0.048, 0.030, -0.058),
+        rotation: Vec3::new(0.16, 0.16, 0.44),
+    },
+    InspectKey {
+        t: 0.80,
+        offset: Vec3::new(-0.048, 0.030, -0.058),
+        rotation: Vec3::new(0.16, 0.16, 0.44),
+    },
+    InspectKey {
+        t: 0.92,
+        offset: Vec3::new(0.008, -0.005, 0.006),
+        rotation: Vec3::new(0.03, -0.02, 0.05),
+    },
+    InspectKey {
+        t: 1.00,
+        offset: Vec3::new(0.0, 0.0, 0.0),
+        rotation: Vec3::new(0.0, 0.0, 0.0),
+    },
 ];
 
 /// The magazine check's own motion: shorter, smaller, and only ever tipped
 /// toward the well. `Alt`+`T` is a reading of the magazine, not a look at the
 /// weapon, so it does not get the rifle's turn.
-const WELL_CHECK: InspectFlavour = InspectFlavour { scale: 0.72, turn: false };
+const WELL_CHECK: InspectFlavour = InspectFlavour {
+    scale: 0.72,
+    turn: false,
+};
 
 fn inspect_flavour(kind: WeaponKind) -> InspectFlavour {
     match kind {
         // A blade has nothing to read but its edge, and it is turned in the
         // fingers rather than hefted.
-        WeaponKind::Knife => InspectFlavour { scale: 0.80, turn: true },
+        WeaponKind::Knife => InspectFlavour {
+            scale: 0.80,
+            turn: true,
+        },
         // A sidearm's magazine is in the grip and the grip is what the eye is
         // already behind: tipped down, it is the first thing you see.
-        WeaponKind::Pistol => InspectFlavour { scale: 0.86, turn: false },
-        WeaponKind::Smg => InspectFlavour { scale: 0.94, turn: true },
+        WeaponKind::Pistol => InspectFlavour {
+            scale: 0.86,
+            turn: false,
+        },
+        WeaponKind::Smg => InspectFlavour {
+            scale: 0.94,
+            turn: true,
+        },
         // The two machine pistols are the submachine gun's motion; the
         // bolt-action is heaviest of all because it is the longest thing here.
-        WeaponKind::Mp5 | WeaponKind::Mpx => InspectFlavour { scale: 0.94, turn: true },
-        WeaponKind::M4a1 => InspectFlavour { scale: 1.00, turn: true },
-        WeaponKind::Scar => InspectFlavour { scale: 1.08, turn: true },
-        WeaponKind::Fal => InspectFlavour { scale: 1.18, turn: true },
-        WeaponKind::M110 => InspectFlavour { scale: 1.14, turn: true },
-        WeaponKind::Mosin => InspectFlavour { scale: 1.24, turn: true },
-        WeaponKind::Rifle => InspectFlavour { scale: 1.06, turn: true },
-        WeaponKind::Sniper => InspectFlavour { scale: 1.10, turn: true },
+        WeaponKind::Mp5 | WeaponKind::Mpx => InspectFlavour {
+            scale: 0.94,
+            turn: true,
+        },
+        WeaponKind::M4a1 => InspectFlavour {
+            scale: 1.00,
+            turn: true,
+        },
+        WeaponKind::Scar => InspectFlavour {
+            scale: 1.08,
+            turn: true,
+        },
+        WeaponKind::Fal => InspectFlavour {
+            scale: 1.18,
+            turn: true,
+        },
+        WeaponKind::M110 => InspectFlavour {
+            scale: 1.14,
+            turn: true,
+        },
+        WeaponKind::Mosin => InspectFlavour {
+            scale: 1.24,
+            turn: true,
+        },
+        WeaponKind::Rifle => InspectFlavour {
+            scale: 1.06,
+            turn: true,
+        },
+        WeaponKind::Sniper => InspectFlavour {
+            scale: 1.10,
+            turn: true,
+        },
         // Heavier weapons get a longer arc and end up looking at the tube or
         // the belt box, which is what is under them.
-        WeaponKind::Shotgun => InspectFlavour { scale: 1.20, turn: false },
-        WeaponKind::Lmg => InspectFlavour { scale: 1.26, turn: true },
+        WeaponKind::Shotgun => InspectFlavour {
+            scale: 1.20,
+            turn: false,
+        },
+        WeaponKind::Lmg => InspectFlavour {
+            scale: 1.26,
+            turn: true,
+        },
     }
 }
 
@@ -2518,25 +3491,21 @@ mod tests {
     use super::*;
     use crate::weapon::{BuildEntry, PartId, SlotId};
 
-    /// The lowest point of a weapon and how many triangles it is drawn from,
-    /// with `fitted` installed. The two numbers a silhouette test needs.
-    fn silhouette(kind: WeaponKind, fitted: &WeaponBuild) -> (usize, f32) {
-        let mut tris = build_assembled(kind, !fits_a_magazine(fitted));
-        kit_into(&mut tris, kind, fitted);
-        let low = tris
-            .iter()
-            .flat_map(|t| [t.a.y, t.b.y, t.c.y])
-            .fold(f32::INFINITY, f32::min);
-        (tris.len(), low)
-    }
-
     /// The def of a weapon whose magazine a fitting replaces, if it has one.
     fn well_len_of(kind: WeaponKind) -> Option<Def> {
         let d = def(kind);
         (d.well_len > 0.0).then_some(d)
     }
 
-    /// The volume of a triangle list's bounding box.
+    /// The volume of a triangle list's bounding box: how much room a weapon
+    /// takes up on the screen.
+    ///
+    /// A bigger magazine has to buy *bulk*, and where it puts it is up to the
+    /// magazine — a box grows downwards, a shotgun's tube forwards, a belt box
+    /// outwards, and a fifty-round drum is wider and deeper than the thirty-round
+    /// stick it replaces while being no taller at all. Height alone called that
+    /// last one a fitting that buys rounds without bulk, which is why the drums
+    /// were briefly the size of dinner plates.
     fn bulk_of(tris: &[Tri]) -> f32 {
         let mut lo = Vec3::splat(f32::INFINITY);
         let mut hi = Vec3::splat(f32::NEG_INFINITY);
@@ -2548,19 +3517,6 @@ mod tests {
         }
         let (x, y, z) = (hi - lo).into();
         x.max(0.0) * y.max(0.0) * z.max(0.0)
-    }
-
-    /// How much room a weapon takes up: the volume of its bounding box.
-    ///
-    /// A bigger magazine has to buy *bulk*, and where it puts it is up to the
-    /// magazine — a box grows downwards, a shotgun's tube forwards, a belt box
-    /// outwards, and a fifty-round drum is wider and deeper than the thirty-round
-    /// stick it replaces while being no taller at all. Height alone called that
-    /// last one a fitting that buys rounds without bulk, which is why the drums
-    /// were briefly the size of dinner plates.
-    fn bulk(e: (usize, Vec3, Vec3)) -> f32 {
-        let (_, lo, hi) = e;
-        (hi.x - lo.x).max(0.0) * (hi.y - lo.y).max(0.0) * (hi.z - lo.z).max(0.0)
     }
 
     /// A weapon's extent with a build fitted, as a bounding box.
@@ -2578,13 +3534,14 @@ mod tests {
         (tris.len(), lo, hi)
     }
 
-    /// Rasterises a triangle list the way the armory's portrait draws it, into a
-    /// PPM: orthographic on (x, -y), painter-sorted on z, flat shaded.
+    /// Rasterises a triangle list into RGB pixels, the way the armory's portrait
+    /// draws it: orthographic on (x, y), painter-sorted on z, flat shaded.
     ///
     /// Not an assertion — a way to *look* at a shape. Geometry is judged by eye
     /// and the armory is four menu presses and a cursor away, so this writes the
-    /// pictures instead.
-    fn render_ppm(mesh: &Mesh, w: usize, h: usize, path: &std::path::Path) {
+    /// pictures instead. `render_ppm` and `render_png` are the two files it
+    /// leaves behind.
+    fn raster(mesh: &Mesh, w: usize, h: usize) -> Vec<u8> {
         let mut lo = vec2(f32::INFINITY, f32::INFINITY);
         let mut hi = vec2(f32::NEG_INFINITY, f32::NEG_INFINITY);
         for v in &mesh.vertices {
@@ -2634,12 +3591,137 @@ mod tests {
                 }
             }
         }
-        let mut out = format!("P6
+        buf
+    }
+
+    /// The picture `raster` drew, as a PPM file.
+    fn render_ppm(mesh: &Mesh, w: usize, h: usize, path: &std::path::Path) {
+        let buf = raster(mesh, w, h);
+        let mut out = format!(
+            "P6
 {w} {h}
 255
-").into_bytes();
+"
+        )
+        .into_bytes();
         out.extend_from_slice(&buf);
         std::fs::write(path, out).expect("the sheet could not be written");
+    }
+
+    /// The same picture as a PNG — the file anybody can actually open, since
+    /// most of them have no idea what a PPM is.
+    ///
+    /// The rows go out as `raster` drew them and let `export_png`'s own flip do
+    /// the work, which is what puts the object the right way up: the rasteriser
+    /// counts screen rows with the y it was given, and `export_png` is the one
+    /// that knows a PNG counts them from the top.
+    fn render_png(mesh: &Mesh, w: usize, h: usize, path: &std::path::Path) {
+        let rgb = raster(mesh, w, h);
+        let mut bytes = vec![0u8; w * h * 4];
+        for (i, px) in rgb.chunks_exact(3).enumerate() {
+            bytes[i * 4..i * 4 + 3].copy_from_slice(px);
+            bytes[i * 4 + 3] = 255;
+        }
+        let image = Image {
+            bytes,
+            width: w as u16,
+            height: h as u16,
+        };
+        image.export_png(&path.to_string_lossy());
+    }
+
+    /// A triangle list as a mesh, shifted by `at`, so `raster` can draw it.
+    fn mesh_of(tris: &[Tri], at: Vec3) -> Mesh {
+        let mut mesh = crate::mesh::empty_mesh();
+        for t in tris {
+            let base = mesh.vertices.len() as u16;
+            for p in [t.a, t.b, t.c] {
+                mesh.vertices.push(Vertex {
+                    position: p + at,
+                    uv: Vec2::ZERO,
+                    color: t.shaded().into(),
+                    normal: Vec4::Y,
+                });
+            }
+            mesh.indices.extend_from_slice(&[base, base + 1, base + 2]);
+        }
+        mesh
+    }
+
+    /// One picture per throwable: the casing as the world draws it on the left,
+    /// the same casing as the hand holds it on the right.
+    ///
+    /// Both renderers, both sizes, in one frame — the sheet is how the shapes
+    /// were judged against the real ones (an M67 is a ball with a fuze in the
+    /// top of it, an M18 a tin can, an M84 a perforated cylinder, a molotov a
+    /// bottle with a rag in its neck), and how the two renderers are compared
+    /// against each other by eye rather than only by numbers.
+    ///
+    /// `cargo test -- --ignored --nocapture render_the_casings`
+    #[test]
+    #[ignore = "writes a sheet of PNGs under target/casings; run with --ignored"]
+    fn render_the_casings() {
+        let dir = std::path::Path::new("target/casings");
+        std::fs::create_dir_all(dir).unwrap();
+        for (i, kind) in [
+            GrenadeKind::Frag,
+            GrenadeKind::Smoke,
+            GrenadeKind::Flash,
+            GrenadeKind::Molotov,
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut sheet = crate::mesh::empty_mesh();
+            let mut world = {
+                let mut mb = crate::mesh::MeshBuilder::new();
+                crate::grenade::casing_for_test(&mut mb, *kind);
+                mb.finish()
+            };
+            crate::mesh::transform_in_place(
+                &mut world,
+                Mat4::from_translation(vec3(-0.08, 0.0, 0.0)),
+            );
+            append(&mut sheet, &world);
+            // The right-hand object is what the player sees, fingers and all:
+            // drawing the casing on its own is how this sheet said the four
+            // shapes were fine while the game showed four colours of fist — the
+            // hand is in front of most of a casing it is closed round, and a
+            // sheet that leaves it out cannot see that.
+            let casing_at = vec3(0.08, 0.0, 0.0);
+            let shape = crate::grenade::casing_shape(*kind);
+            let mut held = Vec::new();
+            held_casing(&mut held, *kind, casing_at);
+            // The hand is drawn *from the casing's centre*, the way
+            // `held_throwable` draws it: the cradle under the body, at the body's
+            // own width.
+            throw_hand(
+                &mut held,
+                casing_at,
+                1.0,
+                shape.widest() * HELD_HALF,
+                shape.bottom() * HELD_HALF,
+            );
+            let held = mesh_of(&held, Vec3::ZERO);
+            append(&mut sheet, &held);
+            // The arena's light is dim and this is a sheet for judging shape:
+            // lifted towards white so the facets are not four kinds of black.
+            crate::mesh::tint_in_place(&mut sheet, WHITE, 0.35, 1.0);
+            let file = dir.join(format!("{i}-{kind:?}.png"));
+            render_png(&sheet, 560, 360, &file);
+            println!("{}", file.display());
+        }
+    }
+
+    /// Appends `src` to `dst`, keeping what is already in it.
+    ///
+    /// `copy_into` is the overwrite — it clears the destination — and a sheet is
+    /// several objects in one frame. What has to be fixed up is the indices: a
+    /// mesh's are its own, so the second object's would point into the first.
+    fn append(dst: &mut Mesh, src: &Mesh) {
+        let base = dst.vertices.len() as u16;
+        dst.vertices.extend_from_slice(&src.vertices);
+        dst.indices.extend(src.indices.iter().map(|i| i + base));
     }
 
     /// Writes one picture per weapon with the issued magazine and with every
@@ -2678,6 +3760,7 @@ mod tests {
                             part: part.id,
                             roll: 0.5,
                         }],
+                        load: crate::weapon::AmmoKind::Fmj,
                     },
                 ));
             }
@@ -2719,6 +3802,7 @@ mod tests {
                     part: PartId("mag_nobody_has_heard_of"),
                     roll: 0.5,
                 }],
+                load: crate::weapon::AmmoKind::Fmj,
             };
             let mut tris = Vec::new();
             kit_into(&mut tris, kind, &fitted);
@@ -2776,6 +3860,7 @@ mod tests {
                         part: part.id,
                         roll: 0.5,
                     }],
+                    load: crate::weapon::AmmoKind::Fmj,
                 };
                 let held = crate::weapon::resolve(crate::weapon::def(kind), &fitted)
                     .as_stats()
@@ -2856,6 +3941,7 @@ mod tests {
                         part: part.id,
                         roll: 0.5,
                     }],
+                    load: crate::weapon::AmmoKind::Fmj,
                 };
                 let now = extent(kind, &fitted);
                 assert!(
@@ -2866,10 +3952,10 @@ mod tests {
                 let rounds = crate::weapon::resolve(crate::weapon::def(kind), &fitted)
                     .as_stats()
                     .mag_size;
-                let issued = crate::weapon::resolve(crate::weapon::def(kind), &WeaponBuild::empty())
-                    .as_stats()
-                    .mag_size;
-                let _ = (rounds, issued);
+                let issued =
+                    crate::weapon::resolve(crate::weapon::def(kind), &WeaponBuild::empty())
+                        .as_stats()
+                        .mag_size;
                 let mut fitting = Vec::new();
                 kit_into(&mut fitting, kind, &fitted);
                 // Whatever else a magazine is, it is geometry — and this is the
@@ -2886,21 +3972,50 @@ mod tests {
                 );
                 // A magazine is the one fitting that *replaces* what it goes
                 // into, so where the two overlap there is no "it added something"
-                // to measure — and a fifty-round drum is wider and deeper than
-                // the thirty-round stick it replaces while being no taller at
-                // all, which is why the rule that used to be here ("the bigger
-                // ones reach lower") is gone and the drums were briefly the size
-                // of dinner plates. What can be said is that the fitting is not
-                // the issued magazine over again: a part that draws the same
-                // magazine at the same size buys rounds with no geometry at all.
+                // to measure. What can be said is that a fitting which buys more
+                // rounds has to buy *room*: "bigger in some direction" means at
+                // least one of its three dimensions grows.
+                //
+                // Not volume, and not height. A fifty-round drum is wider and
+                // deeper than the thirty-round stick it replaces while being no
+                // taller at all, and its bounding box comes out *smaller* — a drum
+                // packs rounds more densely than a raked stick does. Height alone
+                // called that drum a fitting that buys rounds without bulk, which
+                // is why the drums were briefly the size of dinner plates; volume
+                // would call it one too, and fatten the drums to satisfy a metric.
                 if let Some(def) = well_len_of(kind) {
+                    let dims = |t: &[Tri]| {
+                        let mut lo = Vec3::splat(f32::INFINITY);
+                        let mut hi = Vec3::splat(f32::NEG_INFINITY);
+                        for tri in t {
+                            for p in [tri.a, tri.b, tri.c] {
+                                lo = lo.min(p);
+                                hi = hi.max(p);
+                            }
+                        }
+                        let d = hi - lo;
+                        [d.x.max(0.0), d.y.max(0.0), d.z.max(0.0)]
+                    };
                     let mut issued_mag = Vec::new();
                     issued_magazine(&mut issued_mag, &def);
+                    let fitted_dims = dims(&fitting);
+                    let issued_dims = dims(&issued_mag);
                     assert!(
-                        bulk_of(&fitting) != bulk_of(&issued_mag),
+                        fitted_dims != issued_dims,
                         "{kind:?} with {} is drawn as the issued magazine",
                         part.id.0
                     );
+                    if rounds > issued {
+                        assert!(
+                            fitted_dims
+                                .iter()
+                                .zip(issued_dims.iter())
+                                .any(|(f, i)| f > i),
+                            "{kind:?} with {} holds {rounds} rounds to the issued {issued} \
+                             and measures {fitted_dims:?} w/h/d against {issued_dims:?}",
+                            part.id.0
+                        );
+                    }
                 }
                 seen.push(part.id.0);
                 checked += 1;
@@ -2990,6 +4105,7 @@ mod tests {
                     part: PartId("micro_dot"),
                     roll: 0.5,
                 }],
+                load: crate::weapon::AmmoKind::Fmj,
             },
             Paint::factory(),
         );
@@ -3017,15 +4133,16 @@ mod tests {
             swing: Vec3::new(-0.62, 0.14, -0.44),
             ..still
         };
-        let held = still.matrix().transform_point3(d.grip) - turned.matrix().transform_point3(d.grip);
+        let held =
+            still.matrix().transform_point3(d.grip) - turned.matrix().transform_point3(d.grip);
         assert!(
             held.length() < 1e-5,
             "the grip slid {:.4} m out of the hand",
             held.length()
         );
         // And the far end, which is the point of the exercise, does move.
-        let reach = still.matrix().transform_point3(d.muzzle)
-            - turned.matrix().transform_point3(d.muzzle);
+        let reach =
+            still.matrix().transform_point3(d.muzzle) - turned.matrix().transform_point3(d.muzzle);
         assert!(
             reach.length() > 0.3,
             "the muzzle only moved {:.4} m",
@@ -3061,5 +4178,424 @@ mod tests {
             );
             assert!(ra != Vec3::ZERO, "{kind:?}'s hold is the rest pose");
         }
+    }
+
+    /// The window the pose is measured in, and the field of view it is measured
+    /// with. `ViewModel::draw` reads both from the live window, which a test has
+    /// none of, so the numbers are the game's own logical resolution.
+    const TEST_VIEWPORT: Vec2 = Vec2::new(1280.0, 720.0);
+    const TEST_FOVY: f32 = 62.0_f32.to_radians();
+
+    /// How close the weapon comes to a point on the screen, in pixels: the
+    /// nearest of its projected points to `at`.
+    ///
+    /// Unclamped, deliberately. An earlier version measured the distance to the
+    /// edge of a guard box and saturated at zero, which made "the weapon is
+    /// inside the region at rest and inside it while held" measure as no change
+    /// at all — and a hip-fired weapon *is* inside it at rest, because it points
+    /// at the crosshair. This keeps growing as the weapon moves away.
+    fn closest_to(vm: &ViewModel, kind: WeaponKind, f: f32, at: Vec2) -> Option<f32> {
+        let mat = vm
+            .pose(&Player::new(Vec3::ZERO), arsenal_with(kind).active_weapon())
+            .matrix();
+        let mut closest = f32::INFINITY;
+        let mut any = false;
+        for t in &vm.parts[kind.index()] {
+            for p in [t.a, t.b, t.c] {
+                let Some(s) = project_point(mat.transform_point3(p), TEST_VIEWPORT, f) else {
+                    continue;
+                };
+                any = true;
+                closest = closest.min((s - at).length());
+            }
+        }
+        any.then_some(closest)
+    }
+
+    fn arsenal_with(kind: WeaponKind) -> Arsenal {
+        Arsenal::new([Some(kind), None])
+    }
+
+    /// Something in the other hand must move the weapon off the throw, and must
+    /// not move it through the camera.
+    ///
+    /// The arc a throwable draws leaves the eye along the centre of the screen
+    /// and the first half of it runs through where a hip-fired weapon sits — so
+    /// the pose that takes the grenade out has to take the weapon with it. This
+    /// measures where the weapon actually lands rather than trusting the numbers
+    /// in the pose, because numbers that look like they move the gun are how the
+    /// muzzle ended up swung *across* the crosshair: positive yaw is muzzle-right
+    /// and the weapon already sits right of centre, so the first version of this
+    /// pose turned it back over the middle.
+    ///
+    /// Two properties, both measured, and neither of them "the weapon is not on
+    /// screen" — a hip-fired weapon points at the crosshair by design, and a pose
+    /// that pulled it that far off would be a different bug:
+    ///
+    /// - it comes *further* from the region the throw is read in than it does at
+    ///   rest, so a pose that moves nothing cannot pass;
+    /// - no part of it goes behind the eye, where the projection drops the
+    ///   triangle and the weapon grows a hole. Measured against the same weapon
+    ///   at rest rather than against zero, because a sniper's stock is already
+    ///   behind the eye in the shipped pose.
+    #[test]
+    fn a_throwable_in_hand_takes_the_weapon_off_the_throw() {
+        let f = (TEST_VIEWPORT.y * 0.5) / (TEST_FOVY * 0.5).tan();
+        // Where the throw is read: the middle of the band under the crosshair
+        // that the arc and its landing mark run through. A throw that lands
+        // anywhere from arm's length to the far side of an arena puts its mark
+        // near there, and the near half of the arc is drawn across it.
+        let around = TEST_VIEWPORT * 0.5 + vec2(0.0, TEST_VIEWPORT.y * 0.10);
+
+        for kind in ALL_KINDS {
+            let mut held = ViewModel::new();
+            held.set_grabbed(Some(GrenadeKind::Frag));
+            // Long enough for the ease to arrive: `HOLD_RATE` gets there in a
+            // third of a second, and this is four times that.
+            for _ in 0..80 {
+                held.update(
+                    1.0 / 60.0,
+                    Vec2::ZERO,
+                    &Player::new(Vec3::ZERO),
+                    &arsenal_with(kind),
+                );
+            }
+
+            let mut idle = ViewModel::new();
+            for _ in 0..80 {
+                idle.update(
+                    1.0 / 60.0,
+                    Vec2::ZERO,
+                    &Player::new(Vec3::ZERO),
+                    &arsenal_with(kind),
+                );
+            }
+
+            let holding = closest_to(&held, kind, f, around)
+                .unwrap_or_else(|| panic!("{kind:?} drew nothing at all while holding"));
+            let rest = closest_to(&idle, kind, f, around)
+                .unwrap_or_else(|| panic!("{kind:?} drew nothing at rest"));
+            // A margin rather than merely "further": a pose that nudges the
+            // weapon by a pixel is not a pose that gets it out of the way. Forty
+            // pixels is a twentieth of the height — small, and not nothing.
+            assert!(
+                holding > rest + 40.0,
+                "{kind:?} does not move off the throw while one is in hand: nearest point \
+                 {holding:.0} px from the middle of the throw against {rest:.0} px at rest",
+            );
+
+            // The pose used to be measured against the camera here as well — no
+            // part of the weapon may come *nearer* the eye than it does at rest,
+            // which is how the version that took the grenade out by throwing the
+            // gun at the player's face was caught. That bound is gone with the
+            // pose it guarded: the weapon is now put away entirely, and being
+            // absent from the frame is a stronger claim than being a bound away
+            // from the eye. See `the_weapon_is_put_away_while_a_throwable_is_in_hand`.
+        }
+    }
+
+    /// The points of a triangle a screen-space test has to look at: its corners,
+    /// the middle of each edge, and its centre.
+    fn sight_samples(t: &Tri) -> [Vec3; 7] {
+        let mid = |a: Vec3, b: Vec3| (a + b) * 0.5;
+        [
+            t.a,
+            t.b,
+            t.c,
+            mid(t.a, t.b),
+            mid(t.b, t.c),
+            mid(t.c, t.a),
+            (t.a + t.b + t.c) / 3.0,
+        ]
+    }
+
+    /// Nothing of the weapon is in the frame while a throwable is in the hand.
+    ///
+    /// "把枪放起来" is exactly this and nothing less. A weapon lowered to the hip
+    /// is still a weapon on the screen — on the sight line, with a hand on it —
+    /// and the throw the player is reading is drawn through the middle of it. So
+    /// the pose is measured rather than trusted: the triangles `assemble` itself
+    /// would paint are projected, and none of the seven sampled points of any of
+    /// them may land inside the view.
+    ///
+    /// Seven points and not three corners, because three corners outside a
+    /// rectangle do not mean the triangle between them misses it — a weapon
+    /// lying across a corner of the frame passes a corner test. A muzzle poking
+    /// into the bottom of the frame fails on its own corner either way.
+    ///
+    /// The hands are left out on purpose: see `weapon_into`. The hand holding the
+    /// throwable is supposed to be on the screen at the same moment, which is
+    /// what the next test is about.
+    #[test]
+    fn the_weapon_is_put_away_while_a_throwable_is_in_hand() {
+        let f = (TEST_VIEWPORT.y * 0.5) / (TEST_FOVY * 0.5).tan();
+        let player = Player::new(Vec3::ZERO);
+        for kind in ALL_KINDS {
+            let arsenal = arsenal_with(kind);
+            let mut vm = ViewModel::new();
+            vm.set_grabbed(Some(GrenadeKind::Frag));
+            for _ in 0..80 {
+                vm.update(1.0 / 60.0, Vec2::ZERO, &player, &arsenal);
+            }
+            vm.weapon_into(&player, arsenal.active_weapon(), Paint::factory());
+            assert!(!vm.body.is_empty(), "{kind:?} drew no weapon at all");
+            for t in &vm.body {
+                for p in sight_samples(t) {
+                    // Behind the eye, where the projection drops the triangle:
+                    // not drawn, so not on the screen.
+                    let Some(s) = project_point(p, TEST_VIEWPORT, f) else {
+                        continue;
+                    };
+                    assert!(
+                        s.x < 0.0 || s.y < 0.0 || s.x > TEST_VIEWPORT.x || s.y > TEST_VIEWPORT.y,
+                        "{kind:?} is still on the screen with a throwable in hand: a point of it \
+                         lands at {s:?} in a {}x{} view",
+                        TEST_VIEWPORT.x,
+                        TEST_VIEWPORT.y,
+                    );
+                }
+            }
+        }
+    }
+    /// The throwable in the hand is on the screen, and where the hand is.
+    ///
+    /// "拿到手上" is exactly this and nothing else: the thing is drawn, in front
+    /// of the near plane, and inside the view. A model behind the camera or off
+    /// the bottom of the screen is a model that does not exist to anyone playing
+    /// the game — which is what "投掷物并没有拿到手上" was.
+    #[test]
+    fn the_held_throwable_is_on_the_screen() {
+        let f = (TEST_VIEWPORT.y * 0.5) / (TEST_FOVY * 0.5).tan();
+        let want = vec2(
+            TEST_VIEWPORT.x * 0.5 + (HAND_OFFSET.x / HAND_OFFSET.z) * f,
+            TEST_VIEWPORT.y * 0.5 - (HAND_OFFSET.y / HAND_OFFSET.z) * f,
+        );
+        for kind in [
+            GrenadeKind::Frag,
+            GrenadeKind::Smoke,
+            GrenadeKind::Flash,
+            GrenadeKind::Molotov,
+        ] {
+            let mut held = Vec::new();
+            held_throwable(&mut held, kind, HAND_OFFSET);
+            assert!(!held.is_empty(), "{kind:?} drew nothing in the hand");
+
+            // The casing and the fist, not the forearm: an arm is supposed to
+            // leave the frame, which is where the existing hand geometry sends it,
+            // so measuring the whole list would measure the arm.
+            let (mut lo, mut hi) = (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY));
+            let mut seen = 0;
+            for t in &held {
+                for p in [t.a, t.b, t.c] {
+                    if p.distance(HAND_OFFSET) > 0.16 {
+                        continue;
+                    }
+                    let s = project_point(p, TEST_VIEWPORT, f)
+                        .unwrap_or_else(|| panic!("{kind:?} has a corner behind the near plane"));
+                    seen += 1;
+                    lo = lo.min(s);
+                    hi = hi.max(s);
+                }
+            }
+            assert!(seen > 0, "{kind:?} is not at the hand at all");
+            assert!(
+                hi.x > 0.0 && lo.x < TEST_VIEWPORT.x && hi.y > 0.0 && lo.y < TEST_VIEWPORT.y,
+                "{kind:?} is off the screen: x {:.0}..{:.0}, y {:.0}..{:.0} in a {}x{} view",
+                lo.x,
+                hi.x,
+                lo.y,
+                hi.y,
+                TEST_VIEWPORT.x,
+                TEST_VIEWPORT.y,
+            );
+            // And centred on the hand, not merely somewhere on screen.
+            let mid = (lo + hi) * 0.5;
+            assert!(
+                (mid - want).length() < 60.0,
+                "{kind:?} is drawn at {mid:?} with the hand at {want:?}"
+            );
+
+            // And no part of the hand is inside the thing it is holding.
+            //
+            // That is the whole of what "投掷物和手重合了" was: a fist drawn round a
+            // grenade puts the two meshes in the same cubic centimetres, and a
+            // player looking at one of them is not looking at the other. A
+            // drawn-vertex test cannot ask this — a can's wall has a ring at each
+            // end and nothing between them — so the body is read off its profile
+            // at the height of each point of the hand. The tolerance is a
+            // hundredth of the thing's own half-extent: the fingers are tangent
+            // to a body of revolution, and the facets of one meet those of the
+            // other only approximately.
+            let centre = HAND_OFFSET + vec3(0.0, HELD_LIFT, 0.0);
+            let shape = crate::grenade::casing_shape(kind);
+            let mut hand = Vec::new();
+            throw_hand(
+                &mut hand,
+                centre,
+                1.0,
+                shape.widest() * HELD_HALF,
+                shape.bottom() * HELD_HALF,
+            );
+            let mut casing = Vec::new();
+            held_casing(&mut casing, kind, centre);
+            let top = shape.profile[shape.profile.len() - 1].1;
+            for p in hand.iter().flat_map(|t| [t.a, t.b, t.c]) {
+                let y = (p.y - centre.y) / HELD_HALF;
+                // Above or below the body there is no wall to be inside of.
+                if y < shape.bottom() || y > top {
+                    continue;
+                }
+                let r = ((p.x - centre.x).powi(2) + (p.z - centre.z).powi(2)).sqrt() / HELD_HALF;
+                assert!(
+                    r > shape.radius_at(y) - 0.01,
+                    "{kind:?} has the hand inside it: a point {r:.3} of the half-extent out is \
+                     inside a body {:.3} wide at {y:.3} up",
+                    shape.radius_at(y),
+                );
+            }
+            // And it is *holding* it rather than standing under it. Without this
+            // the test above is satisfied by a hand a metre below: everything
+            // that keeps the hand out of the body also keeps it out of the
+            // picture.
+            let finger_top = hand
+                .iter()
+                .flat_map(|t| [t.a, t.b, t.c])
+                .map(|p| p.y)
+                .fold(f32::MIN, f32::max);
+            let underside = centre.y + shape.bottom() * HELD_HALF;
+            assert!(
+                (finger_top - underside).abs() < 0.006,
+                "{kind:?} is not in the hand: the fingers reach {finger_top:.3} and the body's \
+                 underside is at {underside:.3}",
+            );
+            let top_of = |tris: &[Tri]| {
+                tris.iter()
+                    .flat_map(|t| [t.a, t.b, t.c])
+                    .map(|p| p.y)
+                    .fold(f32::MIN, f32::max)
+            };
+            // And the thing is a *shape* in that hand: its top stands well clear
+            // of the fingers, so what a player looks at is the grenade and not the
+            // hand under it.
+            assert!(
+                top_of(&casing) > finger_top + 0.08,
+                "{kind:?} is mostly hand: its top is at {:.3} and the fingers reach {:.3}",
+                top_of(&casing),
+                finger_top,
+            );
+        }
+    }
+
+    /// The widest radius in each of five bands from the bottom of a shape to its
+    /// top, in fractions of `half`.
+    fn silhouette(points: impl Iterator<Item = Vec3>, half: f32) -> [f32; 5] {
+        let points: Vec<Vec3> = points.collect();
+        let lo = points.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+        let hi = points.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
+        let span = (hi - lo).max(1e-6);
+        let mut bands = [0.0f32; 5];
+        for p in &points {
+            let band = (((p.y - lo) / span * 5.0) as usize).min(4);
+            bands[band] = bands[band].max((p.x * p.x + p.z * p.z).sqrt() / half);
+        }
+        bands
+    }
+
+    /// The thing in the hand and the thing in the air are one object.
+    ///
+    /// Two renderers and one description (`grenade::casing_shape`): this one
+    /// draws the profiles out of `Tri`s and the world draws them out of
+    /// `MeshBuilder` quads. They cannot share code — a `Mesh` in the world is
+    /// not a triangle list in the view — so they are checked against each other
+    /// instead, on the one property a player reads at a glance: the silhouette,
+    /// sampled in five bands from the bottom to the top.
+    ///
+    /// Shape, and not triangle counts, because the two spend their faces
+    /// differently on the same object: a cap is one degenerate quad per facet in
+    /// the mesh and one triangle per facet here, and a prism is six quads in one
+    /// and six in the other only if both happen to mean the same thing by it.
+    /// Those are bookkeeping. A profile that changed on the way to the hand
+    /// would not be — and it would be seen at exactly the moment nobody is
+    /// looking, which is the grenade leaving the hand.
+    #[test]
+    fn the_held_casing_is_the_casing_in_the_air() {
+        for kind in [
+            GrenadeKind::Frag,
+            GrenadeKind::Smoke,
+            GrenadeKind::Flash,
+            GrenadeKind::Molotov,
+        ] {
+            let mut tris = Vec::new();
+            held_casing(&mut tris, kind, Vec3::ZERO);
+            let hand = silhouette(tris.iter().flat_map(|t| [t.a, t.b, t.c]), HELD_HALF);
+            let mut mb = crate::mesh::MeshBuilder::new();
+            crate::grenade::casing_for_test(&mut mb, kind);
+            let world = mb.finish();
+            let air = silhouette(
+                world.vertices.iter().map(|v| v.position),
+                crate::grenade::HALF,
+            );
+            for (band, (a, b)) in air.iter().zip(hand.iter()).enumerate() {
+                // A hundredth of the half-extent: the same numbers drawn twice,
+                // so anything above rounding is one renderer doing something the
+                // other is not. The four *profiles* are apart by six hundredths
+                // (`the_four_casings_are_four_shapes`), which is the size of the
+                // drift this is looking for.
+                assert!(
+                    (a - b).abs() < 0.01,
+                    "{kind:?} is a different shape in the hand than in the air: band {band} \
+                     is {a:.3} of the half-extent in the world and {b:.3} in the hand",
+                );
+            }
+        }
+    }
+
+    /// The throwing hand comes up into place, and the throw and the arc follow it
+    /// while it does.
+    ///
+    /// `main.rs` throws from `throw_hand` and draws the arc from it — one
+    /// position for the drawing, the flight and the line, rather than a constant
+    /// that the drawing leaves behind. So this pins the three ends of that
+    /// motion: below the resting point while the hand is on its way up (a line
+    /// drawn from the resting point would hang in the air over a grenade that was
+    /// still coming up), exactly on it by the time a throw is possible, and below
+    /// it again once the throw has carried the arm away.
+    #[test]
+    fn the_throwing_hand_rises_into_place_and_leaves_it_again() {
+        let player = Player::new(Vec3::ZERO);
+        let arsenal = arsenal_with(WeaponKind::Rifle);
+        let mut vm = ViewModel::new();
+        let step = |vm: &mut ViewModel| vm.update(1.0 / 60.0, Vec2::ZERO, &player, &arsenal);
+
+        vm.set_grabbed(Some(GrenadeKind::Frag));
+        step(&mut vm);
+        let coming_up = vm.throw_hand();
+        assert!(
+            coming_up.y < HAND_OFFSET.y - 0.05,
+            "the hand is already in place one frame after the thing comes to hand: {coming_up:?} \
+             against {HAND_OFFSET:?}",
+        );
+
+        // Four times the ease, which `HOLD_RATE` finishes in a sixth of a second.
+        for _ in 0..80 {
+            step(&mut vm);
+        }
+        assert!(
+            (vm.throw_hand() - HAND_OFFSET).length() < 1e-3,
+            "the hand never settles where the arc and the throw are measured from: {:?} against \
+             {HAND_OFFSET:?}",
+            vm.throw_hand(),
+        );
+
+        vm.trigger_grenade_throw();
+        vm.set_grabbed(None);
+        for _ in 0..10 {
+            step(&mut vm);
+        }
+        assert!(
+            vm.throw_hand().y < HAND_OFFSET.y - 0.10,
+            "the arm does not follow the thing it threw out of the frame: {:?}",
+            vm.throw_hand(),
+        );
     }
 }

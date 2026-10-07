@@ -56,6 +56,8 @@ const ARCHETYPES: [Kind; 8] = [
 enum KitSwatch {
     Frag,
     Smoke,
+    Flash,
+    Molotov,
     Medical,
     Armor,
     Ammo,
@@ -66,6 +68,8 @@ impl KitSwatch {
         match self {
             KitSwatch::Frag => GrenadeKind::Frag.color(),
             KitSwatch::Smoke => GrenadeKind::Smoke.color(),
+            KitSwatch::Flash => GrenadeKind::Flash.color(),
+            KitSwatch::Molotov => GrenadeKind::Molotov.color(),
             KitSwatch::Medical => PickupKind::Health.color(),
             KitSwatch::Armor => PickupKind::Armor.color(),
             KitSwatch::Ammo => PickupKind::Ammo.color(),
@@ -76,9 +80,11 @@ impl KitSwatch {
 /// The kit cards in display order: what you throw, what you take, what you wear
 /// and what you feed the guns. `kit` is built straight off this, so a card and
 /// its key cannot drift apart.
-const KIT: [(Key, KitSwatch); 7] = [
+const KIT: [(Key, KitSwatch); 9] = [
     (Key::CodexItemFrag, KitSwatch::Frag),
     (Key::CodexItemSmoke, KitSwatch::Smoke),
+    (Key::CodexItemFlash, KitSwatch::Flash),
+    (Key::CodexItemMolotov, KitSwatch::Molotov),
     (Key::CodexItemBandage, KitSwatch::Medical),
     (Key::CodexItemMedkit, KitSwatch::Medical),
     (Key::CodexItemPainkiller, KitSwatch::Medical),
@@ -154,6 +160,10 @@ pub fn tips() -> Vec<&'static str> {
         Key::TipSanity,
         Key::TipPickups,
         Key::TipFireModes,
+        Key::TipLoadFmj,
+        Key::TipLoadSlug,
+        Key::TipLoadJhp,
+        Key::TipLoadAp,
     ]
     .iter()
     .map(|k| i18n::t(*k))
@@ -451,10 +461,17 @@ fn weapon_stats(s: &WeaponStats, kind: WeaponKind) -> String {
     }
     // The share of a hit this weapon carries through plate — the one number
     // that answers "how does this do against a Juggernaut" (reference
-    // §17.2③). Every weapon names it, so it can be compared at a glance.
+    // §17.2③). Every weapon names it, so it can be compared at a glance, and
+    // the round it comes out of is named beside it (reference §23): the
+    // difference between two weapons on one cartridge is the barrel, and the
+    // player can now see both halves.
     fields.push(field(
         Key::StatArmorPen,
-        format!("{:.0}%", kind.armor_pen() * 100.0),
+        format!(
+            "{} {:.0}%",
+            i18n::t(crate::weapon::ammo_type(kind.chamber()).name),
+            kind.armor_pen() * 100.0
+        ),
     ));
     fields.join(" · ")
 }
@@ -572,6 +589,29 @@ mod tests {
                 row.stats.contains(&health),
                 "{kind:?} prints {:?}, which does not carry its {health} HP",
                 row.stats
+            );
+        }
+    }
+
+    /// The bestiary's list and the suite's list have to describe the same set.
+    ///
+    /// `enemy.rs` has no production `Kind::ALL` on purpose — the manual's order
+    /// is this module's business — so this is the check that keeps the two lists
+    /// from drifting apart. Without it an archetype added to `Kind` either
+    /// vanishes from the bestiary or is silently never tested, and the second of
+    /// those is exactly how the drone's hitbox went unchecked (review R18).
+    #[test]
+    fn the_bestiary_and_the_tested_archetypes_agree() {
+        for kind in enemy::ALL_KINDS {
+            assert!(
+                ARCHETYPES.contains(&kind),
+                "{kind:?} is tested but is not in the bestiary"
+            );
+        }
+        for kind in ARCHETYPES {
+            assert!(
+                enemy::ALL_KINDS.contains(&kind),
+                "{kind:?} is in the bestiary but no test walks it"
             );
         }
     }
@@ -754,10 +794,16 @@ mod tests {
     }
 
     /// Every survival note is there and says something.
+    ///
+    /// The count is the tripwire: a note added to `tips` without this number
+    /// moving means the page grew without anyone deciding it should. Seven of
+    /// them are the fight and the field, and the last four are the rounds — what
+    /// each one buys, what it costs, and where the choice is made, which is the
+    /// one thing the armory's numbers cannot say.
     #[test]
     fn the_survival_notes_are_all_present() {
         let tips = tips();
-        assert_eq!(tips.len(), 7);
+        assert_eq!(tips.len(), 11);
         for tip in &tips {
             assert!(!tip.is_empty());
         }

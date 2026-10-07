@@ -246,12 +246,13 @@ OpenGameArt page the check was:
   gunfire. **99.8 % of the energy is below 200 Hz** with a spectral centroid of
   87–125 Hz — the lowest-frequency material in the whole local pack. It sits at
   exactly 2.00 s, inside the window.
-- **Known duplication:** the same source file was already curated into
-  `assets/sounds/variants/explosion_deep.ogg` by `_tools/curate.py`. Nothing
-  auto-loads `variants/`, so there is no collision, but the two files are
-  byte-identical. If you would rather not duplicate, the next-best in-range
-  candidate was `monster_04.ogg` from *80 CC0 creature SFX* (1.28 s, 99.6 %
-  under 200 Hz, 48 kHz) — shorter, and 48 kHz.
+- **Known duplication, since resolved:** the same source file had been curated
+  into `assets/sounds/variants/explosion_deep.ogg` by `_tools/curate.py`, so the
+  two files were byte-identical. It was never referenced by anything, and it is
+  the file this slot ended up using, so on 2026-10-04 the `variants/` copy was
+  deleted rather than kept as a second name for the same bytes. The next-best
+  in-range candidate, had a different take been wanted, was `monster_04.ogg`
+  from *80 CC0 creature SFX* (1.28 s, 99.6 % under 200 Hz, 48 kHz).
 
 ```
 00000000: 4f67 6753 0002 0000 0000 0000 0000 584a  OggS..........XJ

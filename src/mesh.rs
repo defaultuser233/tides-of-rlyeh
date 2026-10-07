@@ -98,6 +98,16 @@ fn face_axes(n: Vec3) -> (Vec3, Vec3) {
 pub struct MeshBuilder {
     verts: Vec<Vertex>,
     idx: Vec<u16>,
+    /// Whether `quad` bakes the key light into its vertex colours. On for
+    /// everything that is a *surface* — which is everything in the arena — and
+    /// off for the two things in the game that are light rather than lit: a
+    /// flame, and nothing else so far.
+    ///
+    /// `shade` multiplies by 0.44 on a face pointing away from the sun and by
+    /// 1.0 on one facing it, so a lit flame is a lump of orange that changes
+    /// brightness per face — brightest towards a sun it has nothing to do with,
+    /// and darker than the wall behind it wherever it does not face the sun.
+    unlit: bool,
     /// Texture repeats per metre. Set once per builder, because a builder fills
     /// exactly one mesh and a mesh carries exactly one texture — so the tile
     /// size is a property of the batch, not of each face.
@@ -109,6 +119,7 @@ impl Default for MeshBuilder {
         Self {
             verts: Vec::new(),
             idx: Vec::new(),
+            unlit: false,
             // One repeat per metre. Untextured geometry ignores its UVs, so the
             // only caller that has to think about this is the level.
             uv_scale: 1.0,
@@ -149,7 +160,11 @@ impl MeshBuilder {
     /// was built. Only the level is textured, and it is built in place.
     pub fn quad(&mut self, a: Vec3, b: Vec3, c: Vec3, d: Vec3, color: Color) {
         let n = (b - a).cross(c - a).normalize_or_zero();
-        let col = rgba(shade(color, n));
+        let col = if self.unlit {
+            rgba(color)
+        } else {
+            rgba(shade(color, n))
+        };
         let n4 = n.extend(0.0);
         let (u_axis, v_axis) = face_axes(n);
         let base = self.verts.len() as u16;
@@ -168,6 +183,17 @@ impl MeshBuilder {
 
     /// Axis-aligned box. Vertices are placed so every face gets its own
     /// precomputed shading.
+    /// Draws everything added after it at its own colour, unshaded. See
+    /// `MeshBuilder::unlit`.
+    pub fn plain(&mut self) {
+        self.unlit = true;
+    }
+
+    /// Back to lit surfaces, for a caller that draws both.
+    pub fn lit(&mut self) {
+        self.unlit = false;
+    }
+
     pub fn add_box(&mut self, min: Vec3, max: Vec3, color: Color) {
         let (x0, y0, z0) = (min.x, min.y, min.z);
         let (x1, y1, z1) = (max.x, max.y, max.z);
@@ -252,6 +278,15 @@ impl MeshBuilder {
             indices: self.idx,
             texture: None,
         }
+    }
+
+    /// How many quads have been added so far — six indices each.
+    ///
+    /// For a caller that draws into a batch it shares with other things: read
+    /// this on either side of its own drawing and it knows what it cost,
+    /// without keeping a second count that can drift from the geometry.
+    pub fn quads(&self) -> usize {
+        self.idx.len() / 6
     }
 
     /// Borrow `mesh`'s buffers for this builder, leaving `mesh` empty but with

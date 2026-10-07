@@ -298,16 +298,18 @@ const BUNDLED_FONT: &[u8] = crate::assets::bytes(crate::assets::Asset::UiFont);
 impl Fonts {
     /// Loads the bundled CJK font, falling back to macroquad's built-in font
     /// when it is missing or unreadable. Never panics.
-    pub async fn load() -> Fonts {
-        if let Ok(font) = macroquad::text::load_ttf_font_from_bytes(BUNDLED_FONT) {
-            return Fonts { font: Some(font) };
+    ///
+    /// There is no second chance on disk. This used to fall back to a relative
+    /// `assets/fonts/ui_zh.ttf` next, which only resolves when the process
+    /// happens to start in the project root — `cargo run` yes, a released
+    /// executable anywhere else no — and which would have drawn a *different*
+    /// font rather than failing. The font is embedded or it is the built-in one
+    /// (review R10).
+    pub fn load() -> Fonts {
+        match macroquad::text::load_ttf_font_from_bytes(BUNDLED_FONT) {
+            Ok(font) => Fonts { font: Some(font) },
+            Err(_) => Fonts { font: None },
         }
-        for path in ["assets/fonts/ui_zh.ttf", "assets/fonts/ui_zh.otf"] {
-            if let Ok(font) = load_ttf_font(path).await {
-                return Fonts { font: Some(font) };
-            }
-        }
-        Fonts { font: None }
     }
 
     /// Draw text using the CJK font when available, else the default font.
@@ -373,6 +375,9 @@ pub struct HudState<'a> {
     /// How many spare magazines those rounds are in. `None` alongside `reserve`
     /// for the weapons that have neither.
     pub magazines: Option<usize>,
+    /// True when a reload would be taken right now: the magazine is not full and
+    /// a spare holds a round. The HUD asks this before it says what R does.
+    pub can_reload: bool,
     /// `Some(0.0..=1.0)` while reloading, else `None`.
     pub reload_progress: Option<f32>,
     /// Short labels for each carried weapon plus which one is active.
@@ -668,7 +673,11 @@ fn draw_ammo(f: &Fonts, s: &HudState, t: &mut HudText, ui: &Ui, w: f32, h: f32) 
             // weapons that have both, and the blade names itself instead.
             let mag_line = s.mag_size > 0;
             let small = t.mag_size.as_str();
-            let sw = if mag_line { f.width(small, ui.s(16.0)) } else { 0.0 };
+            let sw = if mag_line {
+                f.width(small, ui.s(16.0))
+            } else {
+                0.0
+            };
             if mag_line {
                 f.text_r(small, right, y + ui.s(74.0), ui.s(16.0), fade(INK, 0.45));
             } else {
@@ -678,6 +687,27 @@ fn draw_ammo(f: &Fonts, s: &HudState, t: &mut HudText, ui: &Ui, w: f32, h: f32) 
                     y + ui.s(74.0),
                     ui.s(20.0),
                     fade(INK, 0.55),
+                );
+            }
+
+            // The gun is dry and a loaded magazine is waiting: the one moment
+            // the HUD has to say out loud what R does. It reads `can_reload`
+            // rather than counting rounds here, so it cannot promise a reload
+            // the weapon would refuse.
+            //
+            // Left, above the reserve line, because the right of this panel
+            // belongs to the magazine's own number. The reload's word sits on
+            // the high line only because *that* branch draws no big number, and
+            // borrowing its place here set the prompt straight through the `0`.
+            if mag_line && s.mag == 0 && s.can_reload {
+                tracked(
+                    f,
+                    i18n::t(Key::ReloadPrompt),
+                    ix,
+                    y + ui.s(50.0),
+                    ui.s(14.0),
+                    fade(accent(), 0.55 + 0.45 * pulse(5.0)),
+                    ui.s(2.0),
                 );
             }
 
@@ -1014,8 +1044,7 @@ pub fn draw_scope_overlay(ads: f32) {
     // Where the sight is between "the tube has just gone" and "settled". The
     // aperture opens across it, so the swap reads as the scope coming up rather
     // than as a cut.
-    let t = ((ads - crate::viewmodel::SCOPE_HIDE_ADS)
-        / (1.0 - crate::viewmodel::SCOPE_HIDE_ADS))
+    let t = ((ads - crate::viewmodel::SCOPE_HIDE_ADS) / (1.0 - crate::viewmodel::SCOPE_HIDE_ADS))
         .clamp(0.0, 1.0);
     let (w, h) = (screen_width(), screen_height());
     let ui = Ui::new();
@@ -1045,7 +1074,12 @@ pub fn draw_scope_overlay(ads: f32) {
 
     // The glass: a cold wash and a soft rim inside the edge, so the aperture
     // reads as a lens rather than as a hole cut in the screen.
-    draw_circle(centre.x, centre.y, radius, Color::new(0.05, 0.09, 0.12, 0.12));
+    draw_circle(
+        centre.x,
+        centre.y,
+        radius,
+        Color::new(0.05, 0.09, 0.12, 0.12),
+    );
     for i in 0..5 {
         let f = i as f32 / 5.0;
         let a = 0.20 * (1.0 - f) + 0.03;
@@ -1087,7 +1121,14 @@ pub fn draw_scope_overlay(ads: f32) {
         let x = radius * (0.16 + 0.14 * i as f32);
         let half = ui.s(3.0 + 1.2 * i as f32);
         for side in [1.0f32, -1.0] {
-            draw_line(centre.x + side * x, centre.y - half, centre.x + side * x, centre.y + half, line, ink);
+            draw_line(
+                centre.x + side * x,
+                centre.y - half,
+                centre.x + side * x,
+                centre.y + half,
+                line,
+                ink,
+            );
         }
     }
 }
@@ -1165,6 +1206,26 @@ const FEEDBACK_PLATE: Color = Color::new(0.02, 0.025, 0.03, 0.80);
 /// no shader and no full-screen transparency — because it plays over the busiest
 /// moment of the frame, and the frame it draws is near-white whatever the
 /// arena's accent is, so the pulse reads even where a tint would not.
+/// The white a flashbang leaves on the screen.
+///
+/// Separate from `draw_kill_flash`, which is a warm banded beat at the bottom of
+/// the view: this is the whole screen, flat, and it does not fade out so much as
+/// get out of the way. It is drawn under the HUD elements that have to stay
+/// legible through it — the crosshair goes with it, and so does the rest.
+pub fn draw_flash_bang(alpha: f32) {
+    let a = sane(alpha, 0.0).clamp(0.0, 1.0);
+    if a <= 0.002 {
+        return;
+    }
+    draw_rectangle(
+        0.0,
+        0.0,
+        screen_width(),
+        screen_height(),
+        Color::new(1.0, 1.0, 1.0, a),
+    );
+}
+
 pub fn draw_kill_flash(alpha: f32) {
     let a = sane(alpha, 0.0).clamp(0.0, 1.0);
     if a <= 0.002 {
@@ -1515,9 +1576,9 @@ pub fn draw_menu(
 /// fits, down to a floor that still holds the label.
 ///
 /// Split out of the drawing so the fit can be asserted: the settings screen is
-/// the long list, and every setting it gains — it holds eleven now — must keep
-/// the last row on a 720p window. Rows shrink rather than run off, and this is
-/// the math that says so.
+/// the long list, and every setting it gains must keep the last row on a 720p
+/// window — it is the reason no row here is written with a fixed height. Rows
+/// shrink rather than run off, and this is the math that says so.
 fn list_metrics(n: usize, room: f32, authored: f32) -> (f32, f32) {
     let room = sane(room, 1.0).max(1.0);
     let authored = sane(authored, 60.0).max(1.0);
@@ -1664,12 +1725,12 @@ fn item_list(
     top: f32,
     iw: f32,
 ) -> Vec<(f32, f32, f32, f32)> {
-    // The list has to fit the window it lands in: four screens share this, the
-    // settings screen has eleven rows, and `Ui` stops growing at 1.5 — so past
-    // 1080p the layout space stops growing with the screen while the authored
-    // pitch does not, and the last rows ran off the bottom. Rows shrink (down to
-    // a floor that still holds the label) rather than overflow; at 720p the
-    // authored pitch only binds when the list is short.
+    // The list has to fit the window it lands in: four screens share this, and
+    // the settings screen is the longest of them. `Ui` stops growing at 1.5, so
+    // past 1080p the layout space stops growing with the screen while the
+    // authored pitch does not, and the last rows ran off the bottom. Rows shrink
+    // (down to a floor that still holds the label) rather than overflow; at 720p
+    // the authored pitch only binds when the list is short.
     let (ih, gap) = list_metrics(items.len(), screen_height() - ui.s(26.0) - top, ui.s(60.0));
     // The row's contents are authored against the full 50-unit row, so a
     // squeezed row scales its type with itself.

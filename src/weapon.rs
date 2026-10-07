@@ -427,23 +427,34 @@ pub struct WeaponDef {
 #[derive(Clone, PartialEq, Debug)]
 pub struct WeaponBuild {
     pub entries: Vec<BuildEntry>,
+    /// Which round the weapon is loaded with (reference §23). A field rather than
+    /// an entry in `entries`: every part in that list is a fitting that stays on
+    /// the gun, and a load is a consumable.
+    pub load: AmmoKind,
 }
 
 impl WeaponBuild {
-    /// A weapon as it comes out of the crate: no parts, so resolving it yields
-    /// the def's own numbers.
+    /// A weapon as it comes out of the crate: no parts and the plain round, so
+    /// resolving it yields the def's own numbers.
     pub const fn empty() -> Self {
         Self {
             entries: Vec::new(),
+            load: AmmoKind::Fmj,
         }
     }
 
     /// The build as the settings file spells it: `slot=part@roll`, one per
     /// comma, empty when nothing is installed. Rolls are written to two
     /// decimals — the file reads back into the same build, not a new one.
+    ///
+    /// The load is spelled `load=`, and only when it is not the plain round, so
+    /// a build that never chose one writes exactly what it always did.
     pub fn to_text(&self) -> String {
         use std::fmt::Write as _;
         let mut out = String::new();
+        if self.load != AmmoKind::Fmj {
+            let _ = write!(out, "load={},", self.load.key());
+        }
         for (i, entry) in self.entries.iter().enumerate() {
             if i > 0 {
                 out.push(',');
@@ -460,10 +471,17 @@ impl WeaponBuild {
     /// and the rest of the line still reads.
     pub fn from_text(text: &str) -> Self {
         let mut entries = Vec::new();
+        let mut load = AmmoKind::Fmj;
         for item in text.split(',') {
             let Some((slot, rest)) = item.trim().split_once('=') else {
                 continue;
             };
+            // The round first: it names no slot and no part, and a name this
+            // build does not know costs the load and not the parts beside it.
+            if slot.trim().eq_ignore_ascii_case("load") {
+                load = AmmoKind::from_key(rest.trim()).unwrap_or(AmmoKind::Fmj);
+                continue;
+            }
             let (part, roll) = rest.split_once('@').unwrap_or((rest, "0.5"));
             let (Some(slot), Some(part)) = (slot_named(slot.trim()), part_named(part.trim()))
             else {
@@ -475,13 +493,23 @@ impl WeaponBuild {
                 roll: roll.trim().parse::<f32>().unwrap_or(0.5).clamp(0.0, 1.0),
             });
         }
-        Self { entries }
+        Self { entries, load }
     }
 
-    /// The build with everything a def cannot hold removed: entries are kept in
-    /// order, each only if it validates against what is already kept. A
+    /// The build with everything the weapon cannot hold removed: entries are
+    /// kept in order, each only if it validates against what is already kept,
+    /// and a round the weapon does not offer falls back to the plain one. A
     /// hand-edited file degrades to the parts that fit, not to nonsense.
-    pub fn screened(self, def: &WeaponDef) -> Self {
+    ///
+    /// It takes the kind rather than the def because the round is screened
+    /// against the weapon's own list of loads, which is a fact about the weapon
+    /// and not about its starting numbers. `AmmoKind::apply` guards a slug — a
+    /// weapon with one projectile has no pattern to replace — but a hollow point
+    /// and a hardened core are numbers on any weapon at all, so a file saying
+    /// `load=ap` on a pistol used to hand it three-body penetration and a
+    /// quarter metre of wall budget it has no barrel for (review R8).
+    pub fn screened(self, kind: WeaponKind) -> Self {
+        let def = def(kind);
         let mut kept = Self::empty();
         for entry in self.entries {
             kept.entries.push(entry);
@@ -489,6 +517,11 @@ impl WeaponBuild {
                 kept.entries.pop();
             }
         }
+        kept.load = if kind.loads().contains(&self.load) {
+            self.load
+        } else {
+            AmmoKind::Fmj
+        };
         kept
     }
 }
@@ -1187,6 +1220,9 @@ pub fn resolve(def: &WeaponDef, build: &WeaponBuild) -> ResolvedStats {
         // numbers a weapon can be simulated with.
         values[stat.index()] = if value.is_nan() { lo } else { value.max(0.0) };
     }
+    // The round, once the parts have had their say: a load is not a fitting, so
+    // it sits outside the bucketing above rather than pretending to be one.
+    build.load.apply(&mut values);
     ResolvedStats {
         class: def.class,
         fire_modes: def.fire_modes,
@@ -1780,7 +1816,271 @@ pub fn def(kind: WeaponKind) -> &'static WeaponDef {
     }
 }
 
+// --- cartridges -----------------------------------------------------------
+
+/// A cartridge, apart from the weapon that fires it: two guns chambered for one
+/// round share everything the round itself decides (reference §23), and what
+/// each gets out of it is its own barrel.
+///
+/// Wrapping the name costs nothing and keeps a bare string from being a
+/// cartridge by accident.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AmmoId(pub &'static str);
+
+/// A cartridge as the tables know it.
+#[derive(Clone, Copy, Debug)]
+pub struct AmmoType {
+    pub id: AmmoId,
+    /// What the round carries through plate out of a barrel long enough to use
+    /// all of it. A weapon's [`WeaponKind::barrel_pen`] scales this down, and
+    /// the product is the number the armory prints.
+    pub armor_pen: f32,
+    /// The name a player reads wherever a weapon says what it is fed.
+    pub name: Key,
+}
+
+/// 5.56x45: the assault-rifle round, and what the belt gun's links hold.
+pub const A5_56X45: AmmoType = AmmoType {
+    id: AmmoId("5_56x45"),
+    armor_pen: 0.85,
+    name: Key::Ammo556,
+};
+
+/// 9x19: the pistol round, and the submachine guns'.
+pub const A9X19: AmmoType = AmmoType {
+    id: AmmoId("9x19"),
+    armor_pen: 0.57,
+    name: Key::Ammo9mm,
+};
+
+/// 12 gauge: buckshot, which is what plate was made to stop.
+pub const A12GA: AmmoType = AmmoType {
+    id: AmmoId("12ga"),
+    armor_pen: 0.30,
+    name: Key::Ammo12ga,
+};
+
+/// 7.62x51: the full-power rifle round, from a battle rifle to a marksman's.
+pub const A7_62X51: AmmoType = AmmoType {
+    id: AmmoId("7_62x51"),
+    armor_pen: 0.97,
+    name: Key::Ammo762,
+};
+
+/// 7.62x54R: the rimmed cartridge the bolt-action eats and plate barely slows.
+pub const A7_62X54R: AmmoType = AmmoType {
+    id: AmmoId("7_62x54r"),
+    armor_pen: 0.98,
+    name: Key::Ammo54r,
+};
+
+/// .50: the anti-materiel round, and the only rifle in the game that is named
+/// for its cartridge rather than for its pattern (see `WeaponSniper`). It was
+/// 1.00 of a 0.97 here either way; what the split buys is a long gun that no
+/// longer reads as a 7.62.
+pub const A12_7X99: AmmoType = AmmoType {
+    id: AmmoId("12_7x99"),
+    armor_pen: 0.97,
+    name: Key::Ammo50,
+};
+
+/// A blade is chambered for nothing.
+pub const A_NONE: AmmoType = AmmoType {
+    id: AmmoId("none"),
+    armor_pen: 1.0,
+    name: Key::AmmoNone,
+};
+
+/// Every cartridge the game knows, for the lookup below.
+pub const AMMO: &[AmmoType] = &[
+    A5_56X45, A9X19, A12GA, A7_62X51, A7_62X54R, A12_7X99, A_NONE,
+];
+
+/// The tables' entry for a cartridge. An id only ever comes out of this file, so
+/// a miss is a bug in the table rather than a bad caller.
+pub fn ammo_type(id: AmmoId) -> &'static AmmoType {
+    AMMO.iter()
+        .find(|a| a.id == id)
+        .expect("a name in AMMO: every cartridge the game spells comes from here")
+}
+
+/// What a round does to the *lane* rather than to the body it lands in: how many
+/// bodies it can cross, and how much of it is left when it gets there
+/// (reference §23, axis 3).
+#[derive(Clone, Copy, Debug)]
+pub struct Penetration {
+    /// How many bodies the round passes through at most, the first included.
+    pub max_targets: u32,
+    /// The share of the damage that reaches the next thing behind whatever it
+    /// just crossed — a body or a wall, because the round does not care which.
+    pub carry: f32,
+    /// How much solid cover the round can cross, in metres. Zero for everything
+    /// issued: the plain round stops on the first surface it meets.
+    pub wall_budget: f32,
+}
+
+impl Penetration {
+    /// The share of a shot's damage left after `crossed` things have taken their
+    /// part — bodies or walls, because a round spends itself the same way on
+    /// either. A round that carries nothing gives its first body all of it.
+    pub fn after(self, crossed: u32) -> f32 {
+        self.carry.powi(crossed as i32)
+    }
+}
+
+/// Which round a weapon is loaded with. The cartridge says what *can* be fired
+/// and the weapon says how well it does; this says what is in the magazine —
+/// the axis a player chooses, and the cheapest one to prove the choice is worth
+/// making (reference §23, axis 2).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AmmoKind {
+    /// The plain round a weapon is issued with.
+    Fmj,
+    /// One heavy projectile where there was a pattern: it gives up the
+    /// point-blank cone for a punch that carries.
+    Slug,
+    /// A hollow point: it opens on flesh and gives up most of what it would
+    /// have carried through plate. The answer to "how do I clear unarmoured
+    /// rabble faster" — and only a real choice on a weapon that had plate to
+    /// give up.
+    Jhp,
+    /// A hardened core: a little less flesh damage, a little more plate, and it
+    /// crosses three bodies instead of stopping in the first. The answer to
+    /// "there are two of them", which no other round answers at all.
+    Ap,
+}
+
+impl AmmoKind {
+    /// How the settings file spells it.
+    pub fn key(self) -> &'static str {
+        match self {
+            AmmoKind::Fmj => "fmj",
+            AmmoKind::Slug => "slug",
+            AmmoKind::Jhp => "jhp",
+            AmmoKind::Ap => "ap",
+        }
+    }
+
+    /// The load a settings file names, if it names one this build knows.
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "fmj" => Some(AmmoKind::Fmj),
+            "slug" => Some(AmmoKind::Slug),
+            "jhp" => Some(AmmoKind::Jhp),
+            "ap" => Some(AmmoKind::Ap),
+            _ => None,
+        }
+    }
+
+    /// What this round leaves of the weapon's plate figure. Separate from
+    /// `apply` because penetration is not one of the resolved stats: it rides
+    /// beside them all the way to the bullet, so the round has to be able to
+    /// speak about it where the shot lands.
+    pub fn pen_mul(self) -> f32 {
+        match self {
+            AmmoKind::Fmj | AmmoKind::Slug => 1.0,
+            AmmoKind::Jhp => 0.25,
+            AmmoKind::Ap => 1.1,
+        }
+    }
+
+    /// How far the round carries through what it hits. Everything issued is one
+    /// body deep and stops on the first surface it meets. Only the hardened core
+    /// travels — a third of the damage is left for the second body, a ninth for
+    /// the third, and it will cross a quarter of a metre of cover on the way, at
+    /// the same price per thing crossed.
+    pub fn penetration(self) -> Penetration {
+        match self {
+            AmmoKind::Ap => Penetration {
+                max_targets: 3,
+                carry: 0.6,
+                wall_budget: 0.25,
+            },
+            AmmoKind::Fmj | AmmoKind::Slug | AmmoKind::Jhp => Penetration {
+                max_targets: 1,
+                carry: 1.0,
+                wall_budget: 0.0,
+            },
+        }
+    }
+
+    /// What the round does to a weapon's resolved numbers, in place. Applied
+    /// after the parts have been through their three stages, because a load is
+    /// not a part: it may leave the design envelope, the way a post multiplier
+    /// may. Whole-number stats stay whole, as everywhere else.
+    ///
+    /// A slug needs a pattern to replace. A weapon that fires one projectile has
+    /// none, so the round does nothing at all — which is what keeps a
+    /// hand-edited settings file from turning a rifle into a shotgun, with no
+    /// per-weapon table to consult. A hollow point needs no such guard: it is a
+    /// number on any weapon, and its price is paid in `pen_mul` instead.
+    fn apply(self, values: &mut [f32; STAT_COUNT]) {
+        let pellets = StatId::Pellets.index();
+        let damage = StatId::Damage.index();
+        match self {
+            // The plain round is what the tables already say.
+            AmmoKind::Fmj => {}
+            // The trade is the point: 135 damage in the room becomes 90 across
+            // it, and a shot that reaches four times as far keeps half its punch
+            // when it gets there instead of a quarter.
+            AmmoKind::Slug if values[pellets] > 1.0 => {
+                values[pellets] = 1.0;
+                values[damage] = (values[damage] * 6.0).round();
+                values[StatId::BaseSpread.index()] *= 0.15;
+                values[StatId::FalloffStart.index()] *= 4.0;
+                values[StatId::FalloffEnd.index()] *= 4.0;
+                values[StatId::FalloffMin.index()] = values[StatId::FalloffMin.index()].max(0.50);
+            }
+            // A third more on flesh — 24 becomes 32, which on a two-shot enemy
+            // is a shot — and a quarter of the plate figure, which on the same
+            // enemy wearing a vest is the whole trade in the other direction.
+            AmmoKind::Jhp => {
+                values[damage] = (values[damage] * 1.35).round();
+            }
+            // A tenth less on flesh, and what that buys is the lane: three bodies
+            // instead of one. Nothing about a single target gets better, which is
+            // exactly what makes it a choice rather than an upgrade.
+            AmmoKind::Ap => {
+                values[damage] = (values[damage] * 0.9).round();
+            }
+            // A slug on a weapon with no pattern to replace.
+            AmmoKind::Slug => {}
+        }
+    }
+
+    /// The name a player reads.
+    pub fn name(self) -> Key {
+        match self {
+            AmmoKind::Fmj => Key::LoadFmj,
+            AmmoKind::Slug => Key::LoadSlug,
+            AmmoKind::Jhp => Key::LoadJhp,
+            AmmoKind::Ap => Key::LoadAp,
+        }
+    }
+}
+
 impl WeaponKind {
+    /// The rounds this weapon can be loaded with: the plain one always, and
+    /// anything whose trade it can actually make.
+    ///
+    /// A slug needs a pattern to replace, so it belongs to the shotgun alone. A
+    /// hollow point needs plate to give up and a hardened core needs plate to
+    /// keep, so both belong to the guns that have some — the 5.56 and 7.62
+    /// weapons, whose figures run from 76 to 90 per cent. On a pistol either
+    /// would be a straight upgrade rather than a choice, which is why the pistol
+    /// is not on this list.
+    pub fn loads(self) -> &'static [AmmoKind] {
+        match self {
+            WeaponKind::Shotgun => &[AmmoKind::Fmj, AmmoKind::Slug],
+            WeaponKind::Rifle
+            | WeaponKind::M4a1
+            | WeaponKind::Scar
+            | WeaponKind::Fal
+            | WeaponKind::M110
+            | WeaponKind::Lmg => &[AmmoKind::Fmj, AmmoKind::Jhp, AmmoKind::Ap],
+            _ => &[AmmoKind::Fmj],
+        }
+    }
     pub fn name(self) -> Key {
         match self {
             WeaponKind::Rifle => Key::WeaponRifle,
@@ -1800,6 +2100,49 @@ impl WeaponKind {
         }
     }
 
+    /// The cartridge this weapon is chambered for. Grouped by round, not by
+    /// well: the MP5, the MPX and the Viper keep three wells and one 9 mm, the
+    /// FAL and the SR-25 are wells apart and both 7.62x51 (see `FAL_SLOTS`),
+    /// and the belt gun is a 5.56 because its emergency well is a rifle
+    /// magazine's.
+    pub fn chamber(self) -> AmmoId {
+        match self {
+            WeaponKind::Rifle | WeaponKind::M4a1 | WeaponKind::Scar | WeaponKind::Lmg => {
+                A5_56X45.id
+            }
+            WeaponKind::Smg | WeaponKind::Mp5 | WeaponKind::Mpx | WeaponKind::Pistol => A9X19.id,
+            WeaponKind::Shotgun => A12GA.id,
+            WeaponKind::Fal | WeaponKind::M110 => A7_62X51.id,
+            WeaponKind::Mosin => A7_62X54R.id,
+            // The long gun is a .50 — that is what its name says, and why its
+            // figure is the highest in the game.
+            WeaponKind::Sniper => A12_7X99.id,
+            // A blade is chambered for nothing, and plate does not stop it.
+            WeaponKind::Knife => A_NONE.id,
+        }
+    }
+
+    /// What this weapon's barrel gets out of that round, as a share of the
+    /// round's own figure: longer barrel, more of it. Each family's ladder is
+    /// the real one — a carbine under a rifle under the SAW, and a four-inch
+    /// pistol under the three submachine guns — which is why one cartridge can
+    /// serve four guns and still leave them different weapons.
+    pub fn barrel_pen(self) -> f32 {
+        match self {
+            WeaponKind::M4a1 => 0.89,
+            WeaponKind::Rifle => 0.92,
+            WeaponKind::Scar => 0.96,
+            WeaponKind::Lmg => 1.00,
+            WeaponKind::Pistol => 0.79,
+            WeaponKind::Mpx => 0.91,
+            WeaponKind::Smg => 0.96,
+            WeaponKind::Mp5 => 1.00,
+            WeaponKind::Sniper => 1.00,
+            WeaponKind::Fal | WeaponKind::M110 => 0.93,
+            WeaponKind::Shotgun | WeaponKind::Mosin | WeaponKind::Knife => 1.00,
+        }
+    }
+
     /// The share of a hit this weapon's fire carries through physical plate
     /// (reference §17.2③ — "one visible armour-penetration number per
     /// weapon", so "how does this gun do against a Juggernaut" is a decision
@@ -1809,25 +2152,12 @@ impl WeaponKind {
     /// 47%, Tec-9 90.6%, SG 553 100%, AWP 97.5%): rifles pierce, buckshot
     /// and pistol rounds mostly do not, and a knife does not care about
     /// plate at all. The enemy side of the exchange is `enemy::armor`.
+    ///
+    /// The figure is now a product of the two things it always meant: the
+    /// round's own number — shared by every gun chambered for it, reference
+    /// §23 — and this weapon's barrel. Every per-weapon value is unchanged.
     pub fn armor_pen(self) -> f32 {
-        match self {
-            WeaponKind::Rifle => 0.78,
-            WeaponKind::Shotgun => 0.30,
-            WeaponKind::Smg => 0.55,
-            WeaponKind::Sniper => 0.97,
-            WeaponKind::Lmg => 0.85,
-            WeaponKind::Pistol => 0.45,
-            WeaponKind::Knife => 1.0,
-            // 5.56 through a carbine's barrel; then the full-power 7.62 case,
-            // which is what plate is for; and a 7.62x54R that barely notices it.
-            WeaponKind::M4a1 => 0.76,
-            WeaponKind::Scar => 0.82,
-            WeaponKind::Fal => 0.90,
-            WeaponKind::Mp5 => 0.57,
-            WeaponKind::Mpx => 0.52,
-            WeaponKind::M110 => 0.90,
-            WeaponKind::Mosin => 0.98,
-        }
+        ammo_type(self.chamber()).armor_pen * self.barrel_pen()
     }
 
     /// Short tag for the HUD slot strip.
@@ -1978,6 +2308,20 @@ impl Weapon {
         &self.build
     }
 
+    /// The share of a hit this weapon's fire carries through plate, as the round
+    /// in it leaves that figure: the kind's own number is the weapon loaded with
+    /// ball, and a hollow point gives most of it up (reference §23). This is what
+    /// the shot carries to the enemy, and what the armory prints.
+    pub fn armor_pen(&self) -> f32 {
+        self.kind.armor_pen() * self.build.load.pen_mul()
+    }
+
+    /// How far the round in this weapon carries through what it hits: how many
+    /// bodies, and how much of the shot reaches the next (reference §23, axis 3).
+    pub fn penetration(&self) -> Penetration {
+        self.build.load.penetration()
+    }
+
     pub fn stats(&self) -> WeaponStats {
         self.resolved.as_stats()
     }
@@ -2115,6 +2459,11 @@ impl Weapon {
     }
 
     /// `pressed` is the frame the trigger went down, `held` is the sustained state.
+    ///
+    /// A burst is a promise: once the first round is away, the rest of the
+    /// burst is owed whether or not the trigger is still down, so the caller
+    /// has to keep calling while [`Weapon::burst_pending`] says there is more
+    /// to come. Letting go does not cut it short (review R5).
     pub fn try_fire(&mut self, pressed: bool, held: bool) -> bool {
         if !self.can_fire() {
             return false;
@@ -2159,6 +2508,24 @@ impl Weapon {
         true
     }
 
+    /// Whether a burst that has begun still owes rounds. The trigger gate in
+    /// `main.rs` reads this as well as the button, so a burst finishes with the
+    /// finger already off it (review R5).
+    pub fn burst_pending(&self) -> bool {
+        self.burst_left > 0
+    }
+
+    /// Drops a burst that has begun, owed rounds and all.
+    ///
+    /// For the hands leaving the weapon without putting it away: taking a
+    /// throwable out is the same event to a burst as holstering the gun is — the
+    /// rounds were owed by a trigger pull on a weapon that is no longer being
+    /// held. Left alone, the burst waits and fires itself the moment the grenade
+    /// leaves the hand, which reads as the throw pulling its own trigger.
+    pub fn cancel_burst(&mut self) {
+        self.burst_left = 0;
+    }
+
     /// Whether a spare magazine holds a round — what a reload would take.
     fn fullest_spare(&self) -> Option<usize> {
         self.mags
@@ -2169,16 +2536,23 @@ impl Weapon {
             .map(|(i, _)| i)
     }
 
+    /// Whether a reload would be taken right now: the magazine is not full and
+    /// some spare holds a round. The HUD asks this before it says what R does,
+    /// and `start_reload` asks it before doing it, so the prompt and the action
+    /// cannot disagree about whether there is anything to swap in.
+    pub fn can_reload(&self) -> bool {
+        !self.stats().infinite_ammo
+            && !self.is_reloading()
+            && self.mag < self.stats().mag_size
+            && self.fullest_spare().is_some()
+    }
+
     pub fn start_reload(&mut self) -> bool {
         // A reload swaps the magazine in the gun for a spare. With no spare
         // holding a round there is nothing to swap in, and the click is dry —
         // where this used to ask whether any loose rounds were left, which is
         // not the same question once magazines are containers.
-        if self.stats().infinite_ammo
-            || self.is_reloading()
-            || self.mag >= self.stats().mag_size
-            || self.fullest_spare().is_none()
-        {
+        if !self.can_reload() {
             return false;
         }
         self.reload_t = self.stats().reload_time;
@@ -2266,7 +2640,10 @@ impl Arsenal {
     /// build the armory gave its kind, kept on the instance so no kind-mate
     /// sees it. `Kit` screens the builds before they get here; `carry` checks
     /// them again on the way in.
-    pub fn with_builds(loadout: [Option<WeaponKind>; 2], builds: &[WeaponBuild; KIND_COUNT]) -> Self {
+    pub fn with_builds(
+        loadout: [Option<WeaponKind>; 2],
+        builds: &[WeaponBuild; KIND_COUNT],
+    ) -> Self {
         let mut ars = Self {
             slots: [None, None, None, None],
             active: 0,
@@ -2346,10 +2723,16 @@ impl Arsenal {
         // rifle came up full with no reload ever seen. Only the weapon in hand
         // can be reloading (every `start_reload` goes through
         // `active_weapon_mut`), so cancelling this one is cancelling the reload.
+        //
+        // A half-finished burst is dropped for the same reason: the rounds it
+        // still owed came from a trigger pull on a weapon that is no longer in
+        // hand, and a burst that waited in the holster would resume itself the
+        // next time the gun came up (review R5).
         if let Some(w) = self.slots[self.held_index()].as_mut() {
             w.reload_t = 0.0;
             // A reload that was cancelled must not report finishing later.
             w.reload_done = false;
+            w.burst_left = 0;
         }
         self.active = i;
         self.switch_t = 0.34;
@@ -2587,13 +2970,25 @@ mod tests {
 
     const FRAME: f32 = 1.0 / 60.0;
 
-    /// Drives a weapon the way `main.rs` does: `held` is the button state and
-    /// `pressed` is true only on the frame the button went down.
-    fn run(w: &mut Weapon, held_frames: usize) -> usize {
+    /// Drives a weapon the way `main.rs` does: the trigger is held for `frames`
+    /// of the `run`, `pressed` is true only on the frame the button went down,
+    /// and the gate stays open while a burst has rounds left — which is what
+    /// `burst_pending` is for, and what the old helper could not express
+    /// (review R5).
+    fn run(w: &mut Weapon, frames: usize) -> usize {
+        run_held(w, frames, frames)
+    }
+
+    /// The same driver with the trigger held for the first `hold` frames and
+    /// released after, so `hold = 0` is a finger that never touches it.
+    fn run_held(w: &mut Weapon, frames: usize, hold: usize) -> usize {
         let mut shots = 0;
-        for frame in 0..held_frames {
+        for frame in 0..frames {
             w.update(FRAME);
-            if w.try_fire(frame == 0, true) {
+            let held = frame < hold;
+            let pressed = frame == 0 && held;
+            let kept = held || w.burst_pending();
+            if kept && w.try_fire(pressed, held) {
                 shots += 1;
             }
         }
@@ -2610,6 +3005,7 @@ mod tests {
                 .iter()
                 .map(|&(slot, part, roll)| BuildEntry { slot, part, roll })
                 .collect(),
+            load: AmmoKind::Fmj,
         }
     }
 
@@ -3189,6 +3585,10 @@ mod tests {
     }
 
     /// A burst completes itself once begun, and does not run on afterwards.
+    ///
+    /// With the trigger held throughout, a burst that ran on would keep firing
+    /// and a burst that stopped early would fire fewer than its count, so this
+    /// is the pair of bounds on the same run.
     #[test]
     fn burst_fires_exactly_its_count() {
         let mut w = Weapon::new(WeaponKind::Rifle);
@@ -3198,6 +3598,64 @@ mod tests {
         let n = w.stats().burst_count;
         let shots = run(&mut w, 120);
         assert_eq!(shots, n as usize, "a burst fired {shots} rounds, not {n}");
+    }
+
+    /// Letting go of the trigger does not cut a burst short. The old test could
+    /// not see this path at all: it held the button for every frame it ran, so
+    /// "the rest of the burst is still owed" was never exercised (review R5).
+    #[test]
+    fn a_released_trigger_does_not_cut_a_burst_short() {
+        let mut w = Weapon::new(WeaponKind::Rifle);
+        while w.mode() != FireMode::Burst {
+            w.cycle_fire_mode();
+        }
+        let n = w.stats().burst_count;
+        // One frame on the trigger, then off it for the rest of the run.
+        let shots = run_held(&mut w, 120, 1);
+        assert_eq!(
+            shots, n as usize,
+            "a released burst fired {shots} rounds, not {n}"
+        );
+        assert!(
+            !w.burst_pending(),
+            "a spent burst still says it owes rounds"
+        );
+
+        // And the next press is a fresh burst, not the tail of the old one.
+        w.update(1.0);
+        let shots = run(&mut w, 120);
+        assert_eq!(shots, n as usize, "the next burst fired {shots} rounds");
+    }
+
+    /// A burst belongs to the weapon in hand: holstering mid-burst drops what
+    /// was left of it, the way a holstered reload is dropped, so drawing the
+    /// gun again does not resume a trigger pull from a weapon the player put
+    /// away (review R5).
+    #[test]
+    fn holstering_drops_a_pending_burst() {
+        let mut ars = Arsenal::new([Some(WeaponKind::Rifle), None]);
+        let rifle = SlotClass::Primary as usize;
+        while ars.active_weapon().mode() != FireMode::Burst {
+            ars.active_weapon_mut().cycle_fire_mode();
+        }
+        let n = ars.active_weapon().stats().burst_count;
+        assert!(n > 1, "this test needs a burst longer than one round");
+        assert!(ars.active_weapon_mut().try_fire(true, true));
+        assert!(
+            ars.active_weapon().burst_pending(),
+            "one round of a burst left nothing owed"
+        );
+
+        ars.select(SlotClass::Melee as usize);
+        assert!(
+            !ars.slot(rifle).expect("rifle").burst_pending(),
+            "the burst waited in the holster"
+        );
+        // Drawing it again with the finger off the trigger fires nothing: the
+        // rounds the put-away weapon was owed are gone, not waiting.
+        ars.select(rifle);
+        let shots = run_held(ars.active_weapon_mut(), 120, 0);
+        assert_eq!(shots, 0, "the holstered burst ran on by itself");
     }
 
     #[test]
@@ -3416,6 +3874,350 @@ mod tests {
         assert_eq!(w.mag + w.reserve(), total);
     }
 
+    /// The HUD's reload prompt reads `can_reload`, and the key that does the
+    /// reload reads the same answer, so the prompt cannot offer a reload the
+    /// weapon would refuse or stay quiet about one it would take. These are the
+    /// states where a second copy of the rule would drift: a full magazine, a
+    /// half-empty one, a dry one with nothing loaded behind it, a dry one with a
+    /// spare, and a weapon with no magazine at all.
+    #[test]
+    fn the_reload_prompt_and_the_reload_agree() {
+        let cases: [(WeaponKind, u32, Vec<u32>); 5] = [
+            (WeaponKind::Smg, 30, vec![0]),
+            (WeaponKind::Smg, 15, vec![0]),
+            (WeaponKind::Smg, 0, vec![0]),
+            (WeaponKind::Smg, 0, vec![30]),
+            (WeaponKind::Knife, 0, vec![]),
+        ];
+        for (kind, mag, mags) in cases {
+            let mut w = Weapon::new(kind);
+            w.mag = mag;
+            w.mags = mags.clone();
+            let asked = w.can_reload();
+            let taken = w.start_reload();
+            assert_eq!(
+                asked, taken,
+                "{kind:?} with {mag} in the gun over {mags:?}: the prompt said {asked} and the \
+                 reload said {taken}"
+            );
+        }
+    }
+
+    /// The plate figure each weapon shipped with and the round it is fed:
+    /// `(weapon, cartridge id, the percentage the armory prints)`.
+    const SHIPPED_PLATE: [(WeaponKind, &str, &str); 14] = [
+        (WeaponKind::Rifle, "5_56x45", "78"),
+        (WeaponKind::Shotgun, "12ga", "30"),
+        (WeaponKind::Smg, "9x19", "55"),
+        (WeaponKind::Sniper, "12_7x99", "97"),
+        (WeaponKind::Lmg, "5_56x45", "85"),
+        (WeaponKind::Pistol, "9x19", "45"),
+        (WeaponKind::Knife, "none", "100"),
+        (WeaponKind::M4a1, "5_56x45", "76"),
+        (WeaponKind::Scar, "5_56x45", "82"),
+        (WeaponKind::Fal, "7_62x51", "90"),
+        (WeaponKind::Mp5, "9x19", "57"),
+        (WeaponKind::Mpx, "9x19", "52"),
+        (WeaponKind::M110, "7_62x51", "90"),
+        (WeaponKind::Mosin, "7_62x54r", "98"),
+    ];
+
+    /// The plate figure every weapon showed *before* the round was split out of
+    /// it, as the player reads it: the percentage the codex and the armory print.
+    ///
+    /// Spelled out rather than derived, because that is the whole point. These
+    /// are the numbers the game shipped with, and turning one number per weapon
+    /// into a cartridge times a barrel was not allowed to move any of them. The
+    /// cartridge each one is chambered for is pinned beside it, so the grouping
+    /// cannot drift either: four 5.56 guns and one round.
+    ///
+    /// The percentages are also where the model proves itself — read down a
+    /// family and it is a barrel ladder, not a list: carbine 76, rifle 78, SCAR
+    /// 82, SAW 85; pistol 45, MPX 52, Viper 55, MP5 57; FAL and SR-25 90 under a
+    /// sniper's 97.
+    #[test]
+    fn the_round_split_moved_no_weapons_plate_figure() {
+        let mut used: Vec<AmmoId> = Vec::new();
+        for (kind, ammo, percent) in SHIPPED_PLATE {
+            assert_eq!(
+                kind.chamber().0,
+                ammo,
+                "{kind:?} is chambered for a new round"
+            );
+            assert_eq!(
+                format!("{:.0}", kind.armor_pen() * 100.0),
+                percent,
+                "{kind:?}'s plate figure moved"
+            );
+            if !used.contains(&kind.chamber()) {
+                used.push(kind.chamber());
+            }
+        }
+        for a in AMMO {
+            assert!(
+                used.contains(&a.id),
+                "{} is in AMMO and no weapon is chambered for it",
+                a.id.0
+            );
+        }
+        assert_eq!(used.len(), AMMO.len(), "AMMO and the weapons disagree");
+    }
+
+    /// A load is a round, not a fitting. The plain one changes nothing; a slug
+    /// gives up the shot pattern for reach; and on a weapon that already fires
+    /// one projectile it does nothing at all, which is what keeps a hand-edited
+    /// settings file from turning a rifle into a shotgun.
+    #[test]
+    fn a_slug_trades_the_shot_pattern_for_reach() {
+        let plain = WeaponBuild::empty();
+        let mut loaded = WeaponBuild::empty();
+        loaded.load = AmmoKind::Slug;
+
+        let shell = resolve(def(WeaponKind::Shotgun), &plain).as_stats();
+        let slug = resolve(def(WeaponKind::Shotgun), &loaded).as_stats();
+        assert_eq!(shell.pellets, 9, "the issued shell is not a pattern");
+        assert_eq!(slug.pellets, 1, "a slug is one projectile");
+        assert!(
+            slug.damage >= shell.damage * 5.0,
+            "one projectile has to hit far harder than one pellet: {} against {}",
+            slug.damage,
+            shell.damage
+        );
+        assert!(
+            slug.base_spread < shell.base_spread,
+            "one projectile is not a cone"
+        );
+        assert!(
+            slug.falloff_end > shell.falloff_end * 3.0,
+            "a slug has to carry: {} against {}",
+            slug.falloff_end,
+            shell.falloff_end
+        );
+        assert!(
+            slug.falloff_min > shell.falloff_min,
+            "and still be worth firing when it gets there"
+        );
+
+        // A rifle has no pattern to trade, so the same round leaves it alone.
+        let rifle = resolve(def(WeaponKind::Rifle), &loaded).as_stats();
+        let issued = resolve(def(WeaponKind::Rifle), &plain).as_stats();
+        assert_eq!(rifle.pellets, issued.pellets);
+        assert_eq!(rifle.damage, issued.damage);
+        assert_eq!(rifle.falloff_end, issued.falloff_end);
+        assert_eq!(rifle.base_spread, issued.base_spread);
+    }
+
+    /// Every weapon takes the plain round, and every other round a weapon offers
+    /// is one that changes it. That is what keeps the loadout from growing a row
+    /// that steps between two rounds that do the same thing: the list the screen
+    /// reads and the table the resolver reads are the same list.
+    #[test]
+    fn a_weapon_only_offers_rounds_that_change_it() {
+        for kind in ALL_KINDS {
+            let loads = kind.loads();
+            assert_eq!(
+                loads[0],
+                AmmoKind::Fmj,
+                "{kind:?} does not take the plain round"
+            );
+            let plain = resolve(def(kind), &WeaponBuild::empty()).as_stats();
+            for load in &loads[1..] {
+                let mut build = WeaponBuild::empty();
+                build.load = *load;
+                let fitted = resolve(def(kind), &build).as_stats();
+                let moved_stats = (
+                    fitted.pellets,
+                    fitted.damage,
+                    fitted.base_spread,
+                    fitted.falloff_end,
+                    fitted.falloff_min,
+                    load.penetration().max_targets,
+                    load.penetration().wall_budget,
+                ) != (
+                    plain.pellets,
+                    plain.damage,
+                    plain.base_spread,
+                    plain.falloff_end,
+                    plain.falloff_min,
+                    AmmoKind::Fmj.penetration().max_targets,
+                    AmmoKind::Fmj.penetration().wall_budget,
+                );
+                assert!(
+                    moved_stats || load.pen_mul() != AmmoKind::Fmj.pen_mul(),
+                    "{kind:?} offers {} and it changes nothing",
+                    load.key()
+                );
+            }
+        }
+    }
+
+    /// A hardened core is the only round that travels: three bodies, with a third
+    /// of the damage left for the second and a ninth for the third. Nothing about
+    /// a single body gets better — a round that only gained would not be a
+    /// choice, it would be the next round up.
+    #[test]
+    fn a_hardened_core_spends_itself_on_the_lane() {
+        let ball = resolve(def(WeaponKind::Rifle), &WeaponBuild::empty()).as_stats();
+
+        let mut loaded = WeaponBuild::empty();
+        loaded.load = AmmoKind::Ap;
+        let ap = resolve(def(WeaponKind::Rifle), &loaded).as_stats();
+        assert!(
+            ap.damage < ball.damage,
+            "the core has to cost something: {} against {}",
+            ap.damage,
+            ball.damage
+        );
+        assert_eq!(
+            (ap.damage.fract(), ball.damage.fract()),
+            (0.0, 0.0),
+            "a whole-number stat has to stay whole through the round"
+        );
+
+        let lane = AmmoKind::Ap.penetration();
+        assert_eq!(lane.max_targets, 3, "the core crosses three bodies");
+        assert_eq!(lane.after(0), 1.0, "the first body takes the whole shot");
+        assert!(
+            (lane.after(1) - 0.6).abs() < 1.0e-6,
+            "the second body takes {}",
+            lane.after(1)
+        );
+        assert!(
+            (lane.after(2) - 0.36).abs() < 1.0e-6,
+            "the third body takes {}",
+            lane.after(2)
+        );
+        for other in [AmmoKind::Fmj, AmmoKind::Slug, AmmoKind::Jhp] {
+            assert_eq!(
+                other.penetration().max_targets,
+                1,
+                "{other:?} is not a round that travels"
+            );
+        }
+
+        let weapon = Weapon::with_build(WeaponKind::Rifle, loaded);
+        assert_eq!(weapon.penetration().max_targets, 3);
+        assert!(
+            weapon.armor_pen() > WeaponKind::Rifle.armor_pen(),
+            "the core keeps the plate figure it was given"
+        );
+    }
+
+    /// A hollow point swaps plate for flesh: a third more damage, and a quarter
+    /// of the penetration the same gun has loaded with ball. Both halves are the
+    /// test — a round that only gained would be an upgrade rather than a choice,
+    /// and the price has to be big enough to read.
+    #[test]
+    fn a_hollow_point_buys_damage_with_penetration() {
+        let ball = resolve(def(WeaponKind::Rifle), &WeaponBuild::empty()).as_stats();
+
+        let mut loaded = WeaponBuild::empty();
+        loaded.load = AmmoKind::Jhp;
+        let jhp = resolve(def(WeaponKind::Rifle), &loaded).as_stats();
+        assert!(
+            jhp.damage > ball.damage,
+            "a hollow point has to hit flesh harder: {} against {}",
+            jhp.damage,
+            ball.damage
+        );
+        assert_eq!(
+            jhp.damage.fract(),
+            0.0,
+            "a whole-number stat has to stay whole through the round"
+        );
+
+        // The instance asks the same question the shot does, so the price is
+        // read off the weapon rather than off the kind.
+        let weapon = Weapon::with_build(WeaponKind::Rifle, loaded);
+        let plate = WeaponKind::Rifle.armor_pen();
+        assert_eq!(weapon.armor_pen(), plate * 0.25);
+        assert!(
+            weapon.armor_pen() < plate * 0.5,
+            "the price has to be a price and not a rounding error"
+        );
+    }
+
+    /// The load survives the settings file, and a build that never chose one
+    /// spells exactly as it did before there was such a thing — the file is
+    /// hand-editable and already written on players' disks.
+    #[test]
+    fn a_load_round_trips_through_the_settings_text() {
+        assert_eq!(
+            WeaponBuild::empty().to_text(),
+            "",
+            "a crate weapon writes nothing"
+        );
+
+        let plain = WeaponBuild::from_text("optic=micro_dot@0.50");
+        assert_eq!(
+            plain.load,
+            AmmoKind::Fmj,
+            "no load named means the plain one"
+        );
+        assert_eq!(plain.to_text(), "optic=micro_dot@0.50");
+
+        let chosen = WeaponBuild::from_text("load=slug,optic=micro_dot@0.50");
+        assert_eq!(chosen.load, AmmoKind::Slug);
+        assert_eq!(chosen.entries.len(), 1, "the round ate a part");
+        assert_eq!(chosen.to_text(), "load=slug,optic=micro_dot@0.50");
+
+        // A round this build does not know costs the load and nothing else.
+        let junk = WeaponBuild::from_text("load=tungsten,optic=micro_dot@0.50");
+        assert_eq!(junk.load, AmmoKind::Fmj);
+        assert_eq!(junk.entries.len(), 1, "the junk cost a part as well");
+
+        // And screening keeps a round the weapon offers.
+        let mut loaded = WeaponBuild::empty();
+        loaded.load = AmmoKind::Slug;
+        assert_eq!(loaded.screened(WeaponKind::Shotgun).load, AmmoKind::Slug);
+
+        // A round it does not offer falls back to the plain one rather than
+        // being carried into a barrel that is not chambered for it: a pistol
+        // with `load=ap` in the file used to get a core round's penetration
+        // (review R8).
+        let mut illegal = WeaponBuild::empty();
+        illegal.load = AmmoKind::Ap;
+        assert_eq!(
+            illegal.clone().screened(WeaponKind::Pistol).load,
+            AmmoKind::Fmj
+        );
+        assert_eq!(illegal.screened(WeaponKind::Rifle).load, AmmoKind::Ap);
+        // Nothing a weapon offers is ever screened away, so the armory row and
+        // the file cannot disagree about what is available.
+        for kind in ALL_KINDS {
+            for ammo in kind.loads() {
+                let mut want = WeaponBuild::empty();
+                want.load = *ammo;
+                assert_eq!(
+                    want.screened(kind).load,
+                    *ammo,
+                    "{kind:?} lost its {} round",
+                    ammo.key()
+                );
+            }
+        }
+    }
+
+    /// Every cartridge a weapon names is one the table knows, and no barrel
+    /// claims more than all of its round. `WeaponKind::chamber` is a match rather
+    /// than a field, so this is what catches a weapon added without a round.
+    #[test]
+    fn every_weapon_is_chambered_for_a_round_in_the_table() {
+        for kind in ALL_KINDS {
+            let id = kind.chamber();
+            assert_eq!(
+                ammo_type(id).id,
+                id,
+                "{kind:?} was chambered for a cartridge that is not in AMMO"
+            );
+            let barrel = kind.barrel_pen();
+            assert!(
+                barrel > 0.0 && barrel <= 1.0,
+                "{kind:?}'s barrel takes {barrel} of what its round has"
+            );
+        }
+    }
+
     /// The catalogue the game ships is a set of choices, and every part seats
     /// somewhere: ids unique, each part built for a slot some gun offers, each
     /// standard matching the slot it names — and a fully-kitted rifle legal.
@@ -3488,6 +4290,7 @@ mod tests {
                     roll: 0.4,
                 })
                 .collect(),
+            load: AmmoKind::Fmj,
         };
         assert_eq!(
             validate(def(WeaponKind::Rifle), &kit),
@@ -3533,7 +4336,7 @@ mod tests {
             (SlotId("muzzle"), MICRO_DOT.id, 0.5),
             (SlotId("magazine"), EXTENDED_MAG.id, 0.5),
         ]);
-        let clean = rough.screened(rifle);
+        let clean = rough.screened(WeaponKind::Rifle);
         assert_eq!(clean.entries.len(), 2);
         assert_eq!(clean.entries[0].part, MICRO_DOT.id);
         assert_eq!(clean.entries[1].part, EXTENDED_MAG.id);

@@ -81,7 +81,7 @@ fn build_frame(
         p.write_mesh(scratch);
         verts += scratch.vertices.len();
     }
-    grenades.write_mesh(level, scratch);
+    grenades.write_mesh(level, 0.0, scratch);
     verts += scratch.vertices.len();
     effects.write_mesh(scratch);
     verts + scratch.vertices.len()
@@ -141,7 +141,7 @@ fn scene() -> (Vec<Enemy>, Vec<Pickup>, Grenades, Level, Effects) {
     grenades.throw(GrenadeKind::Frag, vec3(0.0, 1.6, 0.0), vec3(0.0, 0.35, 1.0));
 
     let mut level = Level::from_layout(&maps::campaign()[0]);
-    level.add_smoke(vec3(5.0, 1.2, 0.0), 6.0, 15.0);
+    level.add_volume(vec3(5.0, 1.2, 0.0), 6.0, 15.0, 0.0);
 
     (enemies, pickups, grenades, level, effects)
 }

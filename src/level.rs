@@ -20,6 +20,16 @@ impl Aabb {
         Self { min, max }
     }
 
+    /// Inside or on the boundary.
+    pub fn contains(&self, p: Vec3) -> bool {
+        p.x >= self.min.x
+            && p.x <= self.max.x
+            && p.y >= self.min.y
+            && p.y <= self.max.y
+            && p.z >= self.min.z
+            && p.z <= self.max.z
+    }
+
     pub fn overlaps(&self, o: &Aabb) -> bool {
         self.min.x < o.max.x
             && self.max.x > o.min.x
@@ -449,17 +459,28 @@ pub struct Layout {
     pub voids: Vec<(Vec2, Vec2)>,
 }
 
-/// A lingering smoke volume. It never affects movement, only sight.
-#[derive(Clone, Copy)]
-pub struct Smoke {
+/// A lingering volume in the arena: a cloud, or a fire.
+///
+/// It never affects movement, only sight — and, when it burns, whatever is
+/// standing in it. One type for both because that is what they are: a fire is a
+/// cloud that also burns, with a smaller radius and a longer life. Keeping them
+/// apart would mean two lists with the same radius curve, the same decay and the
+/// same entry in `line_of_sight`.
+pub struct Volume {
     pub pos: Vec3,
     pub radius: f32,
     pub life: f32,
     pub max_life: f32,
+    /// Damage per second to anything standing in it. Zero for a smoke screen,
+    /// which is the whole difference between the two.
+    pub burn: f32,
 }
 
-impl Smoke {
-    /// Smoke billows as it ages, then thins out at the very end.
+impl Volume {
+    /// Smoke billows as it ages, then thins out at the very end. A fire uses the
+    /// same curve: it spreads as it takes hold and dies down at the end of its
+    /// life, and what a volume's radius means to the reader — how much of the
+    /// arena it covers — is the same question either way.
     pub fn current_radius(&self) -> f32 {
         let age = 1.0 - (self.life / self.max_life).clamp(0.0, 1.0);
         let grow = (age / 0.25).clamp(0.0, 1.0);
@@ -470,6 +491,13 @@ impl Smoke {
 
 pub struct Level {
     pub solids: Vec<Aabb>,
+    /// The material of each entry of `solids`, same order and same length.
+    ///
+    /// Kept because nothing else does: the boxes are batched into one mesh per
+    /// surface and the block list is dropped, so the material a round lands on
+    /// is gone by the time it lands. Without this the impact sound is the same
+    /// for a concrete wall and a steel plate (review R17).
+    pub materials: Vec<Surface>,
     /// Obstacles tall enough to block movement and line of sight.
     pub blockers: Vec<Aabb>,
     /// One mesh per surface, in `Surface::ALL` order, and empty where an arena
@@ -488,9 +516,10 @@ pub struct Level {
     pub name_zh: &'static str,
     /// See `Layout::accent`.
     pub accent: Color,
-    /// Active smoke screens. Owned here so that `line_of_sight` can consult them
-    /// without every caller having to thread a separate smoke list through.
-    pub smoke: Vec<Smoke>,
+    /// Active smoke screens and fires. Owned here so that `line_of_sight` can
+    /// consult them without every caller having to thread a separate list
+    /// through — a wall of flame hides what is behind it as well as a cloud does.
+    pub volumes: Vec<Volume>,
     /// See `Layout::voids`.
     pub voids: Vec<(Vec2, Vec2)>,
     /// Half-extent of the arena, from `Layout::half`.
@@ -508,6 +537,7 @@ impl Level {
             mb
         });
         let mut solids = Vec::with_capacity(layout.boxes.len());
+        let mut materials = Vec::with_capacity(layout.boxes.len());
         let mut blockers = Vec::new();
         for block in &layout.boxes {
             builders[block.skin.surface.index()].add_box(
@@ -518,6 +548,7 @@ impl Level {
             let (min, max) = (block.min, block.max);
             let a = Aabb::new(min, max);
             solids.push(a);
+            materials.push(block.skin.surface);
             // Anything taller than a body can step over has to block the
             // navigation grid, or the flow field routes enemies straight at
             // knee-high cover and they grind against it instead of going round.
@@ -556,6 +587,7 @@ impl Level {
 
         Self {
             solids,
+            materials,
             blockers,
             meshes,
             flow,
@@ -567,7 +599,7 @@ impl Level {
             accent: layout.accent,
             name_en: layout.name_en,
             name_zh: layout.name_zh,
-            smoke: Vec::new(),
+            volumes: Vec::new(),
             voids: layout.voids.clone(),
             half: layout.half,
         }
@@ -666,6 +698,49 @@ impl Level {
         if hit { Some(best) } else { None }
     }
 
+    /// The material of the solid a round stopped on, from the point it stopped
+    /// at and the direction it was travelling.
+    ///
+    /// The stop point of a cover hit is *on* the entry face — exactly on the
+    /// boundary — so the probe takes one centimetre more along the ray, which is
+    /// inside any wall thick enough to have stopped the round and short of the
+    /// one behind it. Two boxes that meet are indistinguishable here; either is
+    /// the material the round is in.
+    pub fn material_behind(&self, at: Vec3, dir: Vec3) -> Option<Surface> {
+        let p = at + dir * 0.01;
+        self.solids
+            .iter()
+            .zip(&self.materials)
+            .find_map(|(s, m)| s.contains(p).then_some(*m))
+    }
+
+    /// The spans of solid cover a ray crosses, nearest first and merged: each is
+    /// an entry and an exit along the ray, and two boxes that meet are one wall
+    /// to a bullet.
+    ///
+    /// `ray_world` is the first of these. A round that carries through cover
+    /// needs the list, because what a wall costs is its *thickness* — which is
+    /// the one thing a single distance cannot say.
+    pub fn ray_solids(&self, ro: Vec3, rd: Vec3, max_dist: f32) -> Vec<(f32, f32)> {
+        let mut spans: Vec<(f32, f32)> = self
+            .solids
+            .iter()
+            .filter_map(|s| crate::util::ray_aabb_span(ro, rd, s.min, s.max))
+            .map(|(enter, exit)| (enter, exit.min(max_dist)))
+            .filter(|(enter, exit)| exit > enter)
+            .collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+        let mut merged: Vec<(f32, f32)> = Vec::with_capacity(spans.len());
+        for (enter, exit) in spans {
+            match merged.last_mut() {
+                Some(last) if enter <= last.1 => last.1 = last.1.max(exit),
+                _ => merged.push((enter, exit)),
+            }
+        }
+        merged
+    }
+
     pub fn line_of_sight(&self, a: Vec3, b: Vec3) -> bool {
         let d = b - a;
         let dist = d.length();
@@ -681,7 +756,7 @@ impl Level {
                 return false;
             }
         }
-        for s in &self.smoke {
+        for s in &self.volumes {
             if s.life > 0.0 && segment_hits_sphere(a, dir, dist, s.pos, s.current_radius()) {
                 return false;
             }
@@ -699,20 +774,23 @@ impl Level {
                 .any(|(min, max)| p.x >= min.x && p.x <= max.x && p.z >= min.y && p.z <= max.y)
     }
 
-    pub fn add_smoke(&mut self, pos: Vec3, radius: f32, life: f32) {
-        self.smoke.push(Smoke {
+    /// Adds a cloud to the arena. `burn` is damage per second inside it, `0.0`
+    /// for a smoke screen — see [`Volume`].
+    pub fn add_volume(&mut self, pos: Vec3, radius: f32, life: f32, burn: f32) {
+        self.volumes.push(Volume {
             pos,
             radius,
             life,
             max_life: life,
+            burn,
         });
     }
 
-    pub fn update_smoke(&mut self, dt: f32) {
-        for s in &mut self.smoke {
+    pub fn update_volumes(&mut self, dt: f32) {
+        for s in &mut self.volumes {
             s.life -= dt;
         }
-        self.smoke.retain(|s| s.life > 0.0);
+        self.volumes.retain(|s| s.life > 0.0);
     }
 }
 
@@ -831,5 +909,59 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every solid carries the material it is drawn with, and a point inside one
+    /// answers with that material.
+    ///
+    /// This is what makes an impact sound surface-aware: the boxes are batched
+    /// into one mesh per surface and the block list is dropped, so `materials`
+    /// is the only thing left that remembers what a wall is made of (review
+    /// R17).
+    #[test]
+    fn every_solid_remembers_its_material() {
+        for layout in maps::campaign() {
+            let level = Level::from_layout(&layout);
+            assert_eq!(
+                level.solids.len(),
+                level.materials.len(),
+                "{}: the material list is not the solid list",
+                layout.name_en
+            );
+            assert_eq!(
+                level.solids.len(),
+                layout.boxes.len(),
+                "{}: a block did not become a solid",
+                layout.name_en
+            );
+            for (i, block) in layout.boxes.iter().enumerate() {
+                assert_eq!(
+                    level.materials[i], block.skin.surface,
+                    "{}: block {i} is wearing another material",
+                    layout.name_en
+                );
+            }
+        }
+    }
+
+    /// A round that stops on a wall reports the wall's own material, and a
+    /// point in open air reports none.
+    #[test]
+    fn a_stop_on_a_wall_answers_with_the_wall() {
+        let level = Level::from_layout(&maps::arena());
+        let at = level.spawns[0];
+        // Whatever is under the spawn's own column: the floor it stands on.
+        let below = level.ground_below(at.x, at.z, 0.2, at.y).unwrap_or(0.0);
+        let hit = vec3(at.x, below, at.z);
+        let found = level
+            .material_behind(hit, Vec3::NEG_Y)
+            .or_else(|| level.material_behind(hit, Vec3::Y));
+        assert!(
+            found.is_some(),
+            "the floor a spawn stands on has no material"
+        );
+
+        // Well above the floor and away from anything: nothing to report.
+        assert_eq!(level.material_behind(at + Vec3::Y * 40.0, Vec3::Y), None);
     }
 }

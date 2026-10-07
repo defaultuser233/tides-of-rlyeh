@@ -122,7 +122,15 @@ define_strings! {
     PrimaryWeapon    => ("PRIMARY", "主武器"),
     SecondaryWeapon  => ("SECONDARY", "副武器"),
     PrimaryMags      => ("PRIMARY MAGS", "主武器备弹"),
+    PrimaryLoad      => ("PRIMARY ROUND", "主武器弹种"),
+    SecondaryLoad    => ("SECONDARY ROUND", "副武器弹种"),
+    LoadFmj          => ("FMJ", "标准弹"),
+    LoadSlug         => ("SLUG", "独头弹"),
+    LoadJhp          => ("JHP", "空尖弹"),
+    LoadAp           => ("AP", "穿甲弹"),
     SecondaryMags    => ("SECONDARY MAGS", "副武器备弹"),
+    PistolMags       => ("SIDEARM MAGS", "手枪备弹"),
+    Rounds           => ("ROUNDS", "发"),
     Spare            => ("SPARE", "备弹"),
     ArmoryWeapon     => ("WEAPON", "武器"),
     PartNone         => ("NONE", "无"),
@@ -229,9 +237,12 @@ define_strings! {
     // --- grenades ---
     GrenadeFrag      => ("FRAG", "破片手雷"),
     GrenadeSmoke     => ("SMOKE", "烟雾弹"),
+    GrenadeFlash     => ("FLASH", "闪光弹"),
+    GrenadeMolotov   => ("MOLOTOV", "燃烧瓶"),
     GrenadeWheel     => ("SELECT GRENADE", "选择投掷物"),
     NoGrenades       => ("NO GRENADES", "没有投掷物"),
     GrenadeOut       => ("GRENADE OUT", "投掷物已出手"),
+    Trajectory       => ("TRAJECTORY", "弹道预览"),
 
     // --- medical ---
     MedBandage       => ("BANDAGE", "绷带"),
@@ -271,6 +282,16 @@ define_strings! {
     WeaponM110       => ("M110 SASS", "M110 精确射手步枪"),
     WeaponMosin      => ("MOSIN-NAGANT", "莫辛纳甘栓动步枪"),
 
+    // --- cartridges ---
+    // The round, not the weapon: four 5.56 guns and one figure between them.
+    Ammo556          => ("5.56x45", "5.56×45"),
+    Ammo9mm          => ("9x19", "9×19"),
+    Ammo12ga         => ("12 GAUGE", "12 号霰弹"),
+    Ammo762          => ("7.62x51", "7.62×51"),
+    Ammo54r          => ("7.62x54R", "7.62×54R"),
+    Ammo50           => (".50 BMG", ".50 机枪弹"),
+    AmmoNone         => ("——", "——"),
+
     // --- breath ---
     BreathHeld       => ("HOLDING BREATH", "屏息中"),
     BreathSpent      => ("OUT OF BREATH", "气息已尽"),
@@ -294,6 +315,18 @@ define_strings! {
     AimHold          => ("HOLD", "长按"),
     AimToggle        => ("TOGGLE", "切换"),
     LeanHint         => ("Q / E", "Q / E"),
+    // The settings screen writes the file on every change it steps, so this is
+    // the one place a player can be told that the write did not happen.
+    SettingsNotSaved => ("SETTINGS NOT SAVED", "设置未能保存"),
+
+    // --- what happens when you walk over something ---
+    PickupMode       => ("PICKUP", "拾取方式"),
+    PickupAuto       => ("ON CONTACT", "碰到即取"),
+    PickupKey        => ("PRESS F", "按 F 键"),
+    UseMode          => ("MEDICAL", "药品使用"),
+    UseAuto          => ("ON PICKUP", "拾取即用"),
+    UseManual        => ("CARRY IT", "带走备用"),
+    PickUpHint       => ("F　PICK UP", "F　拾取"),
 
     // --- field manual: the controls page ---
     // The key glyphs are language-independent, so every control row is one
@@ -324,12 +357,13 @@ define_strings! {
     CtlFreeLook      => ("MIDDLE MOUSE (HOLD)　FREE LOOK", "鼠标中键（按住）　自由视角"),
     CtlInspect       => ("U　INSPECT WEAPON", "U　检视武器"),
     CtlWeapons       => ("1 2 3 4 / WHEEL　SWITCH WEAPON", "1 2 3 4 / 滚轮　切换武器"),
-    CtlGrenade       => ("G　THROW GRENADE · HOLD TO PICK", "G　投掷手雷；按住可选种类"),
+    CtlGrenade       => ("G　TAKE OUT / PUT BACK · HOLD FOR KIND · LMB PIN, THEN THROW",
+                         "G　拿出/收回；按住选种类；左键拔环，再按左键投出"),
     CtlHeal          => ("V　USE MEDICAL · HOLD TO PICK", "V　使用药品；按住可选种类"),
-    // No key: the game has no interact verb — walking within a metre of a drop
-    // picks it up. The row is here so a new player looking for "how do I pick
-    // things up" finds the answer instead of a key that does nothing.
-    CtlInteract      => ("WALK OVER　PICK UP DROPS", "走近　自动拾取掉落物"),
+    // The pickup verb: `F` by default only when instant pickup is turned off,
+    // and both are the answer to "how do I pick things up", so both are named
+    // rather than one key that does nothing half the time.
+    CtlInteract      => ("WALK OVER / F　PICK UP DROPS", "走近 / F　拾取掉落物"),
     CtlInventory     => ("TAB　INVENTORY", "Tab　背包"),
     CtlMap           => ("M　MAP", "M　地图"),
     CtlMission       => ("J　MISSION PANEL", "J　任务面板"),
@@ -439,16 +473,33 @@ define_strings! {
                          "破片手雷 — 投出后 3.2 秒起爆；7 米半径内越近越疼（中心 130 点），掩体能挡住"),
     CodexItemSmoke   => ("SMOKE — blooms on landing into a 5 m cloud that blocks every line of sight for 16 s",
                          "烟雾弹 — 落地即炸开 5 米烟幕，16 秒内挡住所有视线"),
-    CodexItemBandage => ("BANDAGE — 25 health over a 1.2 s channel; you carry three. Damage or firing breaks it",
-                         "绷带 — 引导 1.2 秒回复 25 点；随身三卷，受伤、开火或跑动都会打断"),
-    CodexItemMedkit  => ("MEDKIT — 60 health over a 2.5 s channel; you carry one, and damage, firing or running breaks it",
-                         "医疗包 — 引导 2.5 秒回复 60 点；只带一个，受伤、开火或跑动都会打断"),
-    CodexItemPainkiller => ("PAINKILLER — 35 health over a 1.8 s channel; you carry one. Damage or firing breaks it",
-                            "止痛药 — 引导 1.8 秒回复 35 点；只带一剂，受伤、开火或跑动都会打断"),
+    CodexItemFlash   => ("FLASH — a 11 m light, no damage at all. Every hostile looking at it loses you for 3 s, and so do you if you are facing it inside the light",
+                         "闪光弹 — 11 米强光，零伤害。看向它的敌人会丢失你的位置 3 秒；你自己在亮区里正对着它也会被白屏这么久"),
+    CodexItemMolotov => ("MOLOTOV — no pin, no fuse: it breaks on what it hits and leaves a 4 m fire for 24 s. Burning costs 34 a second inside it, armour and all, and no line of sight goes through",
+                         "燃烧瓶 — 没有拉环也没有引信：撞到什么就在哪碎，留下半径 4 米、持续 24 秒的火场。站在里面每秒 34 点（护甲照吃），且挡住所有视线"),
+    CodexItemBandage => ("BANDAGE — 25 health over a 1.2 s channel; how many you carry is whatever the armory packs. Damage or firing breaks it",
+                         "绷带 — 引导 1.2 秒回复 25 点；带几卷看你在军械库装了多少。受伤、开火或跑动都会打断"),
+    CodexItemMedkit  => ("MEDKIT — 60 health over a 2.5 s channel, and as many as the armory packs; damage, firing or running breaks it",
+                         "医疗包 — 引导 2.5 秒回复 60 点；带几个看你在军械库装了多少，受伤、开火或跑动都会打断"),
+    CodexItemPainkiller => ("PAINKILLER — 35 health over a 1.8 s channel; how many you carry is whatever the armory packs. Damage or firing breaks it",
+                            "止痛药 — 引导 1.8 秒回复 35 点；带几剂看你在军械库装了多少。受伤、开火或跑动都会打断"),
     CodexItemArmor   => ("ARMOUR PLATE — soaks 65% of every body hit until the plates run out, and never a hit that lands below the hips; what it stops barely moves your view either. 50 points is a full vest",
                          "防弹插板 — 吸收躯干受击伤害的 65%，直到耗尽；打中腰部以下不生效；被挡下的子弹也几乎不晃视线。50 点为满护甲"),
-    CodexItemAmmo    => ("AMMO — refills the magazine in your hands first; whatever does not fit goes to that weapon's spare pool",
-                         "弹药箱 — 先补满手上这把武器的弹匣，装不下的进该武器的备弹池"),
+    CodexItemAmmo    => ("AMMO — refills the magazine in your hands first, then the fullest spare that still has room",
+                         "弹药箱 — 先补满手上这把武器的弹匣，装不下的进还有空位、并且最满的那个备用弹匣"),
+
+    // The rounds live on the tips page, beside the other mechanics. The armory's
+    // stat panel already shows what a load *moves*; what it cannot show is where
+    // to choose one, or what a round does that no number says — "it crosses two
+    // men" has no column.
+    TipLoadFmj       => ("The round is chosen in the armory — one per gun, for the whole mission",
+                         "弹种在配装页选，一把枪一种、管一整场任务；标准弹每把枪都有"),
+    TipLoadSlug      => ("A slug is one projectile for a pattern: 90 damage at four times the range",
+                         "独头弹把弹幕换成一颗重弹丸：贴脸少一些，四倍远处仍有 90 伤害"),
+    TipLoadJhp       => ("A hollow point hits flesh a third harder and keeps a quarter of its plate figure",
+                         "空尖弹打肉体多三分之一伤害，但护甲穿透只剩四分之一"),
+    TipLoadAp        => ("A hardened core crosses three bodies and a quarter-metre of cover",
+                         "穿甲弹能穿过三个身体和 25 厘米掩体，代价是少一点伤害"),
 
     // --- field manual: stat labels ---
     // The label column of a card's number line. The values beside them are

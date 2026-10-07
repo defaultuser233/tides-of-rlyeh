@@ -37,6 +37,64 @@ pub fn clip(on: bool) {
     macroquad::miniquad::window::set_cursor_grab(on);
 }
 
+/// How many times `show` will ask Windows before giving up. A state that cannot
+/// be reached must not spin the frame.
+#[cfg(target_os = "windows")]
+const SHOW_ATTEMPTS: usize = 16;
+
+/// Shows or hides the pointer, and then *makes sure of it*.
+///
+/// `miniquad`'s `show_mouse` is a cached `ShowCursor` call, and `ShowCursor` is a
+/// counter: anything else on the machine that hid the cursor — a driver panel, an
+/// overlay, a remote session — leaves the count below zero, where one
+/// `ShowCursor(TRUE)` is not enough, and the cached wrapper never tries again.
+/// The pointer then stays invisible even though the game believes it is showing
+/// it, which is what "the wheels work but there is no cursor" was.
+///
+/// So this does not count calls. It asks Windows whether the cursor is showing
+/// and keeps asking until it is — or until the attempts run out, because a call
+/// that cannot succeed must not spin.
+#[cfg(target_os = "windows")]
+pub fn show(shown: bool) {
+    #[repr(C)]
+    struct CursorInfo {
+        cb_size: u32,
+        flags: u32,
+        handle: *mut core::ffi::c_void,
+        x: i32,
+        y: i32,
+    }
+    const CURSOR_SHOWING: u32 = 0x0000_0001;
+    unsafe extern "system" {
+        fn ShowCursor(show: i32) -> i32;
+        fn GetCursorInfo(info: *mut CursorInfo) -> i32;
+    }
+
+    for _ in 0..SHOW_ATTEMPTS {
+        let mut info = CursorInfo {
+            cb_size: std::mem::size_of::<CursorInfo>() as u32,
+            flags: 0,
+            handle: std::ptr::null_mut(),
+            x: 0,
+            y: 0,
+        };
+        // SAFETY: `CursorInfo` is `#[repr(C)]` and begins with its own size,
+        // which is what the call reads to know which struct it was handed;
+        // `GetCursorInfo` writes exactly that struct through the pointer, which
+        // is valid and aligned for the duration of the call. A zero return means
+        // it failed and wrote nothing, and that is handled rather than assumed
+        // away.
+        let ok = unsafe { GetCursorInfo(&mut info) } != 0;
+        if ok && (info.flags & CURSOR_SHOWING != 0) == shown {
+            return;
+        }
+        // SAFETY: `ShowCursor` takes one plain `i32` — no pointer, no lifetime —
+        // so the only obligation is that the value fits, which it does.
+        unsafe { ShowCursor(shown.into()) };
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
 pub fn show(shown: bool) {
     macroquad::miniquad::window::show_mouse(shown);
 }

@@ -161,8 +161,17 @@ impl Textures {
     /// (which the tests build headlessly).
     pub fn load() -> Self {
         let textures = Surface::ALL.map(|s| {
-            let img = Image::from_file_with_format(s.png(), Some(ImageFormat::Png))
-                .expect("a bundled surface texture is not a decodable PNG");
+            // A texture that will not decode is one face drawn wrong, not a
+            // reason to take the game down before its first frame. The font and
+            // the fog shader both degrade instead, and this was the only place
+            // that did not (review R12). The one white texel keeps the face
+            // reading as a plain lit surface rather than as a smear of whatever
+            // the sampler happened to hold.
+            let img =
+                Image::from_file_with_format(s.png(), Some(ImageFormat::Png)).unwrap_or_else(|e| {
+                    eprintln!("tides-of-rlyeh: cannot decode the {s:?} texture: {e}");
+                    Image::gen_image_color(1, 1, WHITE)
+                });
             let tex = Texture2D::from_image(&img);
             tex.set_filter(FilterMode::Linear);
             tex

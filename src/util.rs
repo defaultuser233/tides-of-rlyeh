@@ -55,7 +55,11 @@ impl Rng {
 }
 
 /// Slab-method ray/AABB intersection. Returns the entry distance along `rd`.
-pub fn ray_aabb(ro: Vec3, rd: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
+/// Where a ray enters and leaves an axis-aligned box: the same slab test as
+/// [`ray_aabb`], which throws the exit away. A round that carries through cover
+/// needs both ends — the difference between them is the thickness it has to
+/// cross.
+pub fn ray_aabb_span(ro: Vec3, rd: Vec3, min: Vec3, max: Vec3) -> Option<(f32, f32)> {
     // Perturb near-zero components so the reciprocal never produces 0 * inf = NaN.
     let rd = vec3(
         if rd.x.abs() < 1e-6 { 1e-6 } else { rd.x },
@@ -72,8 +76,12 @@ pub fn ray_aabb(ro: Vec3, rd: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
     if exit < 0.0 || exit <= enter {
         None
     } else {
-        Some(enter.max(0.0))
+        Some((enter.max(0.0), exit))
     }
+}
+
+pub fn ray_aabb(ro: Vec3, rd: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
+    ray_aabb_span(ro, rd, min, max).map(|(enter, _)| enter)
 }
 
 pub fn approach(current: f32, target: f32, rate: f32) -> f32 {
@@ -175,6 +183,37 @@ mod tests {
 
     fn hit(ro: Vec3, rd: Vec3) -> Option<f32> {
         ray_aabb(ro, rd, Vec3::splat(-1.0), Vec3::splat(1.0))
+    }
+
+    /// The span is the entry *and* the exit, which is what a round that carries
+    /// through cover has to spend: a two-metre box reports two metres.
+    #[test]
+    fn ray_aabb_span_reports_the_thickness() {
+        let (min, max) = (vec3(-1.0, -1.0, -1.0), vec3(1.0, 1.0, 1.0));
+        let (enter, exit) =
+            ray_aabb_span(vec3(0.0, 0.0, -5.0), Vec3::Z, min, max).expect("head-on hit");
+        assert!((enter - 4.0).abs() < 1e-3, "entry {enter}");
+        assert!((exit - 6.0).abs() < 1e-3, "exit {exit}");
+        assert!(
+            (exit - enter - 2.0).abs() < 1e-3,
+            "thickness {}",
+            exit - enter
+        );
+
+        // From inside, the entry is where the eye is and the exit is the far
+        // face — the rest of the way out, which is what is left to cross.
+        let (enter, exit) = ray_aabb_span(Vec3::ZERO, Vec3::Z, min, max).expect("inside the box");
+        assert_eq!(enter, 0.0, "a ray from inside starts where it is");
+        assert!(
+            (exit - 1.0).abs() < 1e-3,
+            "and leaves by the far face: {exit}"
+        );
+
+        // The same answer as the distance-only form, which now delegates here.
+        assert_eq!(
+            ray_aabb(vec3(0.0, 0.0, -5.0), Vec3::Z, min, max),
+            Some(enter.max(4.0))
+        );
     }
 
     #[test]

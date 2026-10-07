@@ -96,6 +96,28 @@ pub struct KindStats {
     pub accuracy: f32,
 }
 
+/// Every archetype, in the order the enum declares them.
+///
+/// Test-only on purpose, and it lives here rather than in the test module
+/// because two test modules need it. `enemy.rs` has no *production* `Kind::ALL`
+/// — the manual's reading order is `codex::ARCHETYPES`' business, and the enum
+/// stays a plain enumeration — but the suite still needs one list to walk, or
+/// the next archetype is tested by whoever remembers to add it. The hitbox test
+/// named four humanoids by hand, which is how the drone — the one archetype
+/// whose box did not match its model — came to be the only one never checked
+/// (review R18). `codex`'s tests hold this list and the manual's together.
+#[cfg(test)]
+pub const ALL_KINDS: [Kind; 8] = [
+    Kind::Grunt,
+    Kind::Rusher,
+    Kind::Heavy,
+    Kind::Sniper,
+    Kind::Drone,
+    Kind::Tentacle,
+    Kind::Colossus,
+    Kind::Spawnling,
+];
+
 pub fn stats(kind: Kind) -> KindStats {
     match kind {
         Kind::Grunt => KindStats {
@@ -1289,6 +1311,13 @@ pub struct Enemy {
     /// and, for snipers, the shot telegraph.
     pub alert: f32,
     pub aim_t: f32,
+    /// Seconds of blindness left, set by a flash.
+    ///
+    /// While it is positive the unit cannot acquire the player at all: no
+    /// detection, no aiming, no clawing at something it cannot see. It keeps the
+    /// memory it already had and searches that, which is what being blinded
+    /// looks like from the outside — a unit that knows where you *were*.
+    pub blind_t: f32,
     /// Where the player was last seen, and how long ago that was.
     pub last_seen: Vec3,
     /// True once this unit has actually laid eyes on the player. One that was
@@ -1352,6 +1381,7 @@ impl Enemy {
             flash: 0.0,
             alert: 0.0,
             aim_t: 0.0,
+            blind_t: 0.0,
             last_seen: pos,
             seen_player: false,
             aware_t: 99.0,
@@ -1388,6 +1418,13 @@ impl Enemy {
     pub fn alert_to(&mut self, pos: Vec3, pursue: f32) {
         self.last_seen = pos;
         self.aware_t = -pursue;
+    }
+
+    /// Takes the eyes away for `seconds`. Longer is not better than the last
+    /// call: two flashes in a row are three seconds of blindness, not six, which
+    /// is what keeps a flash the answer to a corner rather than to a fight.
+    pub fn blind(&mut self, seconds: f32) {
+        self.blind_t = self.blind_t.max(seconds);
     }
 
     pub fn targetable(&self) -> bool {
@@ -1562,7 +1599,15 @@ impl Enemy {
         // themselves: standing and sprinting are spotted far sooner than
         // crouched, prone and walking. Long-ranged archetypes notice further.
         let detect = (self.range * 1.2).max(24.0) * player.visibility();
-        let los = player.alive && dist < detect && level.line_of_sight(self.eye(), player.eye());
+        // A flash takes the eyes away entirely. `los` is the one gate everything
+        // downstream reads — `alert`, whether it may fire, whether it may reach
+        // out with a claw — so blinding it here is blinding the unit rather than
+        // one of its decisions, and nothing else has to know about the flash.
+        self.blind_t = (self.blind_t - dt).max(0.0);
+        let los = self.blind_t <= 0.0
+            && player.alive
+            && dist < detect
+            && level.line_of_sight(self.eye(), player.eye());
         if los {
             self.last_seen = player.pos;
             self.seen_player = true;
@@ -2065,9 +2110,8 @@ mod tests {
     /// shoot one.
     #[test]
     fn every_hitbox_matches_its_model() {
-        let kinds = [Kind::Grunt, Kind::Rusher, Kind::Heavy, Kind::Sniper];
         let mut rng = Rng::new(4);
-        for kind in kinds {
+        for kind in ALL_KINDS {
             let e = Enemy::spawn(kind, vec3(0.0, 0.0, 0.0), 1, &mut rng);
             let mut mesh = crate::mesh::empty_mesh();
             e.write_mesh(&mut mesh);
@@ -2507,7 +2551,10 @@ mod tests {
         level.flow.update(player.pos);
         let to_player = vec2(player.pos.x - stuck_at.x, player.pos.z - stuck_at.z).normalize();
         let steer = level.flow.dir_at(stuck_at);
-        assert!(steer != Vec2::ZERO, "a unit off the field had nowhere to go");
+        assert!(
+            steer != Vec2::ZERO,
+            "a unit off the field had nowhere to go"
+        );
         assert!(
             steer.dot(to_player) > 0.9,
             "the fallback pointed {steer:?} rather than at the player"
@@ -2542,6 +2589,59 @@ mod tests {
         assert!(
             now < start - 5.0,
             "a unit lifted out of geometry did not move on: {start} m to {now} m"
+        );
+    }
+    /// A blinded unit stops seeing the player, and starts again when its eyes
+    /// come back.
+    ///
+    /// The flash's whole value is this: not that it hurts, but that it takes an
+    /// enemy out of the fight for a window. `los` is the one gate everything
+    /// downstream reads — `alert`, whether it may fire, whether it may reach out
+    /// with a claw — so the test drives the perception block and checks the gate
+    /// rather than any single decision behind it.
+    #[test]
+    fn a_blinded_unit_stops_seeing_the_player() {
+        let (level, player, _) = worst_case();
+        let mut rng = Rng::new(9);
+        // Eight metres in front of the player, which the campaign's own start
+        // position has a clear line to.
+        let mut e = Enemy::spawn(Kind::Grunt, player.pos + vec3(0.0, 0.0, -8.0), 1, &mut rng);
+        assert!(
+            level.line_of_sight(e.eye(), player.eye()),
+            "the test's own position cannot see the player"
+        );
+        let dt = 1.0 / 60.0;
+        let mut step = |e: &mut Enemy, frames: usize| {
+            for _ in 0..frames {
+                let _ = e.update(&level, &player, &[], 0, dt, &mut rng);
+            }
+        };
+
+        step(&mut e, 60);
+        assert!(
+            e.alert > 0.5,
+            "an unblinded unit at eight metres never acquired the player"
+        );
+
+        e.blind(3.0);
+        step(&mut e, 60);
+        assert!(
+            e.alert < 0.1,
+            "a blinded unit is still tracking the player (alert {:.2})",
+            e.alert
+        );
+        assert!(
+            e.blind_t > 0.0,
+            "the blindness expired inside its own window"
+        );
+
+        // Three more seconds and the eyes are back.
+        step(&mut e, 3 * 60);
+        assert_eq!(e.blind_t, 0.0, "the blindness never expired");
+        assert!(
+            e.alert > 0.5,
+            "the unit never recovered its eyes (alert {:.2})",
+            e.alert
         );
     }
 }

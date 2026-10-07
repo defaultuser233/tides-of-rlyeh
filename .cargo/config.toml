@@ -1,0 +1,17 @@
+# Build settings that have to hold for every machine, so they live in the repo
+# rather than in a shell.
+#
+# `+crt-static` links the MSVC C runtime into the executable instead of
+# importing it. Without this the produced `tides-of-rlyeh.exe` imports
+# `VCRUNTIME140.dll` (and the `api-ms-win-crt-*` stubs), which comes from the
+# Visual C++ 2015–2022 redistributable and is *not* part of Windows — so the
+# single file that this game is meant to be would fail to start on a clean
+# machine with "VCRUNTIME140.dll was not found".
+#
+# Cargo reads extra flags from `CARGO_ENCODED_RUSTFLAGS`, then `RUSTFLAGS`, and
+# only then from here. A `RUSTFLAGS` set in the environment therefore wins over
+# this entry and quietly brings the dependency back; if a shell needs its own
+# flags, append to them rather than replacing them (see how
+# `build-linux.ps1` handles the MUSL linker below).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

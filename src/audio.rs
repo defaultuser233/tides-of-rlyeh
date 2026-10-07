@@ -36,6 +36,17 @@ pub enum Sfx {
     EnemyShot,
     HitFlesh,
     HitWorld,
+    /// A round landing on a material that answers for itself. `HitWorld` is
+    /// what the wall plays when it is made of something without a voice of its
+    /// own, so the material set is additive and never leaves a hit silent.
+    HitConcrete,
+    HitMetal,
+    HitMetalHeavy,
+    HitWood,
+    /// Glass breaking, for a bottle. The one impact sound in the set that is not
+    /// a weapon's: it was left in `sounds/variants/` while nothing in the game
+    /// broke, and a molotov is what breaks.
+    HitGlass,
     HitHead,
     EnemyDeath,
     Reload,
@@ -60,6 +71,13 @@ pub enum Sfx {
     UiMove,
     UiBack,
     Explosion,
+    /// The same bang from the far side of the arena: the crack is gone and the
+    /// tail is what arrives. A recording rather than a quieter copy of the near
+    /// one, because attenuation cannot remove a transient.
+    ExplosionDistant,
+    /// And the loudest take in the pack, for one that goes off close enough to
+    /// feel.
+    ExplosionLarge,
     Spawn,
     /// Something enormous has been let into the arena (§19.4-10). Played at
     /// full volume rather than by distance: the point is that it is heard from
@@ -76,7 +94,7 @@ pub enum Sfx {
 impl Sfx {
     /// Every effect, in enum order. Only the sound backend enumerates them.
     #[cfg(feature = "sound")]
-    const ALL: [Sfx; 29] = [
+    const ALL: [Sfx; 36] = [
         Sfx::ShotRifle,
         Sfx::ShotShotgun,
         Sfx::ShotSmg,
@@ -85,6 +103,11 @@ impl Sfx {
         Sfx::EnemyShot,
         Sfx::HitFlesh,
         Sfx::HitWorld,
+        Sfx::HitConcrete,
+        Sfx::HitMetal,
+        Sfx::HitMetalHeavy,
+        Sfx::HitWood,
+        Sfx::HitGlass,
         Sfx::HitHead,
         Sfx::EnemyDeath,
         Sfx::Reload,
@@ -100,6 +123,8 @@ impl Sfx {
         Sfx::UiMove,
         Sfx::UiBack,
         Sfx::Explosion,
+        Sfx::ExplosionDistant,
+        Sfx::ExplosionLarge,
         Sfx::Spawn,
         Sfx::EliteArrival,
         Sfx::BossArrival,
@@ -129,6 +154,11 @@ impl Sfx {
             Sfx::EnemyShot => "enemy_shot",
             Sfx::HitFlesh => "hit_flesh",
             Sfx::HitWorld => "hit_world",
+            Sfx::HitConcrete => "impact_concrete",
+            Sfx::HitMetal => "impact_metal_light",
+            Sfx::HitMetalHeavy => "impact_metal_heavy",
+            Sfx::HitWood => "impact_wood",
+            Sfx::HitGlass => "impact_glass",
             Sfx::HitHead => "hit_head",
             Sfx::EnemyDeath => "enemy_death",
             Sfx::Reload => "reload",
@@ -144,6 +174,8 @@ impl Sfx {
             Sfx::UiMove => "ui_move",
             Sfx::UiBack => "ui_back",
             Sfx::Explosion => "explosion",
+            Sfx::ExplosionDistant => "explosion_distant",
+            Sfx::ExplosionLarge => "explosion_large",
             Sfx::Spawn => "spawn",
             Sfx::EliteArrival => "elite_arrival",
             Sfx::BossArrival => "boss_arrival",
@@ -166,6 +198,11 @@ impl Sfx {
             Sfx::EnemyShot => Asset::SfxEnemyShot,
             Sfx::HitFlesh => Asset::SfxHitFlesh,
             Sfx::HitWorld => Asset::SfxHitWorld,
+            Sfx::HitConcrete => Asset::SfxHitConcrete,
+            Sfx::HitMetal => Asset::SfxHitMetal,
+            Sfx::HitMetalHeavy => Asset::SfxHitMetalHeavy,
+            Sfx::HitWood => Asset::SfxHitWood,
+            Sfx::HitGlass => Asset::SfxHitGlass,
             Sfx::HitHead => Asset::SfxHitHead,
             Sfx::EnemyDeath => Asset::SfxEnemyDeath,
             Sfx::Reload => Asset::SfxReload,
@@ -176,6 +213,8 @@ impl Sfx {
             Sfx::UiMove => Asset::SfxUiMove,
             Sfx::UiBack => Asset::SfxUiBack,
             Sfx::Explosion => Asset::SfxExplosion,
+            Sfx::ExplosionDistant => Asset::SfxExplosionDistant,
+            Sfx::ExplosionLarge => Asset::SfxExplosionLarge,
             Sfx::Spawn => Asset::SfxSpawn,
             Sfx::Healing => Asset::SfxHealing,
             Sfx::EliteArrival => Asset::SfxEliteArrival,
@@ -203,7 +242,14 @@ impl Sfx {
             | Sfx::ShotSniper
             | Sfx::ShotLmg
             | Sfx::EnemyShot => 0.040,
-            Sfx::HitFlesh | Sfx::HitWorld | Sfx::HitHead => 0.025,
+            Sfx::HitFlesh
+            | Sfx::HitWorld
+            | Sfx::HitConcrete
+            | Sfx::HitMetal
+            | Sfx::HitMetalHeavy
+            | Sfx::HitWood
+            | Sfx::HitGlass
+            | Sfx::HitHead => 0.025,
             Sfx::Footstep => 0.120,
             Sfx::ReloadDone => 0.120,
             // The three event cues are one-shot notices: two of them inside a
@@ -219,6 +265,8 @@ impl Sfx {
             | Sfx::PickupHealth
             | Sfx::PickupAmmo
             | Sfx::Explosion
+            | Sfx::ExplosionDistant
+            | Sfx::ExplosionLarge
             | Sfx::Spawn
             | Sfx::ObjectiveDone
             | Sfx::MissionComplete
@@ -352,7 +400,9 @@ fn embedded(sfx: Sfx) -> Option<&'static [u8]> {
 async fn load_effect(sfx: Sfx) -> Option<Sound> {
     let base = sfx.file_name();
     for ext in ["ogg", "wav"] {
-        let path = format!("assets/sounds/{base}.{ext}");
+        // The layout of the override directory is `assets.rs`'s to name, not
+        // this module's (review R10).
+        let path = crate::assets::override_path(&format!("{base}.{ext}"));
         if let Some(sound) = load_override(&path, ext).await {
             return Some(sound);
         }
@@ -699,6 +749,45 @@ mod synth {
                 t.tone(0.00, 0.120, 0.50, 190.0, 90.0, 0.040);
                 (t, 0.68)
             }
+            // The material impacts: the fallback for a wall whose own file did
+            // not load. Each is the same hit read as a different substance — a
+            // dull thud, a ring, a heavier ring, a dry knock — because that
+            // difference is the whole of what the material is for.
+            HitConcrete => {
+                let mut t = Track::new(0.18);
+                t.noise(0.00, 0.055, 1.00, 2200.0, 900.0, 0.018);
+                t.tone(0.00, 0.050, 0.45, 320.0, 140.0, 0.016);
+                (t, 0.52)
+            }
+            HitMetal => {
+                let mut t = Track::new(0.26);
+                t.noise(0.00, 0.030, 1.00, 8000.0, 5000.0, 0.007);
+                t.tone(0.00, 0.200, 0.70, 2100.0, 1750.0, 0.070);
+                (t, 0.55)
+            }
+            HitMetalHeavy => {
+                let mut t = Track::new(0.42);
+                t.noise(0.00, 0.045, 1.00, 5000.0, 2200.0, 0.012);
+                t.tone(0.00, 0.340, 0.80, 640.0, 520.0, 0.120);
+                t.tone(0.01, 0.180, 0.40, 980.0, 900.0, 0.060);
+                (t, 0.66)
+            }
+            HitWood => {
+                let mut t = Track::new(0.16);
+                t.noise(0.00, 0.040, 1.00, 1800.0, 700.0, 0.014);
+                t.tone(0.00, 0.070, 0.55, 480.0, 300.0, 0.024);
+                (t, 0.46)
+            }
+            HitGlass => {
+                // The synth fallback for the bottle: a scatter of high shards
+                // over the first crack, which is what glass does and what none
+                // of the other impacts do.
+                let mut t = Track::new(0.36);
+                t.noise(0.00, 0.040, 1.00, 9000.0, 5200.0, 0.010);
+                t.tone(0.00, 0.120, 0.55, 2600.0, 1900.0, 0.045);
+                t.noise(0.05, 0.260, 0.45, 6000.0, 2600.0, 0.110);
+                (t, 0.58)
+            }
             EnemyDeath => {
                 let mut t = Track::new(0.62);
                 t.tone(0.00, 0.50, 1.00, 340.0, 62.0, 0.200);
@@ -807,6 +896,22 @@ mod synth {
                 t.noise(0.00, 1.20, 1.00, 900.0, 260.0, 0.420);
                 t.tone(0.00, 0.90, 1.00, 62.0, 24.0, 0.300);
                 t.noise(0.25, 1.30, 0.50, 300.0, 120.0, 0.550);
+                (t, 1.00)
+            }
+            ExplosionDistant => {
+                let mut t = Track::new(1.60);
+                // No crack anywhere in it: what crosses an arena is the tail.
+                t.noise(0.00, 1.10, 0.85, 320.0, 120.0, 0.480);
+                t.tone(0.00, 0.80, 1.00, 46.0, 26.0, 0.340);
+                t.noise(0.30, 1.10, 0.35, 180.0, 90.0, 0.520);
+                (t, 0.80)
+            }
+            ExplosionLarge => {
+                let mut t = Track::new(2.20);
+                t.noise(0.00, 0.10, 1.00, 5000.0, 1600.0, 0.022);
+                t.noise(0.00, 1.60, 1.00, 1000.0, 240.0, 0.560);
+                t.tone(0.00, 1.30, 1.00, 56.0, 20.0, 0.420);
+                t.noise(0.30, 1.80, 0.55, 280.0, 100.0, 0.700);
                 (t, 1.00)
             }
             Spawn => {

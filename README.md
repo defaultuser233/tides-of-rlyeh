@@ -144,6 +144,13 @@ friction, and run on a fuse. The frag has a 3.2 s fuse and a 7 m lethal radius
 that respects line of sight, so cover works. The smoke deploys on contact and
 occludes enemy sight for 16 seconds.
 
+`G` takes one out and puts the rifle away — the hand that was holding it is the
+hand that throws — so the sights come down with it; a second `G` puts it back.
+The four are four objects and not one casing in four colours: the frag is a ball
+with a fuze screwed into the top of it and the lever lying along the side, the
+smoke a tin can breathing through a row of vents at each end, the flash a
+cylinder built out of openings, and the molotov a bottle with a rag in its neck.
+
 Healing channels for 1.2–2.5 s and is interrupted by taking damage, by firing,
 or by moving faster than a walk — you cannot patch up mid-sprint.
 
@@ -445,11 +452,23 @@ over. `unlocked = 400` in a hand-edited file is clamped rather than believed.
 .\build-windows.ps1
 ```
 
-Produces `target\x86_64-pc-windows-msvc\release\tides-of-rlyeh.exe` (~4.2 MiB).
+Produces `target\x86_64-pc-windows-msvc\release\tides-of-rlyeh.exe` (~8.3 MiB).
 
 The Chinese font and the curated sound effects are **compiled into the
 executable**, so it is genuinely a single file: copy it anywhere and it runs.
-Nothing needs to sit beside it, and the working directory does not matter.
+Nothing needs to sit beside it, and the working directory does not matter. The
+C runtime is linked in statically as well (`.cargo/config.toml` sets
+`+crt-static`), so the executable does not need the Visual C++ redistributable
+either — its only imports are DLLs that ship with Windows.
+
+What is in there, in round numbers: the UI font 2.8 MiB, six 512² surface
+textures 2.5 MiB, thirty-four sound effects 1.1 MiB. Two tests keep the
+distribution honest. `assets::tests::the_payload_stays_within_its_budget` fails
+once the embedded total passes 16 MiB, naming the largest contributor — that
+failure is the moment to choose between a packed archive beside the executable
+and an asset directory beside it, not a bug. And
+`audio::tests::every_embedded_sound_is_in_a_container_the_decoder_accepts`
+reads every shipped sound the way the loader will.
 
 ### Linux, cross-compiled from Windows
 
@@ -458,9 +477,11 @@ Nothing needs to sit beside it, and the working directory does not matter.
 ```
 
 Produces `target\x86_64-unknown-linux-musl\release\tides-of-rlyeh`, a **statically
-linked x86_64 ELF** (~4.0 MiB). No glibc, no shared libraries, no X11 development
+linked x86_64 ELF** (~7.0 MiB). No glibc, no shared libraries, no X11 development
 packages needed on the target: macroquad resolves X11 and OpenGL at runtime with
-`dlopen`, so the binary needs nothing but a desktop session.
+`dlopen`, so the binary needs nothing but a desktop session. It has no `NEEDED`
+entries at all. Audio is off in this build — see the script for why, and
+`./build.sh` for the native build that has it.
 
 The script locates the `rust-lld` that already ships inside the Rust sysroot and
 uses it as the linker — no `zig`, no `wsl`, no Linux toolchain of any kind.
@@ -865,6 +886,83 @@ embedded WAV to the synthesiser instead.
 ## Verification status
 
 What was actually tested, and what was not:
+
+- **The throwable in hand, and the four casings (latest round)**: two changes, and
+  the two halves of each were verified differently because they are different
+  kinds of claim.
+  *The weapon is put away* — not lowered to the hip, but out of the frame — and
+  that is measured rather than eyeballed: `the_weapon_is_put_away_while_a_throwable_is_in_hand`
+  assembles what `draw` would paint, for all fourteen weapons, and requires none
+  of seven sampled points of any triangle to land inside the view. It reads the
+  same list `draw` does (`ViewModel::assemble` was split out of `draw` to make
+  that possible), so it cannot pass by measuring a pose that is nearly the drawn
+  one. The hand that throws is the right one now, and it is the hand the weapon's
+  own grip hand is suppressed for while the arm is out
+  (`a_throwable_in_hand_takes_the_weapon_off_the_throw` still requires the weapon
+  to move at least 40 px off the arc); aiming is dropped while a throwable is in
+  hand, which is `main.rs` and is **not covered by any test**. The hand comes up
+  into frame with the thing in it and the throw carries it away again, and both
+  the *drawing* and the arc read that position (`ViewModel::throw_hand`) rather
+  than the constant behind it, so the line leaves the grenade while the hand is
+  still on its way up; the three ends of that motion — below the rest point, on
+  it, below it again — are
+  `the_throwing_hand_rises_into_place_and_leaves_it_again`. Whether that reads as
+  an arm rather than as a hand moving is not measured.
+  *The four shapes*: `grenade::casing_shape` is one description, drawn by two
+  renderers — the world's `MeshBuilder` and the viewmodel's triangle list — and
+  `the_held_casing_is_the_casing_in_the_air` requires their silhouettes to agree
+  within a hundredth of the half-extent on every one of the four, in five bands
+  from bottom to top; `the_four_casings_are_four_shapes` requires every pair of
+  the four to differ by more than six hundredths somewhere. That test and the
+  sheet below are what found the two things a reading would not: the frag's fuze
+  had no shoulder, so the whole thing read as a light bulb, and the view's lever
+  was drawn with `bar`, whose box corners stand √2 further out than the beam it is
+  meant to be — 1.5 cm of spoon, visible as a difference between the two
+  renderers' silhouettes. **The shapes were looked at**:
+  `cargo test -- --ignored render_the_casings` writes `target/casings/*.png`, the
+  world's casing on the left and the same casing in the hand on the right, and
+  they were read off that sheet against the real prototypes.
+  **And it was watched in a running game, twice**, and both runs found something
+  the sheet could not. The first: the sheet drew the casings *by themselves*, and a
+  player never sees that — a hand closed round a grenade covers the part of it that
+  is inside the fingers, so all four showed as four colours of knuckle with a stub
+  on each, and the player said so exactly: "投掷物和手重合了，所以我看不出来". The
+  sheet draws the hand now, because a picture that leaves it out cannot see what it
+  hides. The second run settled it: a *fist* closed round a grenade is the wrong
+  idea at any size, because the two meshes occupy the same cubic centimetres and
+  the eye reading one of them is not reading the other. The hand is under the thing
+  now (`viewmodel::throw_hand`): fingers as a cradle below its body, back of the
+  hand below them, and nothing anywhere *above* the underside of the body — which
+  is the property `the_held_throwable_is_on_the_screen` checks, point by point of
+  the hand against the body's radius at that height, and which no vertex test could
+  see (a can's wall has a ring at each end and nothing between them). It also
+  requires the fingers to *reach* the underside, since a hand a centimetre below a
+  grenade satisfies "not inside it" as easily as one holding it. Holding it from
+  below is what the throw wants anyway: fingers wrapped round a body have to be
+  drawn through it to open, and fingers under it simply let go. And the thing in
+  the hand is drawn **oversized** (14 cm rather than the 10 cm a hand holds,
+  `HELD_HALF`), which is a deliberate departure and the only one in the viewmodel:
+  every first-person shooter does it with a grenade, and it is the one number to
+  turn down if it reads as too large. The evidence from all of this is in
+  `docs/shots/` — `01_rifle_in_hand` and `02_after_G_fist_grip_old` are the mission
+  with the rifle up and the same frame after `G` with the old grip,
+  `03`–`06` are the four kinds *in hand* with that old grip (the four colours of
+  fist), and `07_in_hand_frag_cradle_new` is the frag held from below: the whole
+  ball and its fuze, nothing over any of it. (They live in `docs/shots` and not in
+  `target` because `target` is disposable and has already taken one set of these
+  with it.) That run is also where the retry bug was found: a player who dies with
+  a throwable out gets it back in hand on the retry, so the first `G` of the new
+  attempt put it away and read as a key that did nothing (`Game::start` clears the
+  hand now).
+  **What is still not verified**: how the stow and the throw read *in motion*; the
+  hand in the game is mostly below the frame and behind the weapon panel of the
+  HUD, so what a player sees of this is the thing itself — which is the point, but
+  it does mean the cradle was judged from the sheet rather than from play; the four
+  were photographed while the player was being shot at, at one resolution; and the
+  casings have never been seen in the air by eye — a frag lands 6–10 m out, where
+  the drawn casing is about 20 px across in a 2560-wide capture, and two attempts to
+  stand still long enough to photograph one ended in the player being killed at 15
+  and 22 s.
 
 - **The encounter gaps (latest round)**: measured, not judged. A probe build was
   run on RUST YARD with the player doing nothing and logging the wave machine

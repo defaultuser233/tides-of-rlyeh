@@ -6,3 +6,8 @@
 
 # Font download cache (the built font itself is committed).
 /tools/font/.cache/
+
+# Screenshots taken while verifying a change, kept out of `target` because
+# `target` is what everything else treats as disposable — a cleaned tree has
+# taken the evidence for a change with it more than once.
+/docs/shots/

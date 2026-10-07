@@ -75,7 +75,35 @@ struct Wheel {
     held: f32,
 }
 
-const GRENADE_KINDS: [GrenadeKind; 2] = [GrenadeKind::Frag, GrenadeKind::Smoke];
+/// How long `G` has to be held before the press means "choose a kind" rather
+/// than the tap that takes a throwable out or puts it back.
+const WHEEL_OPEN: f32 = 0.28;
+
+/// The throwable in the player's hand.
+///
+/// Taking one out is a state rather than a step: `G` takes it out and puts it
+/// back, the left button pulls the pin and then throws, and once the pin is out
+/// the thing cannot be put away again — it is thrown, or it goes off where it
+/// stands. That is the whole cost of pulling the pin, and the reason the second
+/// click is a decision rather than a formality.
+struct Held {
+    /// Index into `GRENADE_KINDS`.
+    index: usize,
+    /// The pin is out: the fuse is burning and this cannot be holstered. Kinds
+    /// without a pin are never held this way — they are thrown on the click that
+    /// would have armed them.
+    live: bool,
+    /// What is left of the fuse. Counted down only once `live`, so the seconds
+    /// spent aiming before the pin comes out are free.
+    fuse: f32,
+}
+
+const GRENADE_KINDS: [GrenadeKind; 4] = [
+    GrenadeKind::Frag,
+    GrenadeKind::Smoke,
+    GrenadeKind::Flash,
+    GrenadeKind::Molotov,
+];
 /// (health restored, seconds channelled, count as issued). The third field is
 /// the armory's default count — `Kit::issued` carries the same numbers, and a
 /// test pins the two together.
@@ -107,6 +135,11 @@ struct Settings {
     lean_toggle: bool,
     invert_y: bool,
     show_fps: bool,
+    /// See `config::Config::show_arc`.
+    show_arc: bool,
+    /// See `config::Config::auto_pickup` and `auto_use`.
+    auto_pickup: bool,
+    auto_use: bool,
     fullscreen: bool,
     width: i32,
     height: i32,
@@ -128,6 +161,9 @@ impl Settings {
             lean_toggle: c.lean_toggle,
             invert_y: c.invert_y,
             show_fps: c.show_fps,
+            show_arc: c.show_arc,
+            auto_pickup: c.auto_pickup,
+            auto_use: c.auto_use,
             fullscreen: c.fullscreen,
             width: c.width,
             height: c.height,
@@ -157,6 +193,9 @@ impl Settings {
             lean_toggle: self.lean_toggle,
             invert_y: self.invert_y,
             show_fps: self.show_fps,
+            show_arc: self.show_arc,
+            auto_pickup: self.auto_pickup,
+            auto_use: self.auto_use,
             lang: i18n::lang(),
             unlocked,
             last_mission,
@@ -173,6 +212,8 @@ impl Settings {
             secondary_mags: 0,
             frags: 2,
             smokes: 1,
+            flashes: 1,
+            molotovs: 1,
             bandages: 3,
             medkits: 1,
             painkillers: 1,
@@ -193,7 +234,7 @@ struct Kit {
     /// Spare magazines per slot — what each gun's reserve is at mission start.
     ammo_mags: [u32; 2],
     /// Frags and smokes.
-    grenades: [u32; 2],
+    grenades: [u32; 4],
     /// Bandages, medkits, painkillers, in `MED_KINDS` order.
     meds: [u32; 3],
 }
@@ -202,8 +243,10 @@ struct Kit {
 /// stocking up: there is no economy, so what a player cannot do is carry
 /// everything at once.
 const LOADOUT_MAGS_MAX: u32 = 8;
-const LOADOUT_FRAGS_MAX: u32 = 4;
-const LOADOUT_SMOKES_MAX: u32 = 3;
+/// The most of each throwable the armory will let a loadout carry, in
+/// `GRENADE_KINDS` order. A per-kind cap and not a shared budget: four frags and
+/// two bottles is a build, and the pouch has no ceiling of its own to spend.
+const LOADOUT_GRENADES_MAX: [u32; 4] = [4, 3, 2, 2];
 /// The most of each medicine. The three share one cap because they already
 /// trade against each other by what they heal.
 const LOADOUT_MEDS_MAX: u32 = 5;
@@ -219,7 +262,7 @@ impl Kit {
             primary: Some(weapon::WeaponKind::Rifle),
             secondary: None,
             ammo_mags: [4, 0],
-            grenades: [2, 1],
+            grenades: [2, 1, 1, 1],
             meds: [3, 1, 1],
         }
     }
@@ -232,8 +275,7 @@ impl Kit {
         let mut kit = Self::issued();
         for kind in weapon::ALL_KINDS {
             let i = kind.index();
-            kit.builds[i] =
-                weapon::WeaponBuild::from_text(&c.builds[i]).screened(weapon::def(kind));
+            kit.builds[i] = weapon::WeaponBuild::from_text(&c.builds[i]).screened(kind);
             kit.paints[i] = viewmodel::Paint::from_text(&c.paints[i]);
         }
         kit.primary = loadout_slot(&c.primary, kit.primary);
@@ -243,8 +285,10 @@ impl Kit {
             c.secondary_mags.min(LOADOUT_MAGS_MAX),
         ];
         kit.grenades = [
-            c.frags.min(LOADOUT_FRAGS_MAX),
-            c.smokes.min(LOADOUT_SMOKES_MAX),
+            c.frags.min(LOADOUT_GRENADES_MAX[0]),
+            c.smokes.min(LOADOUT_GRENADES_MAX[1]),
+            c.flashes.min(LOADOUT_GRENADES_MAX[2]),
+            c.molotovs.min(LOADOUT_GRENADES_MAX[3]),
         ];
         kit.meds = [c.bandages, c.medkits, c.painkillers].map(|count| count.min(LOADOUT_MEDS_MAX));
         kit
@@ -421,15 +465,30 @@ fn armory_stats(
             }
         })
         .collect();
-    // Armour penetration is a property of the platform, not of the build — no
-    // part moves it — but it is the number that answers "how does this hold
-    // up against a Juggernaut" (reference §17.2③), so it rides with the stat
-    // lines. `good: 0` because there is nothing here to have improved on.
+    // Armour penetration is a property of the platform, but not of the platform
+    // alone: no part moves it, and the round does — a hollow point gives up three
+    // quarters of it. It is the number that answers "how does this hold up
+    // against a Juggernaut" (reference §17.2③), so it rides with the stat lines
+    // and now carries a delta like the rest of them. The cartridge names where
+    // the figure starts (reference §23).
+    let pen_of = |build: &weapon::WeaponBuild| kind.armor_pen() * build.load.pen_mul();
+    let (pen_was, pen_now) = (pen_of(against), pen_of(fitted));
+    let pen_eps = pen_was.abs().max(1.0) * 1.0e-3;
     stats.push(hud::ArmoryStat {
         label: i18n::t(Key::StatArmorPen).to_string(),
-        text: format!("{:.0}%", kind.armor_pen() * 100.0),
-        was: None,
-        good: 0,
+        text: format!(
+            "{} {:.0}%",
+            i18n::t(crate::weapon::ammo_type(kind.chamber()).name),
+            pen_now * 100.0
+        ),
+        was: weigh.then(|| format!("{:.0}%", pen_was * 100.0)),
+        good: if pen_now > pen_was + pen_eps {
+            1
+        } else if pen_now < pen_was - pen_eps {
+            -1
+        } else {
+            0
+        },
     });
     stats
 }
@@ -461,7 +520,11 @@ fn empty_slot_name(kind: weapon::WeaponKind, slot: weapon::SlotId) -> String {
 
 /// What a slot currently holds, for its row: the part's name, or the empty
 /// option's name — see `empty_slot_name`.
-fn fitted_name(kind: weapon::WeaponKind, build: &weapon::WeaponBuild, slot: weapon::SlotId) -> String {
+fn fitted_name(
+    kind: weapon::WeaponKind,
+    build: &weapon::WeaponBuild,
+    slot: weapon::SlotId,
+) -> String {
     fitted_part(build, slot)
         .and_then(weapon::part_label)
         .map(|(en, zh)| pick(en, zh).to_string())
@@ -647,6 +710,8 @@ fn config_of(game: &Game) -> config::Config {
     config.secondary_mags = game.kit.ammo_mags[1];
     config.frags = game.kit.grenades[0];
     config.smokes = game.kit.grenades[1];
+    config.flashes = game.kit.grenades[2];
+    config.molotovs = game.kit.grenades[3];
     config.bandages = game.kit.meds[0];
     config.medkits = game.kit.meds[1];
     config.painkillers = game.kit.meds[2];
@@ -680,7 +745,9 @@ fn apply_settings(game: &mut Game, audio: &mut audio::Audio) {
     }
     game.window_state = want;
     audio.set_master(game.settings.volume);
-    config::save(&config_of(game));
+    // The settings screen is the only place the player asks for this write, so
+    // it is the one that gets told when it does not happen (review R3).
+    game.settings_save_failed = !config::save(&config_of(game));
 }
 
 /// The resolution row's presets: the sizes the game is framed for. The list is
@@ -957,13 +1024,25 @@ struct Game {
     /// effects list, so a firefight does not allocate a vector per frame for
     /// labels that expire in three quarters of a second.
     damage_labels: Vec<(Vec2, f32, bool)>,
+    /// The bodies the swing in flight has already opened on. One buffer for
+    /// the whole game, as with the two above; see `SwingMarks`.
+    swing_marks: SwingMarks,
     mission: &'static Mission,
     mission_index: usize,
     rng: Rng,
 
     armor: f32,
     stance: Stance,
-    ammo_grenades: [u32; 2],
+    ammo_grenades: [u32; 4],
+    /// The throwable in hand, if any, and which kind `G` takes out next.
+    grenade_hand: Option<Held>,
+    grenade_pick: usize,
+    /// The trajectory preview, rebuilt while something is in hand. A buffer here
+    /// rather than per frame, like `damage_labels`.
+    arc: Vec<Vec3>,
+    /// The burning volumes this frame, copied out of the level so the damage can
+    /// be worked out while the things it is worked out on are being changed.
+    fires: Vec<(Vec3, f32, f32)>,
     ammo_meds: [u32; 3],
     wheel: Option<Wheel>,
     /// Previous pointer position in window pixels, owned here so that
@@ -1040,6 +1119,9 @@ struct Game {
     menu_sel: usize,
     result_sel: usize,
     settings_sel: usize,
+    /// Set when a settings change could not be written to the config file, so
+    /// the screen that asked for the write can say so (review R3).
+    settings_save_failed: bool,
     /// The armory's screen state: which weapon kind and tab are selected, the
     /// row cursor, and the preview — rebuilt only when a choice moves.
     armory_kind: usize,
@@ -1121,12 +1203,17 @@ impl Game {
             fog: fog::Fog::load(),
             scratch: mesh::empty_mesh(),
             damage_labels: Vec::new(),
+            swing_marks: SwingMarks::default(),
             mission,
             mission_index: 0,
             rng: Rng::new(0x9E37_79B9),
             armor: 0.0,
             stance: Stance::Stand,
             ammo_grenades: grenades,
+            grenade_hand: None,
+            grenade_pick: 0,
+            arc: Vec::new(),
+            fires: Vec::new(),
             ammo_meds: meds,
             wheel: None,
             last_mouse: Vec2::ZERO,
@@ -1169,6 +1256,7 @@ impl Game {
             menu_sel: 0,
             result_sel: 0,
             settings_sel: 0,
+            settings_save_failed: false,
             armory_kind: 0,
             armory_tab: 0,
             armory_sel: 0,
@@ -1231,11 +1319,14 @@ impl Game {
         // You go in with what the armory packed; there is no resupply.
         self.ammo_grenades = self.kit.grenades;
         self.ammo_meds = self.kit.meds;
-        self.wheel = None;
-        self.mouse_ready = false;
-        self.trigger_armed = false;
+        // And with nothing in hand. A retry after dying with a throwable out is
+        // the case this is for: the hand was still holding one, so the first `G`
+        // of the new attempt *put it away* and read as a key that did nothing.
+        self.grenade_hand = None;
+        // A mission begins in the same state as it resumes: no input carried in
+        // from the menu, and no wheel from the last one (see `enter_play_state`).
+        self.enter_play_state();
         self.aim_on = false;
-        self.sprint = false;
         self.lean_cmd = 0.0;
         self.heal_t = 0.0;
         self.sanity_alarm = SanityAlarm::default();
@@ -1505,16 +1596,45 @@ impl Game {
     /// frame back applies the whole accumulated displacement as one turn.
     fn resume_play(&mut self) {
         self.phase = Phase::Playing;
-        self.trigger_armed = false;
+        self.enter_play_state();
+    }
+
+    /// Swallows the input the screen being left behind was still holding.
+    ///
+    /// The same four things have to be dropped every time play starts or
+    /// resumes, and for one reason: whatever the player was holding belonged to
+    /// the screen, and a frame of simulation that carries it over fires a shot
+    /// nobody asked for. It is written once because doing it separately in each
+    /// place is exactly how the overlay path came to be missing the trigger —
+    /// the pause menu had it, and the overlay did not (review R4).
+    ///
+    /// The wheel goes with them. `simulate` is not running while a screen is
+    /// up, so the release that would have closed it happens in a frame that is
+    /// not being simulated; a wheel left open holds the view still for good and
+    /// draws over the screen (review R2).
+    fn enter_play_state(&mut self) {
         self.mouse_ready = false;
-        // Latched input is dropped on the way back in, for the same reason the
-        // trigger is: whatever the player was holding when they opened the menu
-        // is not something they are still asking for now.
+        self.trigger_armed = false;
         self.sprint = false;
+        self.wheel = None;
     }
 
     fn say(&mut self, text: impl Into<String>) {
         self.toast = Some((text.into(), 1.6));
+    }
+
+    /// Ends a healing channel, and says so when there was one to end.
+    ///
+    /// The message existed for the movement path alone, so the two ways a
+    /// player actually loses a heal — pulling the trigger and taking a hit —
+    /// cut the channel in silence while the `HEALING — …` line went on
+    /// counting down to nothing (review R14). Asked this way, a shot or a hit
+    /// with no channel running says nothing at all.
+    fn break_heal(&mut self) {
+        if self.heal_t > 0.0 {
+            self.heal_t = 0.0;
+            self.say(i18n::t(Key::HealInterrupted));
+        }
     }
 
     /// Starts a healing channel for the given medical item.
@@ -1542,18 +1662,161 @@ impl Game {
         audio.play(Sfx::Healing);
     }
 
-    fn throw_grenade(&mut self, index: usize, audio: &audio::Audio) {
-        if index >= GRENADE_KINDS.len() || self.ammo_grenades[index] == 0 {
-            self.say(i18n::t(Key::NoGrenades));
+    /// The throwable in hand, as `(kind, pin out, fuse left)`.
+    fn held_grenade(&self) -> Option<(GrenadeKind, bool, f32)> {
+        self.grenade_hand
+            .as_ref()
+            .map(|h| (GRENADE_KINDS[h.index], h.live, h.fuse))
+    }
+
+    /// Whether the wheel of kinds is really up.
+    ///
+    /// The wheel exists from the moment `G` goes down, but it is only *shown* —
+    /// and the mission's pointer only handed over — once the press is long
+    /// enough to be a choice of kind rather than the tap that takes a throwable
+    /// out or puts it back. Without this a tap flashes a free cursor for the few
+    /// frames it takes to tell the two apart.
+    fn wheel_showing(&self) -> bool {
+        self.wheel.as_ref().is_some_and(|w| w.held > WHEEL_OPEN)
+    }
+
+    /// Brings kind `index` to hand, or tells the hand no.
+    ///
+    /// An empty kind falls back to the next one the pouch does have rather than
+    /// refusing: a hand that asked for a smoke and has none wants the frag, and
+    /// "no grenades" is only true when there really are none.
+    ///
+    /// A refusal is a click and nothing else. The thrown-away message said "the
+    /// pin is out, throw it" over a grenade that is visibly still in the hand
+    /// with its fuse lit on the arc; the state is already the answer, and a line
+    /// of text is one more thing over the middle of the screen at exactly the
+    /// moment the player is looking at it.
+    fn take_grenade(&mut self, index: usize, audio: &audio::Audio) {
+        if index >= GRENADE_KINDS.len() {
+            return;
+        }
+        if self.grenade_hand.as_ref().is_some_and(|h| h.live) {
+            // A live one owns the hand: it is thrown, not swapped away.
             audio.play(Sfx::UiBack);
             return;
         }
-        let eye = self.player.eye();
+        let index = match self.ammo_grenades[index] {
+            0 => match self.ammo_grenades.iter().position(|n| *n > 0) {
+                Some(other) => other,
+                None => {
+                    self.say(i18n::t(Key::NoGrenades));
+                    audio.play(Sfx::UiBack);
+                    return;
+                }
+            },
+            _ => index,
+        };
+        self.grenade_pick = index;
+        // The gun is not being held any more, so a burst it still owed is not
+        // owed: it would otherwise wait for the throw and fire itself then.
+        self.arsenal.active_weapon_mut().cancel_burst();
+        self.grenade_hand = Some(Held {
+            index,
+            live: false,
+            fuse: GRENADE_KINDS[index].fuse(),
+        });
+        audio.play(Sfx::UiMove);
+    }
+
+    /// `G` tapped: take one out, or put the one in hand back.
+    fn toggle_grenade_in_hand(&mut self, audio: &audio::Audio) {
+        match &self.grenade_hand {
+            Some(held) if held.live => {
+                // Pulling the pin was the decision, and it has no undo: throw
+                // it, or it goes off where it stands.
+                audio.play(Sfx::UiBack);
+            }
+            Some(_) => {
+                self.grenade_hand = None;
+                audio.play(Sfx::UiClick);
+            }
+            None => self.take_grenade(self.grenade_pick, audio),
+        }
+    }
+
+    /// The left button, with something in hand: pull the pin if there is one to
+    /// pull, otherwise throw.
+    ///
+    /// The click is the throwable's and the gun must not read the same one.
+    /// `trigger_armed` is the latch the firing path uses to swallow a click whose
+    /// button is still down, and a throw leaves the button held for as long as it
+    /// takes to let go of it — which on a full-auto weapon is several rounds into
+    /// the wall behind whatever the grenade was aimed at.
+    ///
+    /// A kind with no pin — a bottle — is thrown by the click that would have
+    /// armed it, because there is nothing to arm and a first click that did
+    /// nothing would read as a dropped input.
+    fn use_grenade_in_hand(&mut self, audio: &audio::Audio) {
+        let Some(held) = &mut self.grenade_hand else {
+            return;
+        };
+        self.trigger_armed = false;
+        let kind = GRENADE_KINDS[held.index];
+        if !held.live && kind.pin() {
+            held.live = true;
+            // The pin's click, not a bang. The curated dry-fire recording is
+            // exactly a small hard metal click, which is what this is.
+            audio.play(Sfx::ReloadEmpty);
+            return;
+        }
+        self.throw_grenade(audio);
+    }
+
+    /// Throws what is in hand, with whatever the fuse has left.
+    ///
+    /// A refused throw — the field is already holding `MAX_LIVE` — puts it back
+    /// in the hand and leaves the count alone, because nothing left the pouch.
+    fn throw_grenade(&mut self, audio: &audio::Audio) {
+        let Some(held) = self.grenade_hand.take() else {
+            return;
+        };
+        let kind = GRENADE_KINDS[held.index];
+        // Out of the hand, not out of the eye — see `hand_pos`, which is fed the
+        // same animated position the hand is drawn at. On this frame the hand is
+        // up, so it is `HAND_OFFSET`; if it were not, the throw would start
+        // where the arc does rather than where the hand is.
+        let from = hand_pos(&self.player, self.viewmodel.throw_hand());
         let dir = self.player.look_dir();
-        self.grenades.throw(GRENADE_KINDS[index], eye, dir);
-        self.ammo_grenades[index] -= 1;
+        if !self
+            .grenades
+            .throw_with_fuse(kind, from, dir, held.fuse.max(0.0))
+        {
+            self.grenade_hand = Some(held);
+            return;
+        }
+        self.ammo_grenades[held.index] -= 1;
+        self.grenade_pick = held.index;
         self.viewmodel.trigger_grenade_throw();
         audio.play(Sfx::UiMove);
+    }
+
+    /// One frame of the hand: the fuse burns, and a fuse that runs out goes off
+    /// where the player is standing.
+    ///
+    /// The blast is the ordinary one — same falloff, same armour, same line of
+    /// sight — so what cooks off is exactly what would have landed, at the eye
+    /// rather than at the far end of a throw.
+    fn update_grenade_hand(&mut self, dt: f32) {
+        let Some(held) = &mut self.grenade_hand else {
+            return;
+        };
+        if !held.live {
+            return;
+        }
+        held.fuse -= dt;
+        if held.fuse > 0.0 {
+            return;
+        }
+        let index = held.index;
+        let at = self.player.eye();
+        self.grenade_hand = None;
+        self.ammo_grenades[index] = self.ammo_grenades[index].saturating_sub(1);
+        self.grenades.drop_live(GRENADE_KINDS[index], at);
     }
 
     fn select_slot(&mut self, i: usize) {
@@ -1904,6 +2167,9 @@ mod tests {
             lean_toggle: false,
             invert_y: true,
             show_fps: true,
+            show_arc: false,
+            auto_pickup: false,
+            auto_use: true,
             fullscreen: true,
             width: 1920,
             height: 1080,
@@ -2145,7 +2411,7 @@ mod tests {
             primary: Some(weapon::WeaponKind::Sniper),
             secondary: Some(weapon::WeaponKind::Shotgun),
             ammo_mags: [6, 3],
-            grenades: [0, 3],
+            grenades: [0, 3, 2, 1],
             meds: [5, 2, 0],
             ..Kit::issued()
         };
@@ -2156,6 +2422,8 @@ mod tests {
             secondary_mags: kit.ammo_mags[1],
             frags: kit.grenades[0],
             smokes: kit.grenades[1],
+            flashes: kit.grenades[2],
+            molotovs: kit.grenades[3],
             bandages: kit.meds[0],
             medkits: kit.meds[1],
             painkillers: kit.meds[2],
@@ -2188,8 +2456,52 @@ mod tests {
             issued.meds,
             [MED_KINDS[0].2, MED_KINDS[1].2, MED_KINDS[2].2]
         );
-        assert_eq!(issued.grenades, [2, 1]);
+        assert_eq!(issued.grenades, [2, 1, 1, 1]);
         assert_eq!(issued.ammo_mags, [4, 0]);
+    }
+
+    /// The radial sectors: the first is up and they run clockwise, so the wheel
+    /// a player aims and the entry that gets picked are the same one. The seams
+    /// between sectors are where a wheel misbehaves, so both sides of every one
+    /// of them is checked.
+    #[test]
+    fn the_wheel_sectors_run_clockwise_from_the_top() {
+        /// A pointer `r` out from the centre, `angle` clockwise from up.
+        fn at(angle: f32, r: f32) -> Vec2 {
+            vec2(angle.sin() * r, -angle.cos() * r)
+        }
+        let quarter = std::f32::consts::FRAC_PI_2;
+        for (angle, want) in [
+            (0.0, 0),
+            (quarter, 1),
+            (2.0 * quarter, 2),
+            (3.0 * quarter, 3),
+            (quarter * 0.5, 0),
+            (quarter * 1.5, 1),
+        ] {
+            assert_eq!(sector_of(at(angle, 100.0), 4), Some(want), "at {angle}");
+        }
+
+        let step = std::f32::consts::TAU / 4.0;
+        for i in 0..4 {
+            let edge = step * i as f32;
+            assert_eq!(
+                sector_of(at(edge + 0.02, 100.0), 4),
+                Some(i),
+                "just inside sector {i}"
+            );
+            assert_eq!(
+                sector_of(at(edge + step - 0.02, 100.0), 4),
+                Some(i),
+                "just before the far edge of sector {i}"
+            );
+        }
+
+        // The middle of the wheel is not an entry, and a wheel with nothing in it
+        // has nothing to point at.
+        assert_eq!(sector_of(vec2(0.0, -WHEEL_DEAD_ZONE + 1.0), 4), None);
+        assert_eq!(sector_of(vec2(0.0, -WHEEL_DEAD_ZONE - 1.0), 4), Some(0));
+        assert_eq!(sector_of(vec2(0.0, -100.0), 0), None);
     }
 
     /// The loadout slots walk "none" and the six guns, wrapping both ways; a
@@ -2441,6 +2753,208 @@ mod tests {
         assert_eq!(unreleased(&rosters, 2, 0), 0);
         assert_eq!(unreleased(&rosters, 1, 9), 0);
     }
+
+    /// A knife swing is three rays into one arc with no spread between them, so
+    /// without this every swing landed three times on the same body. What has to
+    /// hold is that the marks are per-swing: each body opens once, and the next
+    /// swing starts clean (review R1).
+    #[test]
+    fn a_swing_opens_on_each_body_once() {
+        let mut marks = SwingMarks::default();
+        marks.begin(3);
+        assert!(
+            !marks.already_hit(1),
+            "the first reach at a body is not a repeat"
+        );
+        assert!(marks.already_hit(1), "the same swing reached it twice");
+        // Bodies are independent of one another.
+        assert!(!marks.already_hit(2));
+        assert!(marks.already_hit(2));
+        // The next swing has its own list.
+        marks.begin(3);
+        assert!(!marks.already_hit(1));
+        // A body list that shrank leaves no stale marks, and the fresh list is
+        // the length of the new one.
+        marks.begin(1);
+        assert!(!marks.already_hit(0));
+        assert_eq!(marks.seen.len(), 1);
+    }
+
+    /// Every material the world can be dressed in has a voice of its own.
+    ///
+    /// The table is walked against `Surface::ALL` — the list the world is
+    /// actually built from — rather than written out as a second list of
+    /// assertions, so a surface added later cannot quietly play the generic
+    /// hit. A new `Surface` variant is already a compile error in `impact_sfx`;
+    /// this is the other half, that the answer it returns is not the fallback
+    /// (review R17).
+    #[test]
+    fn every_surface_has_an_impact_of_its_own() {
+        use surface::Surface::*;
+        let table = [
+            (Concrete, Sfx::HitConcrete),
+            (Tiles, Sfx::HitConcrete),
+            (MetalPlate, Sfx::HitMetal),
+            (Corrugated, Sfx::HitMetal),
+            (MetalRusty, Sfx::HitMetalHeavy),
+            (Crate, Sfx::HitWood),
+        ];
+        let covered: Vec<surface::Surface> = table.iter().map(|(s, _)| *s).collect();
+        for s in surface::Surface::ALL {
+            assert!(
+                covered.contains(&s),
+                "{s:?} is in the world's list and not in this one"
+            );
+        }
+        for (s, want) in table {
+            assert_eq!(impact_sfx(Some(s)), want, "{s:?} plays the wrong impact");
+            assert_ne!(want, Sfx::HitWorld, "{s:?} has no voice of its own");
+        }
+        // A wall whose material could not be worked out keeps the field
+        // recording: the material set is additive, never a hole in the mix.
+        assert_eq!(impact_sfx(None), Sfx::HitWorld);
+    }
+
+    /// The bang is chosen by distance: the biggest take within arm's reach, the
+    /// shipped one across the middle of the arena, and the recording with no
+    /// crack in it from the far side.
+    #[test]
+    fn the_blast_gets_bigger_the_closer_it_is() {
+        assert_eq!(blast_sfx(0.0), Sfx::ExplosionLarge);
+        assert_eq!(blast_sfx(11.9), Sfx::ExplosionLarge);
+        assert_eq!(blast_sfx(12.0), Sfx::Explosion);
+        assert_eq!(blast_sfx(34.9), Sfx::Explosion);
+        assert_eq!(blast_sfx(35.0), Sfx::ExplosionDistant);
+        assert_eq!(blast_sfx(200.0), Sfx::ExplosionDistant);
+        // Nothing anywhere in the range is left silent.
+        let mut d = 0.0;
+        while d < 200.0 {
+            let _ = blast_sfx(d);
+            d += 0.5;
+        }
+    }
+    /// A light behind a unit is a light it does not see.
+    ///
+    /// `looking_at` is the flash's whole defence, so it has to be a cone: a test
+    /// that only checked "is it nearby" would pass for a flash thrown behind an
+    /// enemy, which is the one throw that is supposed to be wasted.
+    #[test]
+    fn a_flash_between_the_shoulder_blades_is_a_wasted_flash() {
+        // The game's own convention, from `util::yaw_of`: a unit at yaw 0 faces
+        // -Z.
+        let unit = Vec3::ZERO;
+        let ahead = vec3(0.0, 0.0, -6.0);
+        let behind = vec3(0.0, 0.0, 6.0);
+        let beside = vec3(6.0, 0.0, 0.0);
+        assert!(
+            looking_at(unit, 0.0, ahead),
+            "facing it is not looking at it"
+        );
+        assert!(
+            !looking_at(unit, 0.0, behind),
+            "a flash behind the head blinds"
+        );
+        assert!(
+            !looking_at(unit, 0.0, beside),
+            "a light at a right angle is outside the cone"
+        );
+        // And a unit turned to face it does see it, whatever direction that is.
+        for at in [ahead, behind, beside] {
+            let yaw = util::yaw_of(at);
+            assert!(
+                looking_at(unit, yaw, at),
+                "{at:?} is not seen after turning to face it"
+            );
+        }
+        // The eye height is not what decides it: the yaw is a level heading.
+        assert!(looking_at(vec3(0.0, 1.6, 0.0), 0.0, vec3(0.0, 0.2, -6.0)));
+    }
+    /// The throw arc is a line, and not a row of dots along one.
+    ///
+    /// The property is that one triangle spans each segment: a prism has a face
+    /// with corners at both ends of it, where a mark at each sample has every
+    /// corner at one end or the other. That is the difference a still frame
+    /// hides and motion shows, which is how a box per sample got shipped once.
+    #[test]
+    fn the_throw_arc_is_drawn_as_a_line() {
+        // A throw-shaped curve: out and up, over the top, and down.
+        let path: Vec<Vec3> = (0..48)
+            .map(|i| {
+                let t = i as f32 * 0.05;
+                vec3(t * 14.0, 1.6 + t * 12.0 - 9.0 * t * t, -t * 21.0)
+            })
+            .collect();
+        let mut mesh = mesh::empty_mesh();
+        arc_mesh(&path, WHITE, &mut mesh);
+        assert!(!mesh.vertices.is_empty(), "the arc drew nothing");
+        assert!(!mesh.indices.is_empty(), "the arc has no faces");
+
+        let near = |v: Vec3, at: Vec3| v.distance(at) < ARC_WIDTH * 2.5;
+        for w in path.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let spans = mesh.indices.chunks_exact(3).any(|t| {
+                let p: Vec<Vec3> = t
+                    .iter()
+                    .map(|i| mesh.vertices[*i as usize].position)
+                    .collect();
+                p.iter().any(|v| near(*v, a)) && p.iter().any(|v| near(*v, b))
+            });
+            assert!(spans, "no face spans the segment {a:?}..{b:?}");
+        }
+
+        // And the mark is at the far end, where the throw would land.
+        let end = path[path.len() - 1];
+        assert!(
+            mesh.vertices
+                .iter()
+                .any(|v| v.position.distance(end) < ARC_MARK * 2.0),
+            "the landing mark is not at the landing point"
+        );
+    }
+    /// The hand drawn in the view and the hand the throw comes out of are one
+    /// point.
+    ///
+    /// Two pieces of code with two different projections agree about where the
+    /// off hand is: the viewmodel draws the thing there in its own space, and
+    /// `hand_pos` puts that same point into the world for the throw and its arc.
+    /// They are one constant and two bases, so this is the check that the two
+    /// bases really are the same view — a few pixels of disagreement is rounding,
+    /// and a metre of it is the arc starting somewhere the hand is not.
+    #[test]
+    fn the_drawn_hand_and_the_throwing_hand_are_the_same_point() {
+        let (w, h) = (1280.0f32, 720.0f32);
+        let player = Player::new(vec3(2.0, 1.5, -4.0));
+        let fovy = player.fovy();
+        let f = (h * 0.5) / (fovy * 0.5).tan();
+
+        // Where the viewmodel's own projection puts it.
+        let off = viewmodel::HAND_OFFSET;
+        let drawn = vec2(w * 0.5 + (off.x / off.z) * f, h * 0.5 - (off.y / off.z) * f);
+
+        // And where the world point lands through the 3D camera's own matrix.
+        let vp = view_projection(
+            player.eye(),
+            player.eye() + player.look_dir(),
+            Vec3::Y,
+            fovy,
+            w,
+            h,
+        );
+        let thrown = project_to_screen(&vp, hand_pos(&player, viewmodel::HAND_OFFSET), w, h)
+            .expect("the throwing hand is behind the camera");
+        assert!(
+            (drawn - thrown).length() < 8.0,
+            "the hand is drawn at {drawn:?} and throws from {thrown:?}"
+        );
+
+        // And it is not merely that both are the same as the eye: the hand is
+        // off the middle, which is where the arc has to start.
+        let centre = vec2(w * 0.5, h * 0.5);
+        assert!(
+            (drawn - centre).length() > 60.0,
+            "the hand is drawn on the crosshair, where the arc already is"
+        );
+    }
 }
 
 /// The window's opening state, read from the settings file.
@@ -2533,6 +3047,87 @@ fn draw_sunken_sky(sky: Color) {
     draw_bands(surface_glow(sky), murk_colour(sky));
 }
 
+/// The sound a round makes on a wall: the wall's own material where it has a
+/// voice, and the field recording of a metal gallery behind it where the answer
+/// is unknown.
+///
+/// The four material takes sat unused in `assets/sounds/variants/` under
+/// exactly this name — "optional material for a future surface-aware impact
+/// system" — because until `Level` kept the material of each solid there was
+/// nothing here to choose with (review R17).
+fn impact_sfx(surface: Option<surface::Surface>) -> Sfx {
+    use surface::Surface;
+    match surface {
+        Some(Surface::Concrete | Surface::Tiles) => Sfx::HitConcrete,
+        Some(Surface::MetalPlate | Surface::Corrugated) => Sfx::HitMetal,
+        Some(Surface::MetalRusty) => Sfx::HitMetalHeavy,
+        Some(Surface::Crate) => Sfx::HitWood,
+        None => Sfx::HitWorld,
+    }
+}
+
+/// The thickness of the throw arc at the hand, in metres, tapering along the
+/// flight. A tracer is 0.012; this is nearly twice that because it is a line
+/// being *read* rather than a streak being glimpsed.
+const ARC_WIDTH: f32 = 0.022;
+/// The half-extent of the mark left where the throw would land. The one place
+/// on the arc that is a marker rather than a line, because it is the one place
+/// the player is aiming at.
+const ARC_MARK: f32 = 0.05;
+
+/// Where a throwable leaves the hand, in the world.
+///
+/// `offset` is where the hand is drawn, in the view's own right/up/forward
+/// metres — `ViewModel::throw_hand`, which is `viewmodel::HAND_OFFSET` once the
+/// hand has come up and is below it while it is coming. One point and two
+/// consumers, so the arc starts at the thing in the hand and the hand that
+/// throws it is the hand on screen: the two are the same point rather than two
+/// that nearly agree, and that is true *while the hand is moving* as well as at
+/// rest. The alternative was to hand the animated position to the drawing only,
+/// which left the line hanging in the air over a grenade that was still on its
+/// way up.
+///
+/// The eye is deliberately *not* the origin of a throw: what comes out of a
+/// hand 13 cm to the right and 13 cm below the eye does not travel along the
+/// sight line, and an arc drawn from the eye hides that.
+fn hand_pos(player: &Player, offset: Vec3) -> Vec3 {
+    let fwd = player.look_dir();
+    let right = fwd.cross(Vec3::Y).normalize_or_zero();
+    let up = right.cross(fwd).normalize_or_zero();
+    player.eye() + right * offset.x + up * offset.y + fwd * offset.z
+}
+
+/// Whether a unit standing at `from` and facing `yaw` is looking at `at`.
+///
+/// The same shape of test the sanity drain uses: a cone and not a hemisphere,
+/// because a light behind you is a light you are not looking at. `yaw_of` in
+/// `util` is the inverse of this — a yaw is `atan2(-x, -z)` of the direction it
+/// faces, so the direction it faces is `(-sin, 0, -cos)`.
+fn looking_at(from: Vec3, yaw: f32, at: Vec3) -> bool {
+    let forward = vec3(-yaw.sin(), 0.0, -yaw.cos());
+    let to = vec3(at.x - from.x, 0.0, at.z - from.z).normalize_or_zero();
+    forward.dot(to) > 0.35
+}
+
+/// The bang a pressure wave gets, by how far off it went.
+///
+/// Three recordings rather than one played quieter: the pack's longest crunch
+/// within arm's reach, the shipped one across the middle of the arena, and the
+/// sub-bass take from the far side, where the crack never reaches you and the
+/// tail does. Attenuation can turn a sound down; it cannot take a transient out
+/// of it.
+fn blast_sfx(dist: f32) -> Sfx {
+    const CLOSE: f32 = 12.0;
+    const FAR: f32 = 35.0;
+    if dist < CLOSE {
+        Sfx::ExplosionLarge
+    } else if dist < FAR {
+        Sfx::Explosion
+    } else {
+        Sfx::ExplosionDistant
+    }
+}
+
 /// Ray against the player's own body box, for enemy fire. Uses the current
 /// stance height so crouching genuinely presents a smaller target.
 fn ray_player(player: &Player, origin: Vec3, dir: Vec3) -> Option<f32> {
@@ -2609,6 +3204,37 @@ fn apply_player_damage(
     audio.play(Sfx::PlayerHurt);
 }
 
+/// The bodies one melee swing has already opened on.
+///
+/// A swing is three rays into one arc, and the knife's spread is zero, so all
+/// three travel the same line and would each run the whole damage loop — one
+/// swing for three hits. This records what the swing in flight has reached so
+/// the second and third ray can drop out (review R1). It is only ever used for
+/// melee: pellets of one shotgun round are separate projectiles and may each
+/// land on the same body.
+#[derive(Default)]
+struct SwingMarks {
+    seen: Vec<bool>,
+}
+
+impl SwingMarks {
+    /// Starts a swing over `bodies` hostiles, clearing the previous one.
+    fn begin(&mut self, bodies: usize) {
+        self.seen.clear();
+        self.seen.resize(bodies, false);
+    }
+
+    /// True when this swing has already reached `index`.
+    fn already_hit(&mut self, index: usize) -> bool {
+        match self.seen.get_mut(index) {
+            Some(seen) => std::mem::replace(seen, true),
+            // Only ever called with an index out of `enemies`; treating an
+            // unknown body as fresh is the choice that cannot lose a hit.
+            None => false,
+        }
+    }
+}
+
 /// Returns true only when a shot was actually fired, so the caller can keep
 /// the gunshot audio in step with the real rate of fire.
 fn fire_player_shot(game: &mut Game, audio: &audio::Audio, pressed: bool, held: bool) -> bool {
@@ -2630,66 +3256,96 @@ fn fire_player_shot(game: &mut Game, audio: &audio::Audio, pressed: bool, held: 
     );
     let headshot = s.headshot_mult;
 
-    // A knife is a swing, not a shot: short reach, no falloff, no tracers.
+    // A knife is a swing, not a shot: short reach, no falloff, no tracers. It
+    // counts as one shot all the same, because it is one attack — a swing that
+    // is never counted leaves the result screen with no shots at all for a
+    // knife-only run (review R9).
     let (rays, range) = if s.melee {
         (3, 2.6)
     } else {
         (s.pellets, weapon::MAX_RANGE)
     };
-    if !s.melee {
-        game.shots_fired += s.pellets;
+    game.shots_fired += if s.melee { 1 } else { s.pellets };
+    if s.melee {
+        game.swing_marks.begin(game.enemies.len());
     }
 
+    // What a round makes of a lane rather than of a body (reference §23, axis 3).
+    // A knife gets the plain round: one target and no cover budget, so a swing
+    // stops in the first thing it meets — which is also why its swing is three
+    // rays into one arc.
+    let round = game.arsenal.active_weapon().penetration();
     for _ in 0..rays {
         let dir = game.rng.cone(game.player.look_dir(), spread);
-        let hit = combat::hitscan(&game.level, &game.enemies, eye, dir, range);
-        match hit.kind {
-            combat::HitKind::World => {
-                if !s.melee {
-                    let n = (eye - hit.point).normalize_or_zero();
-                    game.effects.spark(
-                        hit.point,
-                        n,
-                        Color::new(1.0, 0.85, 0.5, 1.0),
-                        4,
-                        &mut game.rng,
-                    );
-                    audio.play_at(Sfx::HitWorld, hit.dist);
-                }
+        let lane = combat::hitscan_through(&game.level, &game.enemies, eye, dir, range);
+        // What the round reaches, what is left of the shot when it arrives, and
+        // where it stops. All of that is `Penetration`'s business and none of it
+        // needs the world to answer (see `combat::sweep`).
+        let swept = combat::sweep(&lane, round);
+
+        // A round that reached anybody counts one hit, however many bodies it
+        // crossed: this feeds the share of shots that connected, and a round
+        // through two hostiles is still one round (review R9).
+        let mut landed = false;
+        for (body, share) in &swept.hits {
+            // The arc's three rays run the same line, so the swing must open on
+            // each body once (review R1).
+            if s.melee && game.swing_marks.already_hit(body.index) {
+                continue;
             }
-            combat::HitKind::Enemy { index, head } => {
-                game.shots_hit += 1;
-                let dmg = game.arsenal.active_weapon().damage_at(hit.dist)
-                    * if head { headshot } else { 1.0 };
-                // The weapon's own penetration number goes in with the shot
-                // (reference §17.2③): armour stops less of a rifle round than
-                // of a pistol one, visibly.
-                let pen = game.arsenal.active_weapon().kind.armor_pen();
-                let died = game.enemies[index].take_damage(dmg, pen);
-                game.effects.blood(
-                    hit.point,
-                    dir,
-                    Color::new(0.55, 0.10, 0.10, 1.0),
-                    &mut game.rng,
-                );
-                game.effects.damage_number(hit.point, dmg, head);
-                if head {
-                    game.effects.head_marker = 1.0;
-                    audio.play(Sfx::HitHead);
-                } else {
-                    game.effects.hit_marker = 1.0;
-                    audio.play(Sfx::HitFlesh);
-                }
-                if died {
-                    kill_enemy(game, index, audio);
-                }
-                // A knife only strikes the first thing in its arc.
-                if s.melee {
-                    break;
-                }
+            landed = true;
+            // What is left of the shot when it arrives: the distance's share,
+            // and the share it carried through everything in the way.
+            let dmg = game.arsenal.active_weapon().damage_at(body.dist)
+                * if body.head { headshot } else { 1.0 }
+                * share;
+            // The weapon's own penetration number goes in with the shot
+            // (reference §17.2③): armour stops less of a rifle round than of a
+            // pistol one, visibly. The round has the last word on it, so it is
+            // asked of the weapon and not of the kind: a hollow point carries a
+            // quarter of what the same gun carries loaded with ball (§23).
+            let pen = game.arsenal.active_weapon().armor_pen();
+            let died = game.enemies[body.index].take_damage(dmg, pen);
+            game.effects.blood(
+                body.point,
+                dir,
+                Color::new(0.55, 0.10, 0.10, 1.0),
+                &mut game.rng,
+            );
+            game.effects.damage_number(body.point, dmg, body.head);
+            if body.head {
+                game.effects.head_marker = 1.0;
+                audio.play(Sfx::HitHead);
+            } else {
+                game.effects.hit_marker = 1.0;
+                audio.play(Sfx::HitFlesh);
+            }
+            if died {
+                kill_enemy(game, body.index, audio);
             }
         }
+        if landed {
+            game.shots_hit += 1;
+        }
+
         if !s.melee {
+            // Cover is the one thing that takes a mark: a round that stopped in a
+            // body never reached the wall behind it.
+            if swept.stopped_on_cover {
+                let n = (eye - swept.stop.point).normalize_or_zero();
+                game.effects.spark(
+                    swept.stop.point,
+                    n,
+                    Color::new(1.0, 0.85, 0.5, 1.0),
+                    4,
+                    &mut game.rng,
+                );
+                // What the wall is made of, asked of the wall: both the mark
+                // and the sound used to be the same for concrete, steel and
+                // crate (review R17).
+                let surface = game.level.material_behind(swept.stop.point, dir);
+                audio.play_at(impact_sfx(surface), swept.stop.dist);
+            }
             // Outgoing fire is the thin, pale strand. The two tracer looks are
             // built so they are told apart without colour: narrow and washed
             // out against the incoming one's wide, deep red — colour alone is
@@ -2697,11 +3353,14 @@ fn fire_player_shot(game: &mut Game, audio: &audio::Audio, pressed: bool, held: 
             // loses. It starts out along the barrel rather than at the eye;
             // see `TRACER_NEAR`. The reach clamp is for a shot into something
             // the muzzle is already touching, where the offset would otherwise
-            // start the strand beyond its own impact.
-            let reach = (hit.point - eye).length();
+            // start the strand beyond its own impact. It ends where the round
+            // stopped rather than where the ray did: in the body it stayed in, on
+            // the cover it could not cross, or away off the end of the lane when
+            // neither was enough to hold it.
+            let reach = (swept.stop.point - eye).length();
             game.effects.tracer(
                 eye + dir * TRACER_NEAR.min(reach * 0.9),
-                hit.point,
+                swept.stop.point,
                 Color::new(1.0, 0.97, 0.80, 1.0),
                 0.012,
             );
@@ -2713,8 +3372,8 @@ fn fire_player_shot(game: &mut Game, audio: &audio::Audio, pressed: bool, held: 
         game.player
             .add_recoil(s.recoil_pitch, s.recoil_yaw * jitter);
     }
-    // Firing breaks a healing channel.
-    game.heal_t = 0.0;
+    // Firing breaks a healing channel, and says so (review R14).
+    game.break_heal();
     true
 }
 
@@ -3062,7 +3721,7 @@ async fn main() {
     let saved = config::load();
     i18n::set_lang(saved.lang);
 
-    let fonts = hud::Fonts::load().await;
+    let fonts = hud::Fonts::load();
     let mut audio = audio::Audio::load().await;
     audio.set_master(saved.volume);
 
@@ -3254,7 +3913,7 @@ async fn main() {
                 // Rows in the order the change handler below reads them:
                 // 0 sensitivity, 1 mouse DPI, 2 volume, 3 aim mode, 4 lean mode,
                 // 5 invert Y, 6 show FPS, 7 fullscreen, 8 resolution, 9 language,
-                // 10 back.
+                // 10 pickup, 11 medicine, 12 trajectory, 13 back.
                 let rows = [
                     format!(
                         "{}  {:.2} · {:.1} cm/360",
@@ -3300,6 +3959,29 @@ async fn main() {
                         game.settings.height
                     ),
                     format!("{}  {}", i18n::t(Key::Language), i18n::lang().label()),
+                    format!(
+                        "{}  {}",
+                        i18n::t(Key::PickupMode),
+                        if game.settings.auto_pickup {
+                            i18n::t(Key::PickupAuto)
+                        } else {
+                            i18n::t(Key::PickupKey)
+                        }
+                    ),
+                    format!(
+                        "{}  {}",
+                        i18n::t(Key::UseMode),
+                        if game.settings.auto_use {
+                            i18n::t(Key::UseAuto)
+                        } else {
+                            i18n::t(Key::UseManual)
+                        }
+                    ),
+                    format!(
+                        "{}  {}",
+                        i18n::t(Key::Trajectory),
+                        if game.settings.show_arc { on } else { off }
+                    ),
                     i18n::t(Key::Back).to_string(),
                 ];
                 let resolution_row = 8;
@@ -3321,10 +4003,16 @@ async fn main() {
                 let right = is_key_pressed(KeyCode::Right);
                 clear_background(Color::new(0.03, 0.04, 0.06, 1.0));
                 draw_sky(Color::new(0.07, 0.08, 0.12, 1.0));
+                // The subtitle line is the one place this screen has for a
+                // status, and a save that did not happen is the only status it
+                // can have (review R3).
+                let notice = game
+                    .settings_save_failed
+                    .then(|| i18n::t(Key::SettingsNotSaved));
                 menu_rects = hud::draw_menu(
                     &fonts,
                     i18n::t(Key::Settings),
-                    None,
+                    notice,
                     &items,
                     game.settings_sel,
                 );
@@ -3376,6 +4064,9 @@ async fn main() {
                         7 => game.settings.fullscreen = !game.settings.fullscreen,
                         8 => step_resolution(&mut game.settings, forward),
                         9 => i18n::set_lang(i18n::lang().next()),
+                        10 => game.settings.auto_pickup = !game.settings.auto_pickup,
+                        11 => game.settings.auto_use = !game.settings.auto_use,
+                        12 => game.settings.show_arc = !game.settings.show_arc,
                         _ => {}
                     }
                     audio.play(Sfx::UiMove);
@@ -3471,31 +4162,70 @@ async fn main() {
                             i18n::t(Key::SecondaryWeapon),
                             gun(game.kit.secondary)
                         ));
+                        // The rounds behind the magazines, because "three
+                        // magazines" is not what a player packs: three of the
+                        // sixty-round quad-stack is 180 rounds and three of the
+                        // issued twenty is 60, and the old line could not tell
+                        // them apart.
+                        let rounds = |kind: Option<weapon::WeaponKind>| -> u32 {
+                            kind.map_or(0, |k| {
+                                weapon::resolve(weapon::def(k), &game.kit.builds[k.index()])
+                                    .as_stats()
+                                    .mag_size
+                            })
+                        };
+                        for (i, (key, kind)) in [
+                            (Key::PrimaryMags, game.kit.primary),
+                            (Key::SecondaryMags, game.kit.secondary),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            let count = game.kit.ammo_mags[i];
+                            rows.push(format!(
+                                "{}  {} {mags} · {} {}",
+                                i18n::t(key),
+                                count,
+                                count * rounds(kind),
+                                i18n::t(Key::Rounds)
+                            ));
+                        }
+                        // The sidearm is issued rather than chosen — a pistol with
+                        // no ammunition is a nuisance, not a decision (see
+                        // `SIDEARM_MAGS`) — but those are still rounds the player
+                        // is carrying, so they are counted with the rest.
                         rows.push(format!(
-                            "{}  {} {mags}",
-                            i18n::t(Key::PrimaryMags),
-                            game.kit.ammo_mags[0]
+                            "{}  {} {mags} · {} {}",
+                            i18n::t(Key::PistolMags),
+                            SIDEARM_MAGS,
+                            SIDEARM_MAGS * rounds(Some(weapon::WeaponKind::Pistol)),
+                            i18n::t(Key::Rounds)
                         ));
-                        rows.push(format!(
-                            "{}  {} {mags}",
-                            i18n::t(Key::SecondaryMags),
-                            game.kit.ammo_mags[1]
-                        ));
-                        rows.push(format!(
-                            "{}  {}",
-                            i18n::t(Key::GrenadeFrag),
-                            game.kit.grenades[0]
-                        ));
-                        rows.push(format!(
-                            "{}  {}",
-                            i18n::t(Key::GrenadeSmoke),
-                            game.kit.grenades[1]
-                        ));
+                        // One row per throwable, in `GRENADE_KINDS` order, so
+                        // the step table below can name them by number.
+                        for (i, k) in GRENADE_KINDS.iter().enumerate() {
+                            rows.push(format!("{}  {}", i18n::t(k.name()), game.kit.grenades[i]));
+                        }
                         for (i, key) in [Key::MedBandage, Key::MedKit, Key::MedPainkiller]
                             .iter()
                             .enumerate()
                         {
                             rows.push(format!("{}  {}", i18n::t(*key), game.kit.meds[i]));
+                        }
+                        // What each slot is carried loaded with. Two rows always,
+                        // so the step table can name them by number: a weapon
+                        // whose only round is the plain one says so and steps
+                        // nowhere (`WeaponKind::loads`). This is the tab for what
+                        // goes into the field, and the round goes in last
+                        // (reference §23).
+                        for (i, key) in [Key::PrimaryLoad, Key::SecondaryLoad].iter().enumerate() {
+                            let round = match [game.kit.primary, game.kit.secondary][i] {
+                                Some(kind) => {
+                                    i18n::t(game.kit.builds[kind.index()].load.name()).to_string()
+                                }
+                                None => i18n::t(Key::PartNone).to_string(),
+                            };
+                            rows.push(format!("{}  {}", i18n::t(*key), round));
                         }
                     }
                 }
@@ -3781,13 +4511,9 @@ async fn main() {
                                 };
                                 true
                             }
-                            i @ 5..=6 => {
-                                let at = i - 5;
-                                let n = if at == 0 {
-                                    LOADOUT_FRAGS_MAX + 1
-                                } else {
-                                    LOADOUT_SMOKES_MAX + 1
-                                };
+                            i @ 6..=9 => {
+                                let at = i - 6;
+                                let n = LOADOUT_GRENADES_MAX[at] + 1;
                                 let cur = game.kit.grenades[at].min(n - 1);
                                 game.kit.grenades[at] = if forward {
                                     (cur + 1) % n
@@ -3796,8 +4522,8 @@ async fn main() {
                                 };
                                 true
                             }
-                            i @ 7..=9 => {
-                                let at = i - 7;
+                            i @ 10..=12 => {
+                                let at = i - 10;
                                 let n = LOADOUT_MEDS_MAX + 1;
                                 let cur = game.kit.meds[at].min(n - 1);
                                 game.kit.meds[at] = if forward {
@@ -3806,6 +4532,30 @@ async fn main() {
                                     (cur + n - 1) % n
                                 };
                                 true
+                            }
+                            // The round each slot is carried with. A slot with no
+                            // gun in it, or a gun whose only round is the plain
+                            // one, has nowhere to step — and the row already says
+                            // which round that is rather than opening a list of
+                            // one.
+                            i @ 13..=14 => {
+                                let at = i - 13;
+                                match [game.kit.primary, game.kit.secondary][at] {
+                                    Some(kind) if kind.loads().len() > 1 => {
+                                        let loads = kind.loads();
+                                        let held = game.kit.builds[kind.index()].load;
+                                        let cur =
+                                            loads.iter().position(|l| *l == held).unwrap_or(0);
+                                        let next = if forward {
+                                            (cur + 1) % loads.len()
+                                        } else {
+                                            (cur + loads.len() - 1) % loads.len()
+                                        };
+                                        game.kit.builds[kind.index()].load = loads[next];
+                                        true
+                                    }
+                                    _ => false,
+                                }
                             }
                             _ => false,
                         },
@@ -3897,8 +4647,23 @@ async fn main() {
                 } else {
                     handle_overlay_keys(&mut game, &audio);
                     if game.overlay == Overlay::None {
-                        pointer::clip(true);
-                        pointer::show(false);
+                        // The mission owns the pointer — grabbed and hidden — but
+                        // a radial menu is *aimed* with it, so for as long as a
+                        // wheel is really up the mission hands it over: unclipped,
+                        // and *shown*. This line runs every frame, so getting the
+                        // polarity wrong here is invisible in the tests and
+                        // obvious on screen: `show(!loose)` hid the cursor exactly
+                        // while a wheel was open, which read as "the wheel works
+                        // but there is no pointer".
+                        //
+                        // `wheel_showing` and not `wheel.is_some`: the wheel
+                        // exists from the moment `G` or `V` goes down, and a tap
+                        // is only a tap once it is over. Handing the pointer over
+                        // for those few frames flashed a free cursor every time a
+                        // throwable came out.
+                        let loose = game.wheel_showing();
+                        pointer::clip(!loose);
+                        pointer::show(loose);
                         // Hit-stop slows the world, not the game: the pointer,
                         // the input edges and the HUD all keep the real clock,
                         // and only `simulate` sees the scaled rate. Timed here
@@ -4137,10 +4902,11 @@ fn handle_overlay_keys(game: &mut Game, audio: &audio::Audio) {
     if game.overlay != Overlay::Manual {
         game.close_manual();
     }
-    // The pointer roamed free while the overlay was up; start a fresh baseline
-    // so closing it does not snap the view.
+    // The pointer roamed free while the overlay was up and its buttons were
+    // live; coming back is the same transition as coming back from the pause
+    // menu, and it is handled by the same code (review R4).
     if was_open && game.overlay == Overlay::None {
-        game.mouse_ready = false;
+        game.enter_play_state();
     }
 }
 
@@ -4245,15 +5011,22 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
     // still reaches the result screen.
     let alive = game.player.alive;
     let alt = is_key_down(KeyCode::LeftAlt) || is_key_down(KeyCode::RightAlt);
+    // A throwable in hand puts the weapon away (see `viewmodel::HOLD_DROP`), and
+    // a rifle that is not in the hands cannot be aimed: the sights come down with
+    // it and come back when the thing goes back in the pouch. The latch a toggled
+    // aim keeps is still *read* while that is true, so the mode does not need a
+    // second press to catch up with a right button that was clicked meanwhile —
+    // and a grenade thrown while aiming does not leave the player zoomed in.
+    let hands_are_full = game.grenade_hand.is_some();
     let aiming = if !alive {
         false
     } else if game.settings.aim_toggle {
         if is_mouse_button_pressed(MouseButton::Right) {
             game.aim_on = !game.aim_on;
         }
-        game.aim_on
+        game.aim_on && !hands_are_full
     } else {
-        is_mouse_button_down(MouseButton::Right)
+        is_mouse_button_down(MouseButton::Right) && !hands_are_full
     };
     let free_look = alive && is_mouse_button_down(MouseButton::Middle);
 
@@ -4387,24 +5160,32 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
     };
     game.player.ads_fov = game.arsenal.active_weapon().stats().ads_fov;
     game.player.update(&game.level, dt, &input);
-    game.level.update_smoke(dt);
+    game.level.update_volumes(dt);
 
     if game.player.landing > 4.0 {
         audio.play(Sfx::Footstep);
     }
 
     // --- weapon selection ---------------------------------------------------
+    // A live throwable owns the hands: switching weapons with the pin out is
+    // refused rather than silently dropping it, because there is nothing to
+    // drop — it is going off either where it is thrown or where it is. With the
+    // pin still in, the switch goes through and the grenade goes back in the
+    // pouch.
+    let hands_busy = game.grenade_hand.as_ref().is_some_and(|h| h.live);
     for (i, k) in [KeyCode::Key1, KeyCode::Key2, KeyCode::Key3, KeyCode::Key4]
         .iter()
         .enumerate()
     {
-        if alive && is_key_pressed(*k) {
+        if alive && is_key_pressed(*k) && !hands_busy {
+            game.grenade_hand = None;
             game.select_slot(i);
             audio.play(Sfx::UiMove);
         }
     }
     let (_, wheel_scroll) = mouse_wheel();
-    if alive && wheel_scroll.abs() > 0.0 && game.wheel.is_none() {
+    if alive && wheel_scroll.abs() > 0.0 && !game.wheel_showing() && !hands_busy {
+        game.grenade_hand = None;
         game.arsenal.cycle(if wheel_scroll > 0.0 { 1 } else { -1 });
     }
 
@@ -4447,24 +5228,41 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
     }
 
     // --- grenades -----------------------------------------------------------
+    // `G` is the hand's key, and how long it is held is what it means. Tapped,
+    // it takes the throwable out or puts it back. Held past `WHEEL_OPEN`, it
+    // opens the wheel of kinds — and letting go of *that* only chooses, because
+    // throwing is the left button's job now (see `Held`).
+    //
+    // The pointer is handed over by the per-frame block once the wheel is
+    // really showing, not here: a tap would otherwise flash a free cursor for
+    // the few frames it takes to decide which of the two the press was.
     if alive && is_key_pressed(KeyCode::G) {
         game.wheel = Some(Wheel {
             kind: WheelKind::Grenade,
-            selected: 0,
+            // It opens on what is in hand, or on what `G` would take out.
+            selected: game
+                .grenade_hand
+                .as_ref()
+                .map_or(game.grenade_pick, |h| h.index),
             held: 0.0,
         });
     }
-    // Dying with a wheel open would otherwise leave the pointer captured by a
-    // menu nobody can close any more.
-    if !alive {
+    // Dying with a wheel open would otherwise leave the pointer loose in a menu
+    // nobody can close any more, and a fuze burning in a hand nobody has.
+    if !alive && game.wheel.is_some() {
         game.wheel = None;
+        pointer::clip(true);
+        pointer::show(false);
+    }
+    if !alive {
+        game.grenade_hand = None;
     }
     if let Some(w) = &mut game.wheel {
         w.held += dt;
     }
     if is_key_down(KeyCode::G)
         && let Some(w) = &mut game.wheel
-        && w.held > 0.28
+        && w.held > WHEEL_OPEN
         && w.kind == WheelKind::Grenade
         && let Some(s) = wheel_selection(GRENADE_KINDS.len())
     {
@@ -4473,15 +5271,29 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
     if is_key_released(KeyCode::G)
         && let Some(w) = game.wheel.take()
     {
-        // The pointer was free while the wheel was open; take a fresh baseline
-        // so the travel does not snap the view.
+        // The pointer was loose — and visible — while the wheel was open: take a
+        // fresh baseline so the travel does not snap the view, and hand the
+        // mission its own pointer back.
         game.mouse_ready = false;
-        if w.held > 0.28 {
-            game.throw_grenade(w.selected, audio);
+        pointer::clip(true);
+        pointer::show(false);
+        if w.held > WHEEL_OPEN {
+            game.take_grenade(w.selected, audio);
         } else {
-            game.throw_grenade(0, audio);
+            game.toggle_grenade_in_hand(audio);
         }
     }
+    // The left button belongs to the grenade while one is in hand: the first
+    // click pulls the pin, the second throws it.
+    if alive
+        && game.grenade_hand.is_some()
+        && !game.wheel_showing()
+        && is_mouse_button_pressed(MouseButton::Left)
+        && game.trigger_armed
+    {
+        game.use_grenade_in_hand(audio);
+    }
+    game.update_grenade_hand(dt);
 
     // --- medical ------------------------------------------------------------
     if alive && is_key_pressed(KeyCode::V) {
@@ -4490,10 +5302,13 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
             selected: 0,
             held: 0.0,
         });
+        // The pointer is handed over by the per-frame block once the wheel is
+        // really showing — the same rule the grenade wheel follows, and for the
+        // same reason: a tap must not flash a free cursor.
     }
     if is_key_down(KeyCode::V)
         && let Some(w) = &mut game.wheel
-        && w.held > 0.28
+        && w.held > WHEEL_OPEN
         && w.kind == WheelKind::Med
         && let Some(s) = wheel_selection(MED_KINDS.len())
     {
@@ -4503,7 +5318,9 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
         && let Some(w) = game.wheel.take()
     {
         game.mouse_ready = false;
-        let pick = if w.held > 0.28 {
+        pointer::clip(true);
+        pointer::show(false);
+        let pick = if w.held > WHEEL_OPEN {
             w.selected
         } else {
             best_med(game)
@@ -4518,8 +5335,7 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
             // left to read a message about it.
             game.heal_t = 0.0;
         } else if game.player.horizontal_speed() > 2.5 {
-            game.heal_t = 0.0;
-            game.say(i18n::t(Key::HealInterrupted));
+            game.break_heal();
         } else {
             game.heal_t -= dt;
             if game.heal_t <= 0.0 {
@@ -4541,8 +5357,15 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
     game.dry_t = (game.dry_t - dt).max(0.0);
     let held = is_mouse_button_down(MouseButton::Left) && game.trigger_armed;
     let pressed = is_mouse_button_pressed(MouseButton::Left) && game.trigger_armed;
+    // A burst that has begun is finished with the finger already off the
+    // trigger, so the gate stays open while the weapon still owes rounds
+    // (review R5).
+    let burst = game.arsenal.active_weapon().burst_pending();
     let melee = game.arsenal.active_weapon().stats().melee;
-    if alive && (held || pressed) {
+    // The gun is not in the hands while a throwable is: the left button belongs
+    // to the grenade, and firing on the same click would put a round into the
+    // wall every time the pin came out.
+    if alive && game.grenade_hand.is_none() && (held || pressed || burst) {
         if melee || game.arsenal.active_weapon().stats().infinite_ammo {
             // A knife's hit sound is played inside the shot resolution when it
             // actually connects; playing it here fired 40 times a second while
@@ -4593,7 +5416,13 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
         }
     }
 
-    if alive && is_key_pressed(KeyCode::R) {
+    if alive && is_key_pressed(KeyCode::R) && !game.grenade_hand.as_ref().is_some_and(|h| h.live) {
+        // A throwable in hand owns the gun. With the pin still in, the reload
+        // takes it: the pouch is where an unarmed grenade belongs when the gun
+        // needs both hands. With the pin out there is nothing to put away, and a
+        // reload is not going to happen while a fuse is burning — the key does
+        // nothing at all, which is the same answer the weapon slots give.
+        game.grenade_hand = None;
         // `R` on a magazine that is already full is a no-op rather than an
         // error, so the only reload with something to report is the one that
         // cannot find a round to put in the gun.
@@ -4622,6 +5451,8 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
     // The viewmodel's sway was tuned against `mouse_delta_position`'s
     // normalised scale, so convert back before handing it over.
     let sway_delta = delta * 2.0 / screen_width().max(1.0);
+    game.viewmodel
+        .set_grabbed(game.held_grenade().map(|(kind, _, _)| kind));
     game.viewmodel
         .update(dt, sway_delta, &game.player, &game.arsenal);
 
@@ -4671,8 +5502,13 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
                     .ray_world(origin, dir, weapon::MAX_RANGE)
                     .unwrap_or(weapon::MAX_RANGE);
                 let mut end = origin + dir * wall;
+                // No lower bound on `t`, for the reason the player's own shot
+                // path gives: at point-blank range the origin sits inside the
+                // player's box, the ray reports an entry distance of 0, and the
+                // old `t > 0.02` test threw that shot away — so a hostile
+                // touching the player was the one that could not shoot them
+                // (review R7).
                 if let Some(t) = ray_player(&game.player, origin, dir)
-                    && t > 0.02
                     && t < wall
                 {
                     // `origin` is the eye the round left, not the feet `from`
@@ -4689,7 +5525,7 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
                         origin,
                         Some(origin + dir * t),
                     );
-                    game.heal_t = 0.0;
+                    game.break_heal();
                     // Stop the strand short of the eye rather than on it: a
                     // beam that ends on the camera plane smears the same way a
                     // player's own tracer does at its start (see `TRACER_NEAR`),
@@ -4720,7 +5556,7 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
                 // where it came from, and it lands on the body — there is no
                 // "leg shot" to armour-test for a claw.
                 apply_player_damage(&mut game.player, &mut game.armor, audio, damage, from, None);
-                game.heal_t = 0.0;
+                game.break_heal();
             }
         }
     }
@@ -4768,51 +5604,162 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
         .grenades
         .update(dt, &mut game.level, &mut game.effects, &mut game.rng);
     for b in blasts {
-        audio.play_at(Sfx::Explosion, (b.pos - game.player.pos).length());
-        game.effects
-            .smoke(b.pos, Color::new(0.9, 0.75, 0.5, 0.7), 26, &mut game.rng);
-        game.effects.spark(
-            b.pos,
-            Vec3::Y,
-            Color::new(1.0, 0.75, 0.3, 1.0),
-            30,
-            &mut game.rng,
-        );
-        // Fall off with distance and require line of sight, so corners work.
-        for i in 0..game.enemies.len() {
-            if game.enemies[i].dead {
+        let far = (b.pos() - game.player.pos).length();
+        match b {
+            // --- pressure: what a frag has always done ----------------------
+            grenade::Blast::Pressure {
+                pos,
+                radius,
+                damage,
+            } => {
+                audio.play_at(blast_sfx(far), far);
+                game.effects
+                    .smoke(pos, Color::new(0.9, 0.75, 0.5, 0.7), 26, &mut game.rng);
+                game.effects.spark(
+                    pos,
+                    Vec3::Y,
+                    Color::new(1.0, 0.75, 0.3, 1.0),
+                    30,
+                    &mut game.rng,
+                );
+                // Fall off with distance and require line of sight, so corners
+                // work.
+                for i in 0..game.enemies.len() {
+                    if game.enemies[i].dead {
+                        continue;
+                    }
+                    let centre = game.enemies[i].pos + vec3(0.0, game.enemies[i].height * 0.5, 0.0);
+                    let d = centre.distance(pos);
+                    if d > radius || !game.level.line_of_sight(pos, centre) {
+                        continue;
+                    }
+                    let falloff = 1.0 - (d / radius).powf(1.4);
+                    let dmg = damage * falloff.clamp(0.0, 1.0);
+                    // A blast carries full penetration: a pressure wave is not a
+                    // round, and there is nothing for plate to stop.
+                    if game.enemies[i].take_damage(dmg, 1.0) {
+                        kill_enemy(game, i, audio);
+                    }
+                }
+                let eye = game.player.eye();
+                let d = eye.distance(pos);
+                if d < radius && game.level.line_of_sight(pos, eye) {
+                    let falloff = 1.0 - (d / radius).powf(1.4);
+                    // The blast has no single muzzle: the grenade's own position
+                    // is the source the player has to turn toward — and, having
+                    // no hit point of its own, it lands on the body.
+                    apply_player_damage(
+                        &mut game.player,
+                        &mut game.armor,
+                        audio,
+                        damage * falloff,
+                        pos,
+                        None,
+                    );
+                    game.break_heal();
+                }
+            }
+            // --- light: nothing hurts, and seeing stops ----------------------
+            grenade::Blast::Light { pos, radius } => {
+                // The loudest, shortest thing in the game — and it is not the
+                // noise that takes your eyes.
+                audio.play_at(Sfx::Explosion, far);
+                // Nobody is hurt by it, which is the whole trade: a flash is
+                // worth carrying because it takes an enemy out of the fight for
+                // a window without killing them, and worth fearing because it
+                // does the same to the player.
+                for i in 0..game.enemies.len() {
+                    if game.enemies[i].dead {
+                        continue;
+                    }
+                    let centre = game.enemies[i].pos + vec3(0.0, game.enemies[i].height * 0.5, 0.0);
+                    // Line of sight and a look *at* it: a unit facing away from
+                    // the light keeps its eyes, which is the defence the game
+                    // already asks for against everything else that looks back.
+                    if centre.distance(pos) > radius
+                        || !game.level.line_of_sight(pos, centre)
+                        || !looking_at(game.enemies[i].eye(), game.enemies[i].yaw, pos)
+                    {
+                        continue;
+                    }
+                    game.enemies[i].blind(grenade::FLASH_BLIND);
+                }
+                let eye = game.player.eye();
+                let d = eye.distance(pos);
+                if d < radius && game.level.line_of_sight(pos, eye) {
+                    // The player's own screen, scaled by how much of it they
+                    // were looking at: full in the face, nothing at the edge of
+                    // the cone, and nothing at all if they turned away in time.
+                    let to = (pos - eye).normalize_or_zero();
+                    let look = game.player.look_dir();
+                    let facing = to.dot(look).clamp(0.0, 1.0);
+                    let near = 1.0 - (d / radius).clamp(0.0, 1.0);
+                    game.effects.flash_bang = (game.effects.flash_bang
+                        + (facing * facing) * (0.35 + 0.65 * near))
+                        .min(1.0);
+                }
+            }
+            // --- fire: something that goes on working ------------------------
+            grenade::Blast::Fire { pos, radius } => {
+                game.level
+                    .add_volume(pos, radius, grenade::FIRE_LIFE, grenade::FIRE_DPS);
+                // No smoke, deliberately, though a real fire puts up a column
+                // and this one did for a day: a second volume lifted 1.6 m over
+                // the flames, drawn with the cloud's own shells. Fire and smoke
+                // are one object to the drawing code, the cloud is three times
+                // the flame's size, and what it looked like was a grey dome
+                // hanging over the fire. What a molotov leaves is fire.
+                // A bottle breaks: glass first, then the light of it catching.
+                audio.play_at(Sfx::HitGlass, far);
+                audio.play_at(Sfx::ExplosionDistant, far);
+            }
+        }
+    }
+
+    // --- burning ------------------------------------------------------------
+    // Worked out here rather than in `Level`, because `Level` does not know what
+    // a body is: it owns the flame, and the damage is the game's business.
+    // Anything standing in it burns, the player included — walking into your own
+    // fire is a mistake the game lets you make.
+    //
+    // Copied out of the volume list first, for the reason the pickups are: what
+    // is inside the loop mutates the things the loop would otherwise be reading.
+    game.fires.clear();
+    for v in &game.level.volumes {
+        if v.burn > 0.0 {
+            game.fires.push((v.pos, v.current_radius(), v.burn));
+        }
+    }
+    let mut burned: Vec<usize> = Vec::new();
+    for k in 0..game.fires.len() {
+        let (pos, radius, burn) = game.fires[k];
+        for (i, e) in game.enemies.iter_mut().enumerate() {
+            if e.dead {
                 continue;
             }
-            let centre = game.enemies[i].pos + vec3(0.0, game.enemies[i].height * 0.5, 0.0);
-            let d = centre.distance(b.pos);
-            if d > b.radius || !game.level.line_of_sight(b.pos, centre) {
-                continue;
-            }
-            let falloff = 1.0 - (d / b.radius).powf(1.4);
-            let dmg = b.damage * falloff.clamp(0.0, 1.0);
-            // A blast carries full penetration: a pressure wave is not a
-            // round, and there is nothing for plate to stop.
-            if game.enemies[i].take_damage(dmg, 1.0) {
-                kill_enemy(game, i, audio);
+            // A circle on the floor and no falloff: being in the middle of a
+            // fire and being at its edge are the same mistake.
+            if vec3(e.pos.x - pos.x, 0.0, e.pos.z - pos.z).length() < radius
+                && e.take_damage(burn * dt, 1.0)
+            {
+                burned.push(i);
             }
         }
         let eye = game.player.eye();
-        let d = eye.distance(b.pos);
-        if d < b.radius && game.level.line_of_sight(b.pos, eye) {
-            let falloff = 1.0 - (d / b.radius).powf(1.4);
-            // The blast has no single muzzle: the grenade's own position is the
-            // source the player has to turn toward — and, having no hit point
-            // of its own, it lands on the body.
+        if game.player.alive && vec3(eye.x - pos.x, 0.0, eye.z - pos.z).length() < radius {
             apply_player_damage(
                 &mut game.player,
                 &mut game.armor,
                 audio,
-                b.damage * falloff,
-                b.pos,
+                burn * dt,
+                pos,
                 None,
             );
-            game.heal_t = 0.0;
+            game.break_heal();
         }
+    }
+    for i in burned {
+        kill_enemy(game, i, audio);
     }
 
     // --- pickups ------------------------------------------------------------
@@ -4820,6 +5767,9 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
         p.update(dt);
     }
     let mut taken: Vec<usize> = Vec::new();
+    // With pickup set to the key, nothing is taken until it is pressed — a
+    // crate is a decision, not something that happens because you ran over it.
+    let reaching = game.settings.auto_pickup || is_key_pressed(KeyCode::F);
     for i in 0..game.pickups.len() {
         // Copy out of the pickup first: collecting one mutates the inventory,
         // which cannot happen while the list itself is borrowed.
@@ -4827,12 +5777,35 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
             let p = &game.pickups[i];
             (p.kind, p.amount, p.pos)
         };
-        let close = vec3(at.x - game.player.pos.x, 0.0, at.z - game.player.pos.z).length() < 1.1
+        let close = reaching
+            && vec3(at.x - game.player.pos.x, 0.0, at.z - game.player.pos.z).length() < 1.1
             && (at.y - game.player.pos.y).abs() < 1.8;
         if !close {
             continue;
         }
+        if !reaching {
+            // Standing over a crate with the key not pressed, which is the one
+            // moment the key is worth naming. Only into an empty toast, so it
+            // cannot talk over "health full" or a pickup just taken.
+            if game.toast.is_none() {
+                game.say(i18n::t(Key::PickUpHint));
+            }
+            continue;
+        }
         let label = match kind {
+            PickupKind::Health if !game.settings.auto_use => {
+                // Carried rather than spent: the crate becomes field dressings,
+                // at the dressings' own value. This is also what a full-health
+                // player can do with one, which the instant version could not —
+                // at full health it was refused and left lying there. The pouch
+                // is what `V` draws from, so "manual use" needs no second
+                // inventory.
+                let dressings = (amount / MED_KINDS[0].0).round().max(1.0) as u32;
+                game.ammo_meds[0] = game.ammo_meds[0].saturating_add(dressings);
+                game.pickups[i].amount = 0.0;
+                audio.play(Sfx::PickupHealth);
+                i18n::t(Key::PickHealth)
+            }
             PickupKind::Health => {
                 // Same class of loss as the ammo crate below: `heal` reports how
                 // much it actually restored, and at full health that is nothing,
@@ -4932,9 +5905,17 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
             }
         }
         Objective::Survive => {
-            game.survive_left -= dt;
-            if game.survive_left <= 0.0 {
+            // Two ways to be done holding the line: the clock runs out, or
+            // there is nothing left to hold it against. This used to read only
+            // the clock, so a player who had already killed everything the
+            // mission was going to send stood in an empty arena waiting out the
+            // last twenty seconds with nothing to do (review R13).
+            if cleared {
                 game.survive_left = 0.0;
+            } else {
+                game.survive_left = (game.survive_left - dt).max(0.0);
+            }
+            if game.survive_left <= 0.0 {
                 if !game.extraction_open {
                     game.extraction_open = true;
                     game.banner = Some((i18n::t(Key::ObjReach).to_string(), 2.4));
@@ -4987,24 +5968,38 @@ fn tick_toast(game: &mut Game, dt: f32) {
     }
 }
 
-/// Which sector of a radial menu the mouse is pointing at, if any.
-fn wheel_selection(n: usize) -> Option<usize> {
-    if n == 0 {
+/// How far from the middle of the screen a radial menu stops treating the
+/// pointer as pointing at nothing. The mission recentres the pointer every frame
+/// for mouse look, so this is also what keeps a wheel from picking a sector the
+/// instant it opens.
+const WHEEL_DEAD_ZONE: f32 = 40.0;
+
+/// Which sector of a radial menu a vector from the centre points at, if any.
+///
+/// Sectors start at the top and run clockwise, which is the order
+/// `hud::draw_wheel` draws them in — the two have to agree, or the highlight sits
+/// on one entry while another one is chosen.
+///
+/// Separate from [`wheel_selection`] so the arithmetic can be tested without a
+/// mouse, a screen or a game: a wheel is judged by where it points, and that is
+/// the whole of it.
+fn sector_of(d: Vec2, n: usize) -> Option<usize> {
+    if n == 0 || d.length() < WHEEL_DEAD_ZONE {
         return None;
     }
-    let (mx, my) = mouse_position();
-    let c = vec2(screen_width() * 0.5, screen_height() * 0.5);
-    let d = vec2(mx, my) - c;
-    if d.length() < 40.0 {
-        return None;
-    }
-    // Sectors start at the top and run clockwise.
     let mut a = d.y.atan2(d.x) + std::f32::consts::FRAC_PI_2;
     if a < 0.0 {
         a += std::f32::consts::TAU;
     }
     let step = std::f32::consts::TAU / n as f32;
     Some(((a / step).floor() as usize).min(n - 1))
+}
+
+/// Which sector of a radial menu the mouse is pointing at, if any.
+fn wheel_selection(n: usize) -> Option<usize> {
+    let (mx, my) = mouse_position();
+    let c = vec2(screen_width() * 0.5, screen_height() * 0.5);
+    sector_of(vec2(mx, my) - c, n)
 }
 
 fn best_med(game: &Game) -> usize {
@@ -5142,6 +6137,76 @@ fn critical_desaturation(health: f32, sanity: f32) -> f32 {
     health_t.max(sanity_t).clamp(0.0, 1.0) * CRITICAL_DESATURATION
 }
 
+/// The path a throw made now would take, drawn while something is in hand.
+///
+/// World geometry rather than screen-space dots: what the line is for is where
+/// the thing lands, and only a mark *in* the world answers that with the same
+/// perspective the ground it lands on has. The samples come from
+/// `grenade::preview`, which runs the throw's own integration, so the end of the
+/// line is the landing point and not an approximation of one.
+///
+/// Only while something is in hand and only when the setting asks: an arc is a
+/// question about a throw nobody has made yet, and a HUD that always has one on
+/// screen is a HUD with a line through the middle of it.
+///
+/// It is built out of `MeshBuilder::add_beam` — the same primitive a tracer is,
+/// and for the same reason. The first version put a small box at every sample,
+/// which is a row of boxes along a curve and looks exactly like one.
+fn draw_grenade_arc(game: &mut Game) {
+    if !game.settings.show_arc {
+        return;
+    }
+    let Some((kind, live, fuse)) = game.held_grenade() else {
+        return;
+    };
+    let from = hand_pos(&game.player, game.viewmodel.throw_hand());
+    let dir = game.player.look_dir();
+    grenade::preview(&game.level, from, dir, &mut game.arc);
+    if game.arc.len() < 2 {
+        return;
+    }
+    // The kind's own colour, turning red once the fuse is nearly out: a throw is
+    // still a choice for another moment, and after that it is a fact.
+    let accent = if live && fuse <= 1.2 {
+        Color::new(1.0, 0.32, 0.20, 1.0)
+    } else {
+        kind.color()
+    };
+    arc_mesh(&game.arc, accent, &mut game.scratch);
+    draw_mesh(&game.scratch);
+}
+
+/// The arc's geometry: a prism between each pair of samples, and a mark at the
+/// end.
+///
+/// Split from the drawing so its shape can be asserted. "Is this a line" is not
+/// a question a still frame answers — a row of dots along a curve looks like a
+/// line in one screenshot and like a row of dots in motion, which is how the
+/// first version shipped.
+fn arc_mesh(path: &[Vec3], accent: Color, out: &mut Mesh) {
+    let n = path.len();
+    let mut mb = mesh::MeshBuilder::reclaim(out);
+    for i in 0..n - 1 {
+        let k = i as f32 / (n - 1) as f32;
+        // Thicker near the hand and thinner along the flight: the near half is
+        // where the aim is decided, the far half is where it lands. The taper is
+        // what carries the reading — alpha alone is the first thing a washed-out
+        // monitor loses.
+        let width = ARC_WIDTH * (1.0 - 0.55 * k);
+        let c = Color::new(accent.r, accent.g, accent.b, 0.85 * (1.0 - 0.35 * k));
+        mb.add_beam(path[i], path[i + 1], width, c);
+    }
+    // The landing point keeps a mark of its own: a line that merely stops does
+    // not say which end stopped, and that end is the whole question.
+    let at = path[n - 1];
+    mb.add_box(
+        at - Vec3::splat(ARC_MARK),
+        at + Vec3::splat(ARC_MARK),
+        Color::new(accent.r, accent.g, accent.b, 0.95),
+    );
+    *out = mb.finish();
+}
+
 fn render_world(game: &mut Game, fonts: &hud::Fonts) {
     // The same thresholds the vignette lights up at; the fog pass below greys
     // the world by this much.
@@ -5217,8 +6282,10 @@ fn render_world(game: &mut Game, fonts: &hud::Fonts) {
         p.write_mesh(&mut game.scratch);
         draw_mesh(&game.scratch);
     }
-    game.grenades.write_mesh(&game.level, &mut game.scratch);
+    game.grenades
+        .write_mesh(&game.level, game.elapsed, &mut game.scratch);
     draw_mesh(&game.scratch);
+    draw_grenade_arc(game);
     game.effects.write_mesh(&mut game.scratch);
     draw_mesh(&game.scratch);
     // Everything in the world is behind us now; the viewmodel and the HUD are
@@ -5236,6 +6303,10 @@ fn render_world(game: &mut Game, fonts: &hud::Fonts) {
     let madness = (1.0 - game.player.sanity_ratio()) * 0.7;
     hud::draw_vignette(madness, desat > 0.0);
     hud::draw_kill_flash(game.effects.kill_flash);
+    // Over the kill flash and under the bearing arcs: a flashbang is the last
+    // thing that happened to the screen, and the arcs are the one thing a player
+    // still needs while they cannot see.
+    hud::draw_flash_bang(game.effects.flash_bang);
     // The one place the two yaw conventions meet. `hurt_dir` points from the
     // player at what hit them; the HUD's bearing is where that lands relative
     // to the view, 0 dead ahead and positive to the player's right. The game's
@@ -5274,7 +6345,10 @@ fn render_world(game: &mut Game, fonts: &hud::Fonts) {
 
 fn draw_wheel_overlay(game: &Game, fonts: &hud::Fonts) {
     let Some(w) = &game.wheel else { return };
-    if w.held <= 0.28 {
+    // The wheel exists from the moment its key goes down; it is only *drawn*
+    // once the press is long enough to be a choice, so a tap does not flash a
+    // wheel-sized overlay for a few frames.
+    if !game.wheel_showing() {
         return;
     }
     let centre = vec2(screen_width() * 0.5, screen_height() * 0.5);
@@ -5286,11 +6360,10 @@ fn draw_wheel_overlay(game: &Game, fonts: &hud::Fonts) {
                 .enumerate()
                 .map(|(i, k)| {
                     (
-                        i18n::t(match k {
-                            GrenadeKind::Frag => Key::GrenadeFrag,
-                            GrenadeKind::Smoke => Key::GrenadeSmoke,
-                        })
-                        .to_string(),
+                        // The kind names itself; the wheel is not the place to
+                        // keep a second copy of the table (which is how `Flash`
+                        // and `Molotov` came to be missing from it).
+                        i18n::t(k.name()).to_string(),
                         game.ammo_grenades[i],
                         game.ammo_grenades[i] > 0,
                     )
@@ -5366,6 +6439,7 @@ fn draw_hud_state(game: &Game, fonts: &hud::Fonts) {
             .then_some(weapon.reserve()),
         magazines: (!weapon.stats().infinite_ammo && !weapon.stats().melee)
             .then_some(weapon.magazine_count()),
+        can_reload: weapon.can_reload(),
         reload_progress: if weapon.is_reloading() {
             Some(weapon.reload_progress())
         } else {
@@ -5377,8 +6451,7 @@ fn draw_hud_state(game: &Game, fonts: &hud::Fonts) {
             game.player.ads,
             game.player.spread_scale(),
         ),
-        scoped: weapon.kind == WeaponKind::Sniper
-            && game.player.ads >= viewmodel::SCOPE_HIDE_ADS,
+        scoped: weapon.kind == WeaponKind::Sniper && game.player.ads >= viewmodel::SCOPE_HIDE_ADS,
         hit_marker: game.effects.hit_marker,
         headshot_marker: game.effects.head_marker,
         hurt: game.player.hurt_flash,
@@ -5429,10 +6502,7 @@ fn draw_inventory_overlay(game: &Game, fonts: &hud::Fonts) {
         .iter()
         .enumerate()
         .map(|(i, k)| {
-            let label = i18n::t(match k {
-                GrenadeKind::Frag => Key::GrenadeFrag,
-                GrenadeKind::Smoke => Key::GrenadeSmoke,
-            });
+            let label = i18n::t(k.name());
             (label.to_string(), game.ammo_grenades[i])
         })
         .collect();
