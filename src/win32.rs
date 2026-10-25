@@ -49,6 +49,76 @@ unsafe extern "system" {
     fn SystemParametersInfoW(action: u32, param: u32, data: *mut u8, win_ini: u32) -> i32;
 }
 
+/// `SYSTEMTIME`, from `minwinbase.h:83-94`: eight `WORD`s in this order. Only
+/// `wHour` and `wMinute` are read here, but the whole block has to be the right
+/// size because Windows fills all of it.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct SystemTime {
+    year: u16,
+    month: u16,
+    weekday: u16,
+    day: u16,
+    hour: u16,
+    minute: u16,
+    second: u16,
+    milliseconds: u16,
+}
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetSystemTime(out: *mut SystemTime);
+    fn GetLocalTime(out: *mut SystemTime);
+}
+
+/// How far the machine's clock is from UTC, in seconds, positive east of it.
+///
+/// Read as the difference between the two clocks Windows keeps, which is the only
+/// way to ask this without a date library: `GetSystemTime` is UTC and
+/// `GetLocalTime` is the same instant in the user's own zone. `None` when the two
+/// cannot be read at all, in which case a caller should print UTC and say so.
+///
+/// The minute is the resolution of both clocks, so the difference is exact to the
+/// minute — which is all a date stamp in a corner needs.
+pub fn utc_offset_seconds() -> Option<i64> {
+    // SAFETY: both calls take a pointer to one `SYSTEMTIME` and write all eight
+    // words of it; `SystemTime` above is exactly that layout and outlives the
+    // call.
+    let (utc, local) = unsafe {
+        let mut utc = SystemTime::default();
+        let mut local = SystemTime::default();
+        GetSystemTime(&mut utc);
+        GetLocalTime(&mut local);
+        (utc, local)
+    };
+    let (Some(utc), Some(local)) = (civil_seconds(utc), civil_seconds(local)) else {
+        return None;
+    };
+    Some(local - utc)
+}
+
+/// A `SYSTEMTIME` as seconds since 1970-01-01, which is a civil date and not an
+/// instant: the two calls above are compared with each other and never with a
+/// clock, so the calendar conversion has to be the *calendar's* and not a
+/// count of elapsed days.
+fn civil_seconds(t: SystemTime) -> Option<i64> {
+    let (y, m, d) = (t.year as i64, t.month as i64, t.day as i64);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || y < 1970 {
+        return None;
+    }
+    // Days from 1970-01-01 to the first of the month, by Hinnant's `days_from_
+    // civil`: the year is shifted to start in March so the leap day lands at the
+    // end of it, and the era arithmetic is what makes it work for any year.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + t.hour as i64 * 3600 + t.minute as i64 * 60)
+}
+
 /// Read a settings block, clear its hotkey bit, write it back, and hand back
 /// what it said before.
 ///

@@ -317,6 +317,17 @@ impl Audio {
         self.emit(sfx, falloff * falloff);
     }
 
+    /// The same recording at a share of its level.
+    ///
+    /// For the sounds that are one event heard differently rather than two
+    /// events: a suppressed shot is the weapon's own report with the crack taken
+    /// out of it, and a second asset recorded for that would be a file to keep in
+    /// step with the first one forever. The share is the caller's, because what
+    /// it should be is a judgement about the ear and not about the mixer.
+    pub fn play_quiet(&self, sfx: Sfx, gain: f32) {
+        self.emit(sfx, gain.clamp(0.0, 1.0));
+    }
+
     pub fn set_master(&mut self, v: f32) {
         self.master = v.clamp(0.0, 1.0);
     }
@@ -369,6 +380,8 @@ impl Audio {
     pub fn play(&self, _sfx: Sfx) {}
 
     pub fn play_at(&self, _sfx: Sfx, _distance: f32) {}
+
+    pub fn play_quiet(&self, _sfx: Sfx, _gain: f32) {}
 
     pub fn set_master(&mut self, v: f32) {
         self.master = v.clamp(0.0, 1.0);

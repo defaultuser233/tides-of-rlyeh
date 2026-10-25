@@ -655,12 +655,69 @@ mod parts {
             StatMod {
                 stat: StatId::AdsFov,
                 kind: ModKind::Add,
-                amount: Value::Static(-10.0),
+                amount: Value::Static(-14.0),
             },
             StatMod {
                 stat: StatId::MoveScale,
                 kind: ModKind::MulPre,
                 amount: Value::Static(0.94),
+            },
+        ],
+    };
+
+    /// A holographic sight: a square window rather than a tube, so it is the
+    /// fastest of the four to find a target in and the least of them to aim with.
+    pub const HOLO_SIGHT: PartDef = PartDef {
+        id: PartId("holo_sight"),
+        slot: SlotId("optic"),
+        interface: InterfaceId("rail"),
+        subslots: &[],
+        mods: &[StatMod {
+            stat: StatId::AdsFov,
+            kind: ModKind::Add,
+            amount: Value::Static(-6.0),
+        }],
+    };
+
+    /// Four power, in a prism: the first sight in the game that is *looked
+    /// through* rather than along (see `Weapon::scoped`), and the price of it is
+    /// the walk.
+    pub const PRISM_4X: PartDef = PartDef {
+        id: PartId("prism_4x"),
+        slot: SlotId("optic"),
+        interface: InterfaceId("rail"),
+        subslots: &[],
+        mods: &[
+            StatMod {
+                stat: StatId::AdsFov,
+                kind: ModKind::Add,
+                amount: Value::Static(-20.0),
+            },
+            StatMod {
+                stat: StatId::MoveScale,
+                kind: ModKind::MulPre,
+                amount: Value::Static(0.96),
+            },
+        ],
+    };
+
+    /// The long one: a tube as long as the .50's own, for the rifles that are
+    /// not the .50. Slowest to carry and the most magnified thing in the pouch.
+    pub const LONG_SCOPE: PartDef = PartDef {
+        id: PartId("long_scope"),
+        slot: SlotId("optic"),
+        interface: InterfaceId("rail"),
+        subslots: &[],
+        mods: &[
+            StatMod {
+                stat: StatId::AdsFov,
+                kind: ModKind::Add,
+                amount: Value::Static(-26.0),
+            },
+            StatMod {
+                stat: StatId::MoveScale,
+                kind: ModKind::MulPre,
+                amount: Value::Static(0.92),
             },
         ],
     };
@@ -728,6 +785,81 @@ mod parts {
                 amount: Value::Static(1.10),
             },
         ],
+    };
+
+    /// The can on the end of the barrel.
+    ///
+    /// What it is *for* is being quiet, and this game has no ear to hear it with:
+    /// nothing in it listens for a shot, so a suppressor here cannot hide the
+    /// player — see the README, which says what adding that would take. What it
+    /// does do is take the flash off the muzzle (`Weapon::suppressed`, which
+    /// `viewmodel` and the shot's own sound both read) and add a little of what a
+    /// can adds to a rifle: a touch less muzzle rise, and more of the velocity
+    /// the longer barrel keeps.
+    pub const SUPPRESSOR: PartDef = PartDef {
+        id: PartId("suppressor"),
+        slot: SlotId("muzzle"),
+        interface: InterfaceId("threaded_muzzle"),
+        subslots: &[],
+        mods: &[
+            StatMod {
+                stat: StatId::RecoilPitch,
+                kind: ModKind::MulPre,
+                amount: Value::Static(0.90),
+            },
+            StatMod {
+                stat: StatId::FalloffStart,
+                kind: ModKind::MulPre,
+                amount: Value::Static(1.12),
+            },
+            StatMod {
+                stat: StatId::FalloffEnd,
+                kind: ModKind::MulPre,
+                amount: Value::Static(1.10),
+            },
+            StatMod {
+                stat: StatId::MoveScale,
+                kind: ModKind::MulPre,
+                amount: Value::Static(0.98),
+            },
+        ],
+    };
+
+    /// A laser, on the rail under the fore-end.
+    ///
+    /// The dot is not simulated and the beam is drawn in the hand rather than in
+    /// the world (see `viewmodel::kit_into`): what it *does* is in the numbers,
+    /// where a laser does what a laser does — the hipfire stops being a guess.
+    pub const LASER: PartDef = PartDef {
+        id: PartId("laser"),
+        slot: SlotId("underbarrel"),
+        interface: InterfaceId("rail_under"),
+        subslots: &[],
+        mods: &[StatMod {
+            stat: StatId::BaseSpread,
+            kind: ModKind::MulPre,
+            amount: Value::Static(0.80),
+        }],
+    };
+
+    /// A torch, on the same rail.
+    ///
+    /// The one fitting in the catalogue whose trade is not in the numbers: what
+    /// it buys is light, and the arena has no dynamic lighting for it to buy it
+    /// with — what it draws is the beam in the hand and a pool of light where it
+    /// is pointed (`hud::draw_torch`), which is what a torch does to a player's
+    /// view and is not the same thing as lighting the room. The only number it
+    /// has is what it weighs.
+    pub const FLASHLIGHT: PartDef = PartDef {
+        id: PartId("flashlight"),
+        slot: SlotId("underbarrel"),
+        interface: InterfaceId("rail_under"),
+        subslots: &[],
+        mods: &[StatMod {
+            stat: StatId::MoveScale,
+            kind: ModKind::MulPre,
+            amount: Value::Static(0.99),
+        }],
     };
 
     // A magazine's three trades, one line each, so the section below reads as a
@@ -1019,10 +1151,16 @@ mod parts {
     /// before the tests add their own parts to the copy they build.
     pub const SHIPPED: &[PartDef] = &[
         MICRO_DOT,
+        HOLO_SIGHT,
         MARKSMAN_SCOPE,
+        PRISM_4X,
+        LONG_SCOPE,
         COMPENSATOR,
         FLASH_HIDER,
         HEAVY_BARREL,
+        SUPPRESSOR,
+        LASER,
+        FLASHLIGHT,
         MAG_40_556,
         MAG_60_556,
         DRUM_100_556,
@@ -1088,10 +1226,16 @@ pub fn catalogue() -> &'static [PartDef] {
 pub fn part_label(id: PartId) -> Option<(&'static str, &'static str)> {
     Some(match id.0 {
         "micro_dot" => ("MICRO DOT", "微型红点"),
+        "holo_sight" => ("HOLO SIGHT", "全息瞄具"),
         "marksman_scope" => ("MARKSMAN SCOPE", "射手瞄准镜"),
+        "prism_4x" => ("PRISM 4X", "4 倍棱镜"),
+        "long_scope" => ("LONG SCOPE", "长望远式镜"),
         "compensator" => ("COMPENSATOR", "补偿器"),
         "flash_hider" => ("FLASH HIDER", "消焰器"),
         "heavy_barrel" => ("HEAVY BARREL", "重枪管"),
+        "suppressor" => ("SUPPRESSOR", "消音器"),
+        "laser" => ("LASER", "激光指示器"),
+        "flashlight" => ("FLASHLIGHT", "战术手电"),
         "mag_40_556" => ("MAG 40 / 5.56", "40 发弹匣"),
         "mag_60_556" => ("QUAD-STACK 60", "60 发四排弹匣"),
         "drum_100_556" => ("C-MAG 100 / 5.56", "100 发双鼓"),
@@ -1126,6 +1270,7 @@ pub fn slot_label(id: SlotId) -> Option<(&'static str, &'static str)> {
     match id.0 {
         "optic" => Some(("OPTIC", "瞄具")),
         "muzzle" => Some(("MUZZLE", "枪口")),
+        "underbarrel" => Some(("RAIL", "下挂导轨")),
         "magazine" => Some(("MAGAZINE", "弹匣")),
         _ => None,
     }
@@ -1339,6 +1484,15 @@ const MUZZLE: SlotDef = SlotDef {
     max_parts: 1,
 };
 
+/// The rail under the fore-end: where a light or a laser goes. Its own slot and
+/// not the optic's, because the two are not alternatives — a weapon can wear a
+/// sight and a light at once, and they are bolted to two different rails.
+const UNDERBARREL: SlotDef = SlotDef {
+    id: SlotId("underbarrel"),
+    accepts: InterfaceId("rail_under"),
+    max_parts: 1,
+};
+
 /// A magazine well, named for what it takes.
 const fn well(name: &'static str) -> SlotDef {
     SlotDef {
@@ -1350,33 +1504,38 @@ const fn well(name: &'static str) -> SlotDef {
 
 /// The slot ids a settings string may name. The wells differ per weapon; the
 /// ids do not, which is why this is a list of names rather than of slots.
-const SLOT_IDS: [SlotId; 3] = [SlotId("optic"), SlotId("muzzle"), SlotId("magazine")];
+const SLOT_IDS: [SlotId; 4] = [
+    SlotId("optic"),
+    SlotId("muzzle"),
+    SlotId("underbarrel"),
+    SlotId("magazine"),
+];
 
-const RIFLE_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, well("magwell_556")];
-const SHOTGUN_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, well("magwell_tube")];
-const SMG_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, well("magwell_9mm")];
+const RIFLE_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, UNDERBARREL, well("magwell_556")];
+const SHOTGUN_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, UNDERBARREL, well("magwell_tube")];
+const SMG_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, UNDERBARREL, well("magwell_9mm")];
 /// The MP5's own well. A curved HK magazine does not fit an MPX and an MPX
 /// magazine does not fit an MP5, both facts being about the catch rather than
 /// about the round, so they are two wells and not one. The Viper keeps the
 /// generic 9 mm well it has always had, and its part ids with it — a saved
 /// build naming `drum_50_9mm` has to keep working.
-const MP5_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, well("magwell_mp5")];
+const MP5_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, UNDERBARREL, well("magwell_mp5")];
 /// And the MPX's: SIG's own magazine, which the aftermarket takes to 35.
-const MPX_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, well("magwell_mpx")];
-const SNIPER_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, well("magwell_762")];
-const LMG_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, well("magwell_belt")];
-const PISTOL_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, well("magwell_pistol")];
+const MPX_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, UNDERBARREL, well("magwell_mpx")];
+const SNIPER_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, UNDERBARREL, well("magwell_762")];
+const LMG_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, UNDERBARREL, well("magwell_belt")];
+const PISTOL_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, UNDERBARREL, well("magwell_pistol")];
 /// The battle rifle's well. Its own, and not the marksman's: a FAL magazine and
 /// an SR-25 magazine are both 7.62x51 and neither fits the other's well, which
 /// is why they are two wells and not one. (Putting both weapons on one well is
 /// what put a twenty-five-round magazine — a real SR-25 magazine, and not a real
 /// FAL one — on the FAL.)
-const FAL_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, well("magwell_fal")];
+const FAL_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, UNDERBARREL, well("magwell_fal")];
 
 /// The marksman's rifle's well: the SR-25 pattern, whose magazines go to 25.
-const M110_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, well("magwell_sr25")];
+const M110_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, UNDERBARREL, well("magwell_sr25")];
 /// 7.62x54R: the bolt-action, whose five rounds are loaded by clip.
-const MOSIN_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, well("magwell_54r")];
+const MOSIN_SLOTS: &[SlotDef] = &[RAIL, MUZZLE, UNDERBARREL, well("magwell_54r")];
 
 /// The rifle. Every number is the one the pre-resolver table held, pinned by
 /// `the_shipped_tables_survive_the_resolver_bit_for_bit` below.
@@ -2267,6 +2426,16 @@ pub struct Weapon {
     resolved: ResolvedStats,
 }
 
+/// The aim field of view at which a sight stops being something the player aims
+/// *along* and becomes something they look *through*: an eyepiece and a magnified
+/// image rather than a rear notch and a post. Thirty degrees, against 42 to 55 at
+/// the hip.
+///
+/// Both sides of the comparison matter — see `Weapon::scoped`. A weapon whose
+/// *own* sights are already this narrow is holding iron, and a weapon a fitting
+/// has brought this narrow is holding glass.
+pub const MAGNIFIED_FOV: f32 = 30.0;
+
 impl Weapon {
     /// The weapon as it comes out of the crate: its def resolved against an
     /// empty build.
@@ -2451,6 +2620,61 @@ impl Weapon {
             * stance_scale
     }
 
+    /// Whether the sights are something the player looks *through*: glass with an
+    /// eyepiece, rather than a rear sight and a front one.
+    ///
+    /// One place decides and two read it — `main` puts `hud::draw_scope_overlay`
+    /// up, and `viewmodel` leaves the rifle out of the frame behind it — so the
+    /// two cannot disagree about which weapons are scoped, which at the moment
+    /// they swap is one frame wide.
+    ///
+    /// Two ways to be scoped, and the second one is the subtle half. The .50 is
+    /// built around glass, so it is scoped whatever is bolted to its rail. Every
+    /// other weapon is scoped when a *fitting* pulls its aim in past
+    /// [`MAGNIFIED_FOV`] — which is what a magnified sight is, and what a red dot
+    /// is not. The base value is read as well as the resolved one on purpose: the
+    /// two marksman rifles shoot 22 and 26 degrees through a *rear notch*, which
+    /// is iron sights pulled in tight, and an eyepiece drawn in front of iron
+    /// sights would be one the rifle has not got.
+    pub fn scoped(&self) -> bool {
+        if self.kind == WeaponKind::Sniper {
+            return true;
+        }
+        let iron = def(self.kind).base[StatId::AdsFov.index()].sample(DEF_BASE_ROLL);
+        iron > MAGNIFIED_FOV && self.stats().ads_fov <= MAGNIFIED_FOV
+    }
+
+    /// Whether `part` is bolted to this weapon.
+    ///
+    /// The two fittings that are not a change of numbers — a can and a torch —
+    /// are asked for by name, because what they do is not something the resolver
+    /// can carry: one takes the flash off the muzzle and the other puts a light
+    /// on it. A saved build naming a part the catalogue no longer sells is
+    /// screened out before anything asks (`WeaponBuild::screened`).
+    fn carries(&self, part: &str) -> bool {
+        self.build.entries.iter().any(|e| e.part.0 == part)
+    }
+
+    /// Whether the muzzle wears a suppressor, and therefore whether the flash and
+    /// the report are the suppressed ones.
+    pub fn suppressed(&self) -> bool {
+        self.carries("suppressor")
+    }
+
+    /// Whether the rail under the fore-end wears a torch. Read by `main`, which
+    /// draws the pool of light it throws (`hud::draw_torch`): the arena has no
+    /// dynamic lighting, so that pool is the whole of what a torch does here.
+    pub fn torch(&self) -> bool {
+        self.carries("flashlight")
+    }
+
+    /// Whether the rail wears a laser. Read by the viewmodel, which draws its beam
+    /// as a sight line rather than as part of the weapon — see
+    /// `viewmodel::laser_beam`.
+    pub fn laser(&self) -> bool {
+        self.carries("laser")
+    }
+
     pub fn can_fire(&self) -> bool {
         if self.cooldown > 0.0 || self.is_reloading() {
             return false;
@@ -2499,7 +2723,10 @@ impl Weapon {
 
         self.bloom = (self.bloom + s.bloom_per_shot).min(s.max_bloom);
         self.kick = (self.kick + 1.0).min(2.4);
-        self.flash = 1.0;
+        // A suppressed barrel has no flash: the round is going off either way,
+        // but what the player sees of it came out of the muzzle and is now
+        // inside a can. `viewmodel` draws this and nothing else reads it.
+        self.flash = if self.suppressed() { 0.0 } else { 1.0 };
         self.shots += 1;
         // Firing takes the weapon back off the player's eye, but not instantly:
         // the arm retracts over the next tenth of a second, which is what a hand
@@ -4358,5 +4585,118 @@ mod tests {
         for id in SLOT_IDS {
             assert!(slot_label(id).is_some(), "{} has no name", id.0);
         }
+    }
+
+    /// A laser is worth what a laser is worth: the shot from the hip.
+    ///
+    /// One number, and the point of the test is which number: a laser does not
+    /// make the *sighted* shot better (there is nothing for it to improve — the
+    /// sights are doing the aiming), and it does not touch the recoil, the damage
+    /// or the reach. What it does is what it looks like it does.
+    #[test]
+    fn a_laser_tightens_the_hipfire_and_nothing_else() {
+        let bare = Weapon::new(WeaponKind::Rifle);
+        let lit = Weapon::with_build(
+            WeaponKind::Rifle,
+            build(&[(SlotId("underbarrel"), parts::LASER.id, 0.5)]),
+        );
+        let (was, now) = (bare.stats(), lit.stats());
+        assert!(
+            now.base_spread < was.base_spread - 1e-4,
+            "the laser did not tighten anything: {:.4} either way",
+            was.base_spread,
+        );
+        assert!(
+            now.ads_fov >= was.ads_fov - 1e-4,
+            "the laser widened the sight picture, which it has no business doing",
+        );
+        assert!(now.damage >= was.damage - 1e-4, "the laser cost damage");
+    }
+
+    /// A torch is a fitting the numbers cannot describe.
+    ///
+    /// What it buys is light, and the arena has no dynamic lighting to buy it
+    /// with: the pool is drawn on the view (`hud::draw_torch`) and the beam in
+    /// the hand. So the only line it moves is what it weighs, and that is what
+    /// this holds — a player who fits one is buying a light, not a rifle.
+    #[test]
+    fn a_torch_is_a_fitting_and_not_a_stat() {
+        let bare = Weapon::new(WeaponKind::Rifle);
+        assert!(!bare.torch(), "a bare rifle has no light on it");
+        let lit = Weapon::with_build(
+            WeaponKind::Rifle,
+            build(&[(SlotId("underbarrel"), parts::FLASHLIGHT.id, 0.5)]),
+        );
+        assert!(lit.torch(), "the torch is fitted and not noticed");
+        assert!(
+            lit.stats().move_scale < bare.stats().move_scale,
+            "a torch is weight, and the walk should know it",
+        );
+        assert!(
+            !lit.suppressed(),
+            "a torch is not a can on the muzzle: it changes no sound",
+        );
+    }
+
+    /// A magnified fitting is what turns a rifle into something shot through
+    /// glass; a sight is not one, and neither is a rifle that never had glass.
+    ///
+    /// The rule is two-sided on purpose (`Weapon::scoped`): the fitting has to
+    /// pull the aim in past `MAGNIFIED_FOV` *and* the weapon's own sights have to
+    /// have been wider than that. The two marksman rifles are the case that needs
+    /// the second half — 22 and 26 degrees of aim through a rear notch, which is
+    /// iron sights, and an eyepiece in front of them would be one they have not
+    /// got.
+    #[test]
+    fn a_magnified_optic_is_scoped_and_a_dot_sight_is_not() {
+        let with = |part: PartId| {
+            Weapon::with_build(WeaponKind::Rifle, build(&[(SlotId("optic"), part, 0.5)]))
+        };
+        assert!(
+            !Weapon::new(WeaponKind::Rifle).scoped(),
+            "a bare rifle has iron sights"
+        );
+        for part in [parts::MICRO_DOT, parts::HOLO_SIGHT] {
+            assert!(
+                !with(part.id).scoped(),
+                "{} is a sight, not a scope",
+                part.id.0
+            );
+        }
+        for part in [parts::MARKSMAN_SCOPE, parts::PRISM_4X, parts::LONG_SCOPE] {
+            assert!(
+                with(part.id).scoped(),
+                "{} is magnified and has an eyepiece",
+                part.id.0
+            );
+        }
+        // And the weapons that bring their own sights: the .50 is glass already,
+        // the two marksman rifles are not glass at all.
+        assert!(Weapon::new(WeaponKind::Sniper).scoped());
+        assert!(!Weapon::new(WeaponKind::Mosin).scoped());
+        assert!(!Weapon::new(WeaponKind::M110).scoped());
+    }
+
+    /// A suppressed barrel fires with no flash.
+    ///
+    /// What a can is *for* — being hard to hear — has nothing in this game to act
+    /// on: no hostile listens for a shot, so a suppressor cannot hide a player
+    /// here (the README says what that would take). What it does is take the
+    /// flash off the muzzle and play the report at a share of its level, and the
+    /// flash is the half of that a test can hold.
+    #[test]
+    fn a_suppressed_barrel_has_no_muzzle_flash() {
+        let mut loud = Weapon::new(WeaponKind::Rifle);
+        assert!(!loud.suppressed(), "a bare rifle has no can on it");
+        assert!(loud.try_fire(true, true));
+        assert!(loud.flash > 0.0, "an unsuppressed shot had no flash at all");
+
+        let mut quiet = Weapon::with_build(
+            WeaponKind::Rifle,
+            build(&[(SlotId("muzzle"), parts::SUPPRESSOR.id, 0.5)]),
+        );
+        assert!(quiet.suppressed());
+        assert!(quiet.try_fire(true, true));
+        assert_eq!(quiet.flash, 0.0, "a suppressed shot lit the muzzle");
     }
 }

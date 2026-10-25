@@ -1024,16 +1024,52 @@ fn draw_banner(f: &Fonts, text: &str, alpha: f32, ui: &Ui, w: f32, h: f32) {
     );
 }
 
+/// How much of the world the ring around the aperture takes out: it darkens the
+/// periphery and does not hide it. Opaque, which this was for two revisions, is a
+/// keyhole — see `draw_scope_overlay`.
+const SCOPE_MASK: Color = Color::new(0.02, 0.03, 0.05, 0.55);
+
+/// The radius of the sight's aperture, in pixels, for `ads` on a window `h` tall.
+///
+/// A circle in the middle of the screen, opening as the sights come up and
+/// stopping at `SCOPE_RADIUS_MAX` of the height. Nothing opens past the corners:
+/// the aperture *is* the tube, and a tube that swallowed the window would not be
+/// a sight — a revision of this did exactly that, and the answer was
+/// "应该是中间一个圆".
+///
+/// What changed in that revision is the other half, the ring around it: it used
+/// to be opaque, and it is not any more. See `draw_scope_overlay`.
+pub fn scope_radius(ads: f32, h: f32) -> f32 {
+    let t = ((ads - crate::viewmodel::SCOPE_HIDE_ADS) / (1.0 - crate::viewmodel::SCOPE_HIDE_ADS))
+        .clamp(0.0, 1.0);
+    // Fully open at `SCOPE_OPEN` of the raise, not at the end of it: the last of
+    // an aim is for settling, and a tube still closing the view while the player
+    // is already looking through it is the thing this exists to stop.
+    let open = (t / crate::viewmodel::SCOPE_OPEN).clamp(0.0, 1.0);
+    let open = open * open * (3.0 - 2.0 * open);
+    let narrow = h * crate::viewmodel::SCOPE_RADIUS_MIN;
+    let wide = h * crate::viewmodel::SCOPE_RADIUS_MAX;
+    narrow + (wide - narrow) * open
+}
+
 /// The sniper's sight, drawn over the world and over the weapon.
 ///
 /// The rifle's own scope tube cannot serve as an aperture: it is geometry built
 /// *around* the sight line, so the window it leaves shrinks with every metre of
 /// its length, and at the 16 degrees the .50 aims down that window is a square
-/// a couple of hundred pixels across — a black mask with a keyhole in it. So
-/// the sight the player actually looks through is drawn here: an opaque
-/// surround, a clear circular aperture and a reticle. `viewmodel` takes the
-/// tube off the rifle on the same frame this arrives, off the same constant, so
-/// the two never overlap.
+/// a couple of hundred pixels across. So the sight the player actually looks
+/// through is drawn here: a circular aperture, a duplex reticle, and the tube's
+/// shadow as a ring around the two. `viewmodel` takes the rifle out of the frame
+/// on the same frame this arrives, off the same constant, so the two never
+/// overlap.
+///
+/// **The ring is translucent, and that is the whole of what this owes the
+/// player.** Opaque — which it was, twice — it is a keyhole: everything outside
+/// the circle is gone, and there is no reason for it to be, because a shooter
+/// looking through a scope still has the other eye open and can see the room
+/// around the tube. "圆形以外的视野不应该是看不见的." What the ring does now is
+/// darken the periphery to `SCOPE_MASK_ALPHA`, which reads as looking through
+/// something without pretending the rest of the world is not there.
 ///
 /// `ads` is the aim weight, 0 at the hip and 1 with the sight settled.
 pub fn draw_scope_overlay(ads: f32) {
@@ -1041,39 +1077,35 @@ pub fn draw_scope_overlay(ads: f32) {
     if ads < crate::viewmodel::SCOPE_HIDE_ADS {
         return;
     }
-    // Where the sight is between "the tube has just gone" and "settled". The
-    // aperture opens across it, so the swap reads as the scope coming up rather
-    // than as a cut.
-    let t = ((ads - crate::viewmodel::SCOPE_HIDE_ADS) / (1.0 - crate::viewmodel::SCOPE_HIDE_ADS))
-        .clamp(0.0, 1.0);
     let (w, h) = (screen_width(), screen_height());
     let ui = Ui::new();
     let centre = vec2(w * 0.5, h * 0.5);
-    let radius = h
-        * (crate::viewmodel::SCOPE_RADIUS_MIN
-            + (crate::viewmodel::SCOPE_RADIUS_MAX - crate::viewmodel::SCOPE_RADIUS_MIN) * t);
-
-    // Everything outside the aperture, as a fan of triangles reaching well past
-    // the screen's corners. Opaque: what it covers is the rifle the player is no
-    // longer holding up to their eye.
-    const SEGMENTS: usize = 96;
+    let radius = scope_radius(ads, h);
     let outer = w + h;
-    let surround = Color::new(0.008, 0.010, 0.012, 1.0);
-    for i in 0..SEGMENTS {
-        let a0 = i as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
-        let a1 = (i + 1) as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
-        let (s0, c0) = a0.sin_cos();
-        let (s1, c1) = a1.sin_cos();
-        let p0 = centre + vec2(c0, s0) * radius;
-        let p1 = centre + vec2(c1, s1) * radius;
-        let q0 = centre + vec2(c0, s0) * outer;
-        let q1 = centre + vec2(c1, s1) * outer;
-        draw_triangle(p0, q0, q1, surround);
-        draw_triangle(p0, q1, p1, surround);
-    }
 
-    // The glass: a cold wash and a soft rim inside the edge, so the aperture
-    // reads as a lens rather than as a hole cut in the screen.
+    // The tube's shadow, as a fan of triangles from the aperture out past the
+    // corners: the same shape it has always had, at `SCOPE_MASK_ALPHA` instead of
+    // solid.
+    const SEGMENTS: usize = 96;
+    let fan = |r0: f32, r1: f32, color: Color, segments: usize| {
+        for i in 0..segments {
+            let a0 = i as f32 / segments as f32 * std::f32::consts::TAU;
+            let a1 = (i + 1) as f32 / segments as f32 * std::f32::consts::TAU;
+            let (s0, c0) = a0.sin_cos();
+            let (s1, c1) = a1.sin_cos();
+            let p0 = centre + vec2(c0, s0) * r0;
+            let p1 = centre + vec2(c1, s1) * r0;
+            let q0 = centre + vec2(c0, s0) * r1;
+            let q1 = centre + vec2(c1, s1) * r1;
+            draw_triangle(p0, q0, q1, color);
+            draw_triangle(p0, q1, p1, color);
+        }
+    };
+    fan(radius, outer, SCOPE_MASK, SEGMENTS);
+
+    // The glass: a cold wash where the image is coming through, and the rim of
+    // the tube, so the aperture reads as a lens rather than as a hole cut in the
+    // screen.
     draw_circle(
         centre.x,
         centre.y,
@@ -1098,7 +1130,7 @@ pub fn draw_scope_overlay(ads: f32) {
     let ink = Color::new(0.02, 0.02, 0.025, 0.94);
     let line = ui.s(1.6);
     let gap = radius * 0.19;
-    let reach = radius * 0.97;
+    let reach = radius;
     for (dx, dy) in [(1.0f32, 0.0f32), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
         draw_line(
             centre.x + dx * gap,
@@ -1111,7 +1143,7 @@ pub fn draw_scope_overlay(ads: f32) {
     }
     draw_circle(centre.x, centre.y, ui.s(1.5), ink);
     // Mil ticks: below the centre on the vertical post, and out on the
-    // horizontal one, spaced by the aperture so they scale with the sight.
+    // horizontal one, spaced by the reticle so they scale with the sight.
     for i in 1..=4 {
         let y = centre.y + radius * (0.14 + 0.105 * i as f32);
         let half = ui.s(3.0 + 1.6 * i as f32);
@@ -1130,6 +1162,40 @@ pub fn draw_scope_overlay(ads: f32) {
                 ink,
             );
         }
+    }
+}
+
+/// The pool of light a torch throws, drawn where the beam is pointed.
+///
+/// There is no dynamic lighting in this game: the arena's light is baked into its
+/// faces when the level is built, so a torch cannot brighten a wall. What it can
+/// do — and what this does — is brighten the part of the *view* the beam is aimed
+/// at, which is most of what a torch does for the person holding it. The beam
+/// itself is in the hand (`viewmodel::kit_into`), so the two together read as a
+/// light on the weapon and a lit place in front of it.
+///
+/// Four discs rather than one radial gradient, because macroquad fills flat: at
+/// these alphas and sizes the steps are below what an eye picks out. `amount` is
+/// 0 for no torch, 1 for one on the weapon in hand.
+pub fn draw_torch(amount: f32) {
+    let amount = amount.clamp(0.0, 1.0);
+    if amount <= 0.0 {
+        return;
+    }
+    let (w, h) = (screen_width(), screen_height());
+    let centre = vec2(w * 0.5, h * 0.5);
+    // Bright enough to be the *point* of the fitting. An earlier version of this
+    // table stacked four discs at under a tenth of alpha each, which lifted the
+    // middle of a dark screen by about a fifth — a fitting a player cannot see
+    // they fitted is a fitting that does nothing. This one lifts it by about a
+    // third, which is the difference between a lighter wall and a lit one.
+    for (scale, alpha) in [(0.66f32, 0.08f32), (0.50, 0.10), (0.32, 0.12), (0.17, 0.14)] {
+        draw_circle(
+            centre.x,
+            centre.y,
+            h * scale * 0.5,
+            Color::new(0.35, 0.33, 0.26, alpha * amount),
+        );
     }
 }
 
@@ -1559,7 +1625,7 @@ pub fn draw_menu(
     draw_rectangle(cx - rw * 0.5, rule_y, rw, ui.s(2.0), fade(accent(), 0.85));
     draw_rectangle(cx - rw * 0.5, rule_y, rw * 0.16, ui.s(2.0), INK);
 
-    item_list(
+    let rects = item_list(
         f,
         items,
         selected,
@@ -1567,7 +1633,85 @@ pub fn draw_menu(
         cx,
         rule_y + ui.s(46.0),
         (w * 0.42).clamp(ui.s(360.0), ui.s(520.0)),
-    )
+    );
+
+    // The build, in the corner: the version and when the executable was written.
+    //
+    // A player who is not sure whether the change they were told about is in the
+    // game they are running should not have to guess, and this project has now had
+    // three rounds of "看着没变化" that were a stale binary rather than a stale
+    // change. The time is the *file's* own — `std::fs::metadata` on the running
+    // executable — because that is the fact in question: not when the code was
+    // built, but which executable this is.
+    f.text(
+        build_stamp(),
+        ui.s(14.0),
+        h - ui.s(14.0),
+        ui.s(13.0),
+        fade(INK, 0.35),
+    );
+    rects
+}
+
+/// `TIDES OF R'LYEH v1.0.0 · 10-07 21:14`, or just the version when the
+/// executable's own timestamp cannot be read.
+///
+/// Read once and cached: `current_exe` and a `metadata` call per frame would be
+/// two syscalls a frame for a string that cannot change while the game runs.
+fn build_stamp() -> &'static str {
+    static STAMP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    STAMP.get_or_init(|| {
+        let version = env!("CARGO_PKG_VERSION");
+        let written = std::env::current_exe()
+            .and_then(|exe| exe.metadata())
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|time| {
+                // Local, because the player comparing this against their own clock
+                // is the whole point of printing it: a file written at 21:46 and
+                // shown as 13:46 is a file from somebody else's day. The offset
+                // comes from Windows' own two clocks (`win32::utc_offset_seconds`),
+                // and the `cfg` is the same one every other `win32` call site
+                // carries: that module's declarations are Windows APIs, and a
+                // cross-build for Linux has to not link them. Without the offset
+                // the stamp is UTC, which is wrong by hours and is still an answer
+                // to "is this the build I just made".
+                #[cfg(windows)]
+                let offset = crate::win32::utc_offset_seconds();
+                #[cfg(not(windows))]
+                let offset = None;
+                let utc = time.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
+                let secs = utc + offset.unwrap_or(0);
+                // Seconds since the epoch, formatted by hand: the crate has no
+                // date library and the one thing wanted here is "which file is
+                // this", for which a month, day, hour and minute are plenty.
+                let days = secs.div_euclid(86_400);
+                let (h, m) = (secs.rem_euclid(86_400) / 3600, secs.rem_euclid(3600) / 60);
+                let (mo, d) = civil_from_days(days);
+                Some(format!("{mo:02}-{d:02} {h:02}:{m:02}"))
+            });
+        match written {
+            Some(when) => format!("TIDES OF R'LYEH v{version} · {when}"),
+            None => format!("TIDES OF R'LYEH v{version}"),
+        }
+    })
+}
+
+/// The month and day of a count of days since 1970-01-01, in the proleptic
+/// Gregorian calendar. Howard Hinnant's `civil_from_days`, which is the standard
+/// way to do this without a date library.
+fn civil_from_days(days: i64) -> (i64, i64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let _ = y;
+    (m, d)
 }
 
 /// Row height and gutter for a menu list of `n` items given the room below
@@ -5330,6 +5474,61 @@ mod tests {
                 MAN_ROW_MIN,
             );
             assert!(row_h.is_finite() && (MAN_ROW_MIN..=MAN_ROW_H).contains(&row_h));
+        }
+    }
+
+    /// The scope is a circle in the middle of the window, and the ring around it
+    /// is not a wall.
+    ///
+    /// Two complaints, a round apart, and this holds the answer to both. The
+    /// first was "狙击枪开镜时只有屏幕中间的圆形视野" — a keyhole. The revision that
+    /// answered it opened the aperture until it swallowed the window, and the
+    /// answer to *that* was "应该是中间一个圆，但圆形以外的视野不应该是看不见的":
+    /// the circle is wanted and the blackness is not.
+    ///
+    /// So: the aperture is a circle and stays one — inside the window always, and
+    /// at `SCOPE_RADIUS_MAX` of the height at the settled end, not at the corner.
+    /// It opens monotonically on the way there, so the tube never closes again
+    /// once it has started to open. And the ring that surrounds it is drawn at
+    /// `SCOPE_MASK_ALPHA`, which is the half of the complaint a number can hold:
+    /// anything at or above 1.0 is the keyhole again.
+    #[test]
+    fn the_scope_is_a_circle_and_the_ring_around_it_is_not_a_wall() {
+        // Bound to a local first: `assert!` on a constant expression is its own
+        // clippy lint, and the point of the check is the *value*, not the const.
+        let ring = SCOPE_MASK.a;
+        assert!(
+            ring < 0.8,
+            "the ring around the aperture is {ring:.2} opaque, which is the keyhole this was \
+             changed twice to get rid of",
+        );
+        for h in [720.0f32, 1600.0, 1440.0, 768.0] {
+            let settled = scope_radius(1.0, h);
+            assert!(
+                settled < h * 0.5,
+                "at full aim the aperture is {settled:.0} px of a {h:.0} px window: that is \
+                 not a circle, that is the whole screen",
+            );
+            assert!(
+                settled > h * crate::viewmodel::SCOPE_RADIUS_MIN,
+                "the aperture never opened: {settled:.0} px at full aim",
+            );
+            // It opens the whole way up on the way: no frame of the raise is
+            // narrower than the one before it, so the tube never closes again
+            // once it has started to open.
+            let mut last = 0.0;
+            for step in 0..=40 {
+                let ads = step as f32 / 40.0;
+                if ads < crate::viewmodel::SCOPE_HIDE_ADS {
+                    continue;
+                }
+                let eye = scope_radius(ads, h);
+                assert!(
+                    eye >= last - 1e-3,
+                    "the aperture shrank from {last:.0} to {eye:.0} px at {ads:.2} of the aim",
+                );
+                last = eye;
+            }
         }
     }
 }

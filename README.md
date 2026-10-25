@@ -237,7 +237,20 @@ saves the moment a choice moves, like the settings screen. Three tabs:
   fitted by accident, which is what the old "click steps the row" model did.
   Every slot offers "none" plus the catalogue, and the parts are choices rather
   than rungs: the compensator tames the climb, the flash hider keeps the burst
-  tight, the heavy barrel buys reach and pays in recoil. Magazines are capacity
+  tight, the heavy barrel buys reach and pays in recoil, the suppressor takes the
+  flash off the muzzle and the crack out of the report (and does nothing else —
+  see below). **Five sights**, and they are a ladder of what they are for rather
+  than of price: a micro dot and a holo sight for finding a target, a marksman's
+  scope, a four-power prism and a long scope for seeing one. The magnified three
+  are the ones the game then puts the player *behind*: fitting one turns the
+  weapon into something shot through glass (see `Weapon::scoped`), which is the
+  .50's own sight on rifles that are not the .50 — aim with a prism on the rifle
+  and the window opens out into the magnified view the .50 has had all along.
+  Which of them counts as glass is a rule and not a list: a fitting that pulls the
+  aim in past 30° is magnified, and a weapon whose *own* sights were already that
+  narrow is holding iron — the two marksman rifles shoot 22 and 26 degrees through
+  a rear notch, and an eyepiece drawn in front of them would be one they have not
+  got. Magazines are capacity
   fittings and each names the well it goes into, because a magazine is a fitting
   of the round it feeds — and the set follows the real catalogue for each
   platform rather than a ladder of round numbers: a 5.56 rifle takes the thirty
@@ -274,6 +287,24 @@ saves the moment a choice moves, like the settings screen. Three tabs:
   approximated. A fitting that starts its own arc can never meet a magazine that
   is halfway through one, and that is exactly what the fittings used to look
   like: a second magazine dropped in behind the first.
+
+  **The rail under the fore-end** is its own slot and not the optic's, because a
+  weapon can wear a sight and a light at once and they are bolted to two different
+  rails. Two things go on it. A **laser** does what a laser is for and only that:
+  the hipfire stops being a guess (`BaseSpread` ×0.80) and nothing else moves — not
+  the sighted shot, not the recoil, not the damage. A **flashlight** is the one
+  fitting in the catalogue whose trade is not in the numbers: what it buys is
+  light, **and this game has no dynamic lighting** — the arena's light is baked
+  into its faces when the level is built, so a torch cannot brighten a wall. What
+  it does instead is draw the beam in the hand and a pool of light where the beam
+  is pointed (`hud::draw_torch`), which is what a torch does to the *view* of the
+  person holding it and is not the same thing as lighting the room; the only line
+  of numbers it moves is what it weighs. Both hang under the *hand* on the
+  fore-end, which is where a fore-end rail is, and that placement is **derived**
+  (`Def::rail`) rather than authored per weapon: the support hand is the one anchor
+  every weapon that can take a fitting already has, and a weapon with no foregrip
+  is measured off the barrel instead. The derivation is what
+  `render_the_rail_fittings` exists to look at.
 
   The curve is **radians per metre**, not radians for the magazine, because that
   is how the real thing works: the radius is set by the cartridge's case taper,
@@ -445,6 +476,18 @@ over. `unlocked = 400` in a hand-edited file is clamped rather than believed.
 ---
 
 ## Building
+
+### The gates, in one line
+
+```bash
+tools/gates.sh
+```
+
+`fmt --check`, `clippy --all-targets -- -D warnings`, `test` and
+`check --no-default-features`, in that order, stopping at the first failure: all
+four, every time, and either one summary line out or the first twenty lines of
+whatever failed. The gates are run for the code's sake; the *output* is what costs
+a conversation, and a passing run has nothing to say beyond the count.
 
 ### Windows
 
@@ -756,17 +799,29 @@ by hash along the way. `a_rebuilt_frame_allocates_nothing` is the standing guard
 projected to screen triangles with the camera's own FOV. Drawing it as world
 geometry would make it clip through walls whenever the player stands near one.
 
-**The sniper's scope is a 2D overlay, and the tube comes off the rifle to make
-room for it.** A scope built as geometry around the sight line can only block the
-view it exists to provide: at the 16° the .50 aims down, the tube's own aperture
-projects to a couple of hundred pixels, so what the player saw through it was a
-black mask with a keyhole in it. Past halfway into the aim the tube, its
-objective bell and its post reticle are left out of the in-hand model and
-`hud::draw_scope_overlay` draws an opaque surround with a clear circular aperture
-and a duplex reticle in their place — the two swap on the same frame, off the same
-constant, and the aperture opens as the sight settles. The scope is still on the
-rifle at the hip, and still on the armory's preview, because that is the only
-place it is looked *at*.
+**The sniper's scope is a 2D overlay, and the rifle comes out of the frame to
+make room for it.** A scope built as geometry around the sight line can only block
+the view it exists to provide: at the 16° the .50 aims down, the tube's own
+aperture projects to a couple of hundred pixels, so what the player saw through it
+was a black mask with a keyhole in it. Past halfway into the aim the rifle — tube,
+objective bell, post reticle and all of it — is left out of the in-hand model, and
+`hud::draw_scope_overlay` draws what the eye behind the eyepiece sees: a circular
+aperture, a duplex reticle, and the tube's shadow as a ring around the two. The two
+swap on the same frame, off the same constant.
+
+**And the ring is translucent, because the circle is wanted and the blackness is
+not.** This has been three things, and the last two complaints are what settled it.
+First a fixed circle with everything outside it opaque — "狙击枪开镜时只有屏幕中间的
+圆形视野，现实中不是这样的". Then, answering that, an aperture that opened until it
+had swallowed the window — "应该是中间一个圆，但圆形以外的视野不应该是看不见的". The
+revision that holds is the two answers together: **a circle**, opening across the
+first half of the aim and stopping at 40% of the height (`hud::scope_radius`), and
+**a ring at `SCOPE_MASK`'s alpha rather than solid** — it darkens the periphery,
+which is what looking through a tube does to it, and does not pretend the rest of
+the world is not there, which is what having the other eye open means. The rifle is
+out of the frame by then, so nothing of it is sitting in the middle of the image the
+sight exists to provide. The scope is still on the rifle at the hip, and still on the
+armory's preview, because that is the only place it is looked *at*.
 
 **Textured faces take their UVs from world position.** A face's UV is where its
 vertices are, measured along two axes that lie in the face's own plane, so two
@@ -887,7 +942,279 @@ embedded WAV to the synthesiser instead.
 
 What was actually tested, and what was not:
 
-- **The throwable in hand, and the four casings (latest round)**: two changes, and
+- **The fitting did not face its own light (latest round)**: "镭射的光线确实指向准心了，
+  但是和发射镭射的配件不平行了". Both halves were true, and only one of them could be
+  answered by moving the beam: aimed at the crosshair the light runs along the *view's*
+  axis, while the module goes through the weapon's pose like the rest of the gun — and
+  at the hip that pose is canted for the eye's sake, so the box and the light it emits
+  were 7.3° apart (5.9° on the sub-machine gun, 5.3° on the pistol, 0.4° with the
+  sights up). It is a hip-hold problem from end to end, which is why it appeared the
+  moment the beam started hitting the crosshair.
+  A real laser is *zeroed* — adjusted in its mount until the beam meets the sight line
+  — and that is what `fitting_aim` does to the module now: the pose, then a rotation
+  about the module's own mouth that puts its axis on the beam. The mouth is the pivot,
+  so the window the light leaves from is a fixed point of the turn: the beam starts
+  where it started. The torch goes through the same turn and for the same reason, plus
+  one more — where a torch is pointed *is* the middle of the view (the pool and the
+  dazzle are both effects of the crosshair), so its cone had the same disagreement
+  with its own light, only visible earlier because a cone is 19 cm long.
+  `a_rail_fitting_faces_its_own_light` is three claims: the angle on the matrix the
+  fitting is drawn through (under half a degree, three weapons, three aims), the same
+  angle on the pose alone (over 4° at the hip, so the test says what it was fixing),
+  and the module's own back corner looked for in `assemble`'s *output* where the
+  turned matrix puts it — the one assertion that fails when the wiring is taken back
+  out of `assemble`, which is how it was checked.
+  *And looked at in the running game*: `docs/shots/16_laser_module_and_beam_in_game.png`
+  is the player's own build — MK-7, laser on the under-rail, 废土竞技场 — with the
+  module clear of the fore-end and the beam leaving its face on the way to the
+  crosshair. **The same frame before the fix was not compared**: the angle is the
+  test's, and the picture is the after.
+
+- **The knife swung like a spear, so it swings like a knife now (latest round)**: two
+  reports, one animation, and the second report is the one that shaped it — "近战武器
+  没有攻击动画", and then, of what replaced it, "不应该是戳，而应该是挥刀".
+  *Why there was nothing at all.* A blade goes through the same path a round does
+  (`fire_player_shot`), and every motion on that path belongs to the round: camera
+  recoil is already skipped for a blade (`if !s.melee`), but the arm is not —
+  `Weapon::fire` adds one `kick` for whatever was fired, and `kick` is the weapon
+  shoved *back* into the shoulder with the muzzle tipped up. For a rifle that is the
+  round leaving; for a knife it is a gun that hits, with nothing in the arm.
+  *And why the replacement was wrong.* It lunged: 0.15 m away from the eye and back,
+  which is a stab, and a stab is what a knife does not do. What the hand does is
+  stay where it is and let the point travel — the knife's point is 29 cm up the blade
+  from its grip, and `Pose::swing` is a rotation *about that grip*, so a swing is
+  `SLASH_YAW` (0.72 rad) to each side of rest with `SLASH_DIP` (0.18) of it dropping
+  and `SLASH_REACH` (0.035 m) of step at the end of the cut, over `SLASH_WINDUP` /
+  `SLASH_CUT` / the rest of a `MELEE_TIME` of 0.36 s — drawn back to the right and
+  up, whipped across to the left and down, brought home. Forward travel is 0.011 m
+  against 0.133 m right and 0.145 m left, and
+  `a_knife_is_swung_across_and_comes_back` is those three numbers plus the rise, the
+  fall, the return to within 5 mm, and a blade at rest that does not move at all.
+  It fails on the old motion, which is how the shape was checked rather than the
+  size.
+  *What it looks like* is `docs/shots/swing.png`: eight frames of the swing on one
+  sheet, through the game's own projection at 640×360 a frame
+  (`cargo test -- --ignored --nocapture render_the_knife_swing`). **The running game
+  was not re-driven** — the frames are the pose function's and not a play session's,
+  so the shape is verified and the *feel* is not; hold the trigger on a knife and
+  the sweep is what to look at, and `MELEE_TIME`, `SLASH_YAW`, `SLASH_DIP` are the
+  three numbers that set how long, how wide and how deep.
+  *A swing that meets nothing is silent*, and it stays silent: there is no whoosh in
+  `assets/sounds/` and none was invented for this. The only sound a blade makes is
+  the flesh hit the round path already plays, and a blade into a wall plays nothing
+  at all, because melee skips the whole cover branch — no mark, no spark, no impact
+  voice. That is older than this round and was left alone rather than changed under
+  a report about animation.
+  *And a real bug the swing found.* The in-hand sheet was **upside down** — and had
+  been since the function that writes it was written. `Image::export_png` flips what
+  it is given (macroquad 0.4.16, `src/texture.rs:318`), the mesh rasteriser feeds it
+  rows counted the other way and comes out right, and the screen-space writer fed it
+  screen rows straight across, so every picture through it came out mirrored: the
+  weapon drawn *above* the crosshair it is held under, which is why the first version
+  of this round's sheet showed a cut that drops as a cut that rises. Nothing judged
+  on those sheets — sight sizes, in the armory and in the hand — was about up and
+  down, which is how it survived. `docs/shots/optics-in-hand/` was re-rendered from
+  the fixed writer; the rifle is under the crosshair in it now.
+
+- **A laser made the rifle shrink in the armory, and only there (latest round)**: "加上
+  镭射之后枪突然变小了，差点找不到了". The portrait frames itself on what it is handed
+  (`hud::portrait_fit` fits the panel to the drawing's width and height), and a laser's
+  beam is twenty-six metres of geometry, so the rifle was drawn at a twentieth of its
+  size with a beam running off the panel. In the game the weapon was always fine: the
+  viewmodel is not fitted to anything. `preview_mesh` leaves light out now — the
+  *module* is lit and stays, so the bench still shows what was fitted — and
+  `a_laser_does_not_shrink_the_armory_portrait` is the number, checked by deleting the
+  filter and watching it fail with "the portrait is 25.6 m wide, which is a beam rather
+  than a rifle". `docs/shots/rail/Rifle.png` is the same weapon bare, with a laser and
+  with a torch, all three the same size. **The armory panel itself was not photographed**:
+  the sheet draws `preview_mesh` — the mesh the panel draws — but the panel's own draw
+  was not looked at.
+
+- **The flashbang did nothing, and here is why (latest round)**: "闪光弹完全不闪", against
+  an expectation that is exactly right — a hostile that stops for a few seconds, a
+  screen that goes white and comes back, and turning away as the defence. Three
+  separate things were wrong, and none of them was the code that *looked* wrong.
+  *The radius was 11 m and a grenade goes 15 to 20.* So the one person who never
+  got flashed by a flashbang was the person who threw it: `d < radius` failed every
+  time, and the enemies only went blind if they happened to be near where it landed.
+  It is 18 m now, and the white has a floor of half the screen, so a flash thrown
+  across a room and *looked at* costs the screen — which is what makes turning away
+  the defence rather than standing further off.
+  *There was nothing in the world.* A flashbang was a white screen and no event: the
+  arena looked identical to everyone not looking at it. `Effects::flash_burst` is
+  three shells at the blast for 0.22 s now, drawn in the world pass.
+  *A blinded hostile kept walking.* `blind_t` was wired into `los` and nothing else,
+  and a unit that cannot see the player walks to where it last saw them — which is
+  what a unit that never saw them does, so the blindness was real in the code and
+  invisible on the field. A flashed unit now stands still for `FLASH_STAGGER`
+  (1.6 s) and spends the rest of its three seconds coming off the light.
+  `a_flashed_unit_stands_still_while_the_light_is_on_it` measures the window as
+  distance covered against an unflashed control (under a quarter of it), and
+  `a_flash_leaves_a_burst_that_is_gone_by_the_next_breath` holds both halves of the
+  burst: it draws, and it is over in a fifth of a second. **The running game was not
+  re-driven**: what a flash feels like to throw and be caught by is a thing to play,
+  and this round it is a thing to test.
+
+- **The four corrections, and a bug they exposed (latest round)**: player feedback
+  on the fittings round, four items, plus something the play session found that
+  nothing in the repo could have.
+  *The scope is a circle again, with a ring you can see through.* The revision
+  before this had the aperture open until it swallowed the window; the answer was
+  "应该是中间一个圆，但圆形以外的视野不应该是看不见的". So the circle is back
+  (`hud::scope_radius`: 0.29 → 0.40 of the height, opening across the first half of
+  the aim) and the ring around it is `SCOPE_MASK` at 0.55 rather than solid —
+  `docs/shots/15_scope_circle_with_visible_around_it.png` is a prism on the M4A1,
+  aimed: the reticle, the circle, and the darkened world still readable outside it.
+  `the_scope_is_a_circle_and_the_ring_around_it_is_not_a_wall` holds the arithmetic,
+  including the alpha — a ring at 1.0 is the keyhole this was changed twice to get
+  rid of, and the test says so.
+  *The three magnified sights have been resized four times*, and the last answer is
+  the one that is measured rather than guessed: 6.5 cm for the marksman's, 5.5 for the
+  prism, 8.5 for the long one, against the micro dot's own 5.6. `docs/shots/optics/`
+  is one picture per sight on the same rifle at the same scale (the armory's own
+  orthographic portrait), and `docs/shots/optics-in-hand/` is the same six through the
+  *viewmodel's* projection at 1280×720 — which is the sheet that matters, because the
+  complaint was "改枪界面没问题，局内看着瞄准镜很大" and the difference between those two
+  pictures is perspective: a sight sits a third of a metre from the eye, where the
+  same millimetres are worth twice the screen. `a_sight_in_the_hand_takes_a_small_share_of_the_screen`
+  is the measurement, and it prints every sight's share as well as asserting it: the
+  bench's are 4 to 9% of the screen height in the hand, where the 11.5 cm long scope
+  was 11. What to look at in those pictures is that the *dark square in front of the
+  receiver* — which is the rear of the rifle itself, seen through its own near faces
+  where the near plane cuts them — is not the sight.
+  *The rail fittings were hanging in the air.* `Def::rail` put the module 6.2 cm
+  below the support hand's centre, which is below the bottom of the fist's own box:
+  a light under a hand that is not touching it, and the report was "应该装在护木或
+  导轨上，你看看你装在哪了". They now sit just under the fore-end and forward of the
+  fingers; looked at on `target/rail/*.png` (the sheet draws the torch and not the
+  laser, because a 26 m beam takes the sheet's whole bounding box with it).
+  *And a real bug, found by looking at a screenshot of the game and asking what the
+  big hollow black shape was.* Faces that cross the near plane were being **dropped**
+  rather than **cut**: `project` refused any triangle with a corner behind the eye, and
+  refusing is not the same as cutting — the near plane is a plane, so the part of a
+  face in front of it should be drawn and the part behind it should not. What dropping
+  does instead is remove the *front* of a box and leave the player looking into the
+  back of it, which is what a rifle's stock a hand's width from the eye was. No
+  geometry moved; `screen_face` is Sutherland–Hodgman on one plane now, the drawing
+  path fans what it returns, and `a_face_across_the_near_plane_is_cut_and_not_dropped`
+  holds it. (The hollow shape in that screenshot turned out **not** to be this — it is
+  the gap between the rifle's handguard and its receiver with the dark arena showing
+  through, which the in-hand sheet shows as geometry — but the stock was being cut
+  open every frame and nobody had looked.)
+  *A laser is a line, not a stub.* Its beam runs to 26 m and the projection does
+  the rest — and it is drawn **unlit** (`Tri::lit`), because the first version went
+  through the viewmodel's key-light shading like a surface and a red light at 0.26
+  brightness is a black one. `docs/shots/14_laser_beam_to_the_horizon.png` is it in
+  the hand.
+  *A torch dazzles, like a flashbang and for as long as it is held on somebody*:
+  the same `Enemy::blind` and the same look-at cone, topped up every frame
+  (`dazzled_by_torch`, `TORCH_RANGE` 20 m, `TORCH_DAZZLE` 0.35 s).
+  `a_torch_dazzles_what_it_is_pointed_at` holds the two directional halves — what it
+  is pointed at, and what it is turned away from. **It is invisible to the player**:
+  there is no feedback that a hostile has gone blind, so this is a test and cannot
+  be photographed — which is the same gap the flashbang has, and is what "闪光弹也没
+  做好" may be about.
+  *And a build stamp, because three rounds of this have been a stale binary.* The
+  main menu's bottom-left corner now reads `TIDES OF R'LYEH v1.0.0 · 10-07 21:52`:
+  the version and when the *executable on disk* was written, read from its own
+  metadata at startup (`hud::build_stamp`) rather than recorded at compile time,
+  because the question is which file is running. The time is local, by way of a
+  `GetLocalTime`/`GetSystemTime` pair in `win32` — the first version printed UTC, and
+  a file written at 21:46 shown as 13:46 is a file from somebody else's day. A player
+  who is told about a change and cannot see it can now check whether they are running
+  it at all.
+  *And the bug.* The player fitted a laser to the M4A1, played, and it was gone the
+  next time they looked: `config.rs`'s reader listed seven weapon keys **by hand**
+  while the writer walked `ALL_KINDS`, so every weapon added after the seventh had
+  its build written to a file that never read one back. Two lists, one of them
+  silently short. Both are derived from `ALL_KINDS` now, and
+  `every_weapon_kind_keeps_its_build_and_paint_through_the_file` round-trips the
+  *file text* for all fourteen kinds — it fails with the old table, which is how it
+  was checked. The player's own M4A1 laser was put back in their config by hand
+  (their settings file is theirs; the fix is so it stays there).
+
+- **A rail under the fore-end: a laser and a torch**: the third
+  slot in the bench — its own and not the optic's, because a weapon wears a sight
+  and a light at once and they are bolted to two different rails (`UNDERBARREL`,
+  on every gun that has a fore-end; the knife has none). Two fittings, and the two
+  are verified differently because they are different kinds of thing.
+  *The laser* is numbers: `BaseSpread` ×0.80 and nothing else, held by
+  `a_laser_tightens_the_hipfire_and_nothing_else` — which checks the *negative*
+  half too, that the sight picture and the damage did not move.
+  *The torch* is not numbers at all, and that is the honest part: there is no
+  dynamic lighting in this game to brighten a wall with, so what it draws is a
+  beam in the hand and a pool of light where it is pointed (`hud::draw_torch`).
+  `docs/shots/12_rifle_torch_pool_of_light.png` is the MK-7 with one fitted in a
+  bunker corridor: the wall at the crosshair is a third brighter than the corners
+  and the falloff has no edge in it. **The first version of that pool was too
+  faint to see** — four discs at under a tenth of alpha each, which the shot above
+  was taken to find out — and a fitting a player cannot tell they fitted is a
+  fitting that does nothing, so the alphas went up.
+  *Where it hangs* is derived rather than authored per weapon (`Def::rail`): under
+  the support hand, which is where a fore-end rail is and the one anchor every
+  weapon that can take a fitting already has, and off the barrel for the weapons
+  held in one hand. A derivation is exactly the sort of thing that looks right in
+  the arithmetic and hangs wrong on the weapon, so `render_the_rail_fittings`
+  draws it — bare, laser, torch, five weapons, on the armory's own preview
+  projection. **Those sheets were looked at**, and they can only show so much: the
+  preview has no hands in it, so what they confirm is that the module sits under
+  the weapon's line and the beam leaves forward. **That placement was wrong
+  first time round** — 6.2 cm below the hand's centre is *below the fist's own
+  box*, a light hanging in the air under a hand that is not holding it, and the
+  report was "应该装在护木或导轨上，你看看你装在哪了". It is now just below the
+  fore-end and *forward of the fingers* (`Def::rail`'s offsets), which is where an
+  underbarrel rail is, and `target/rail/*.png` is where that was looked at — the
+  laser's own beam is twenty-six metres long and swallows a sheet's own box, so
+  the sheet draws the torch, whose module is the same box at the same anchor.
+- **Three more sights, a suppressor, and the rule they hang off**:
+  *The sights*: `holo_sight` (a square pane), `prism_4x` and `long_scope`, with
+  `marksman_scope` retuned from −10 to −14 so that "a scope" is magnified at all.
+  Fitting one of the magnified three makes *any* weapon scoped, which is the rule
+  in `Weapon::scoped`: the fitting has to pull the aim past 30° **and** the
+  weapon's own sights have to have been wider than that — two-sided on purpose,
+  because the two marksman rifles shoot 22 and 26 degrees through a rear notch and
+  an eyepiece drawn in front of iron sights is one the rifle has not got.
+  `a_magnified_optic_is_scoped_and_a_dot_sight_is_not` is that rule, and
+  `docs/shots/11_rifle_prism4x_scoped.png` is the MK-7 with a prism on its rail,
+  aimed. **The three of them were drawn too big the first time** — "三个倍镜的建模
+  不对，装在枪上看起来体积很大" — and have been resized twice since; the sizes that
+  hold and the pictures to judge them by are in this round's bullet above.
+  `every_optic_is_small_against_the_weapon_it_sits_on` is the bound that keeps the
+  22 cm version from coming back: fifteen centimetres of tube, and no taller than the
+  receiver it sits on. The bound that holds the *in-hand* size is
+  `a_sight_in_the_hand_takes_a_small_share_of_the_screen`, at nine percent of the
+  screen's height. `docs/shots/10_rifle_suppressor_prism4x_hip.png` is the rifle at the
+  hip with the can on the muzzle and a prism on the rail, painted abyss (the green
+  panes in it are the *finish*'s rail colour, not sight glass).
+  *The suppressor*: `RecoilPitch` ×0.90, more reach, and the half that is the
+  point — no muzzle flash and a quieter report (`Weapon::suppressed`, read by
+  `Weapon::try_fire` and by the shot's own sound; `Audio::play_quiet` plays the
+  same recording at a third, because a suppressed shot is not a second event).
+  `a_suppressed_barrel_has_no_muzzle_flash` holds it.
+  **What a suppressor does not do here is hide the player.** Nothing in this game
+  listens for a shot: hostiles find a player by `line_of_sight` and nothing else,
+  so there is no noise for a can to take out of it. Making that true is a gameplay
+  system — a hearing radius on firing, a sound-shaped alert beside the sight-shaped
+  one — and it wants deciding on purpose, not slipping in behind a fitting.
+  *And the net that was missing*: `every_shipped_fitting_draws_on_a_weapon_that_takes_it`.
+  Until now an optic or a muzzle device with no arm in `kit_into` drew **nothing at
+  all** and nothing in the repo could tell: the bench offered it, the numbers moved
+  and the weapon looked the same. Magazines have had that net since six of them
+  arrived without geometry; optics and muzzles had none, so all four of these were
+  one missing line away from invisible. The net was checked by *deleting* the
+  suppressor's arm — it fails with "suppressor draws nothing on Rifle, which takes
+  it" and passes again with it back.
+  **Not verified**: the new shapes have not been looked at on a sheet beside the
+  old ones (`render_the_magazines` covers magazines only, and there is no
+  equivalent for sights and muzzles); and no shot of a suppressed weapon *firing*
+  was taken, so "no flash" is a test rather than a photograph.
+  **The bench was looked at**, though: `docs/shots/13_armory_new_slot_and_five_optics.png`
+  is the armory with the rifle's 瞄具 slot focused, listing 无 / 微型红点 (已装) /
+  全息瞄具 / 射手瞄准镜 / 4 倍棱镜 / 长望远式镜, and the slot column above it reading
+  瞄具 / 枪口 / **下挂导轨** / 弹匣 — the new slot is in the bench, named, with the two
+  rail fittings one row below it, and the numbers panel showing the hovered scope's
+  瞄准视野 38° → 28°.
+- **The throwable in hand, and the four casings**: two changes, and
   the two halves of each were verified differently because they are different
   kinds of claim.
   *The weapon is put away* — not lowered to the hip, but out of the frame — and
@@ -1031,7 +1358,16 @@ What was actually tested, and what was not:
   wall, and a scope aimed at a wall is a photograph of a wall): a clear circular
   aperture with the world in it, an opaque surround, a duplex reticle with mil
   ticks, and no rifle drawn behind it. The frame before the tube drops was
-  captured too, so the swap is on the record.
+  captured too, so the swap is on the record. **That surround has been through two
+  more revisions** — an opaque ring, then no ring at all — and the one that holds
+  is the circle with a *translucent* ring around it: see the scope overlay's
+  section above, and `docs/shots/15_scope_circle_with_visible_around_it.png`, which
+  is the M4A1 with a prism on it, aimed, with the dimmed world still readable
+  outside the circle. The arithmetic is pinned by
+  `the_scope_is_a_circle_and_the_ring_around_it_is_not_a_wall` (a circle inside the
+  window at four heights, monotone opening, and a ring under 0.8 opaque);
+  **no frame of the raise itself was captured**, so the aperture opening across
+  those tenths of a second is reasoned rather than seen.
 - **The enemy hunt**: two unit tests drive a Grunt from R'LYEH's farthest spawn —
   64.8 m, the campaign's longest path — and require it to close; one that has
   never seen the player and one that has finished searching its memory. In the

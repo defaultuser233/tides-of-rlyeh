@@ -176,6 +176,29 @@ impl Effects {
         }
     }
 
+    /// The light of a flashbang, as a body in the room rather than a white screen.
+    ///
+    /// Short and huge: a flashbang going off is a thing that happens in the world
+    /// for a fifth of a second, and what the game had instead was the player's own
+    /// screen going white and nothing at all in the arena — "世界里看不到闪光".
+    /// Three shells at the same place, so the burst is a glow rather than a box, and
+    /// a life short enough that it is gone before the sound is.
+    pub fn flash_burst(&mut self, point: Vec3, radius: f32) {
+        for (scale, alpha) in [(1.0f32, 0.55f32), (0.62, 0.70), (0.30, 0.85)] {
+            self.particles.push(Particle {
+                pos: point + Vec3::Y * 0.1,
+                vel: Vec3::ZERO,
+                life: 0.22,
+                max_life: 0.22,
+                size: radius * scale,
+                color: Color::new(1.0, 0.98, 0.92, alpha),
+                gravity: 0.0,
+                drag: 0.0,
+                bounce: false,
+            });
+        }
+    }
+
     pub fn tracer(&mut self, a: Vec3, b: Vec3, color: Color, width: f32) {
         self.tracers.push(Tracer {
             a,
@@ -206,5 +229,46 @@ impl Effects {
             mb.add_beam(t.a, t.b, t.width * k, c);
         }
         *dst = mb.finish();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use macroquad::prelude::vec3;
+
+    /// A flashbang leaves light in the room, not only on the screen.
+    ///
+    /// The report was "闪光弹完全不闪", and half of what that meant is that nothing
+    /// happened in the world: the player's own screen went white and the arena
+    /// looked exactly the same. This is the other half — a burst at the blast,
+    /// which is what a flashbang is to everybody who is not looking straight at it.
+    ///
+    /// Two properties, because a burst that never goes away is worse than none: it
+    /// draws, and it is finished inside its own fifth of a second.
+    #[test]
+    fn a_flash_leaves_a_burst_that_is_gone_by_the_next_breath() {
+        let level = Level::from_layout(&crate::maps::arena());
+        let mut fx = Effects::new();
+        let mut mesh = crate::mesh::empty_mesh();
+        fx.write_mesh(&mut mesh);
+        let quiet = mesh.vertices.len();
+
+        fx.flash_burst(vec3(0.0, 1.0, 0.0), 9.0);
+        fx.write_mesh(&mut mesh);
+        assert!(
+            mesh.vertices.len() > quiet,
+            "the burst drew nothing at all on a mesh with {quiet} vertices",
+        );
+
+        for _ in 0..30 {
+            fx.update(1.0 / 60.0, &level);
+        }
+        fx.write_mesh(&mut mesh);
+        assert_eq!(
+            mesh.vertices.len(),
+            quiet,
+            "the burst is still in the room half a second later",
+        );
     }
 }
