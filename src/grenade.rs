@@ -262,9 +262,16 @@ const SMOKE_LIFE: f32 = 16.0;
 /// where the enemy is looking *now*, and a light that goes off four seconds
 /// after you throw it is a light the enemy has already walked away from.
 const FLASH_FUSE: f32 = 1.7;
-/// How far the light reaches. Wider than the frag's blast, because it has no
-/// damage to trade for the range.
-const FLASH_RADIUS: f32 = 11.0;
+/// How far the light reaches.
+///
+/// Wider than the frag's blast by a long way, because it has no damage to trade
+/// for the range — and wide enough that a flash thrown *away* from the thrower is
+/// still thrown *through* their view: a light that only reached as far as a
+/// grenade can be thrown would never blind anybody who was not already on top of
+/// it, which is what 11 m turned out to mean. Looking at it is what costs the
+/// screen, and looking away is the defence — see `main.rs`'s `Blast::Light`, where
+/// the white is scaled by how much of the beam the player's face is in.
+const FLASH_RADIUS: f32 = 18.0;
 /// How long the light takes the player's own screen, and an enemy's ability to
 /// find them. Short: it is a window, not a stun.
 pub const FLASH_BLIND: f32 = 3.0;

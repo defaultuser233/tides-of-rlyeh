@@ -25,6 +25,16 @@ const SEARCH_REACH: f32 = 1.5;
 /// corridors for a whole mission.
 const SEARCH_HOLD: f32 = 4.0;
 
+/// How much of a flashbang's blindness a unit spends *stopped* rather than
+/// recovering: the seconds it stands with its eyes shut before it starts looking
+/// for the player again.
+///
+/// Shorter than `grenade::FLASH_BLIND` on purpose — the last of a blindness is the
+/// unit coming off the light — and long enough to be worth the grenade: three
+/// seconds of blindness at this fraction is about two seconds of a hostile that is
+/// not moving and not shooting, which is a window to cross a room in.
+const FLASH_STAGGER: f32 = 1.6;
+
 /// Ground covered per full two-step cycle, in metres. Dividing a unit's speed
 /// by this is what ties the legs to how fast it is actually travelling, and
 /// about doubles the time a step takes against what the eye expects at that
@@ -1423,6 +1433,9 @@ impl Enemy {
     /// Takes the eyes away for `seconds`. Longer is not better than the last
     /// call: two flashes in a row are three seconds of blindness, not six, which
     /// is what keeps a flash the answer to a corner rather than to a fight.
+    /// How long the first part of a flash is: the seconds a unit spends stopped
+    /// rather than recovering. Shorter than `grenade::FLASH_BLIND`, because the
+    /// last of a blindness is the unit looking for the player again.
     pub fn blind(&mut self, seconds: f32) {
         self.blind_t = self.blind_t.max(seconds);
     }
@@ -1656,8 +1669,18 @@ impl Enemy {
         }
         let searching = !los && self.seen_player;
         let hunting = !los && !self.seen_player;
+        // Blinded *and* still in the light: not searching for the player, standing
+        // with its eyes shut. `blind_t` runs the whole blindness and this is the
+        // first part of it, so the last of a flash is the recovery — a unit that
+        // comes off the light already walking again.
+        //
+        // What a blinded unit did before this was walk to where it last saw the
+        // player, which looks exactly like a unit that was never flashed: the
+        // blindness was real in the code and invisible on the field, which is what
+        // "闪光弹完全不闪" and "使敌人暂停行动几秒" were about from the other side.
+        let dazzled = self.blind_t > FLASH_STAGGER;
         let mut desired = Vec2::ZERO;
-        if player.alive && self.spawned_t > 0.35 {
+        if player.alive && !dazzled && self.spawned_t > 0.35 {
             if s.reach > 0.0 {
                 // Melee: close the distance. An archetype with a standoff
                 // lashes from the edge of its reach instead of pressing in.
@@ -2599,6 +2622,50 @@ mod tests {
     /// downstream reads — `alert`, whether it may fire, whether it may reach out
     /// with a claw — so the test drives the perception block and checks the gate
     /// rather than any single decision behind it.
+    /// A flashed unit stands still before it starts looking again.
+    ///
+    /// Seeing nothing is not the same as doing nothing: a unit whose `los` went
+    /// dark used to walk to where it last saw the player, which is what a unit that
+    /// never saw them does, so a flashbang was invisible in the fight — "闪光弹完全
+    /// 不闪" was the report and this is half of it. The other half is the white on
+    /// the player's own screen; this is the window the grenade buys, and it is
+    /// measured as *distance covered*: a dazzled unit within a second covers a
+    /// fraction of what the same unit covers on its way to the player.
+    #[test]
+    fn a_flashed_unit_stands_still_while_the_light_is_on_it() {
+        let (level, player, _) = worst_case();
+        let mut rng = Rng::new(11);
+        let dt = 1.0 / 60.0;
+        // Two units from the same place, side by side: two seconds of contact each
+        // so both are engaged and walking, a flashbang on one of them, then a
+        // second of measuring what each of them did.
+        let at = player.pos + vec3(0.0, 0.0, -8.0);
+        let mut free = Enemy::spawn(Kind::Grunt, at, 1, &mut rng);
+        let mut flashed = Enemy::spawn(Kind::Grunt, at, 1, &mut rng);
+        for _ in 0..120 {
+            let _ = free.update(&level, &player, &[], 0, dt, &mut rng);
+            let _ = flashed.update(&level, &player, &[], 0, dt, &mut rng);
+        }
+        flashed.blind(crate::grenade::FLASH_BLIND);
+        let (from_free, from_flashed) = (free.pos, flashed.pos);
+        for _ in 0..60 {
+            let _ = free.update(&level, &player, &[], 0, dt, &mut rng);
+            let _ = flashed.update(&level, &player, &[], 0, dt, &mut rng);
+        }
+        let (moved, stood) = (
+            free.pos.distance(from_free),
+            flashed.pos.distance(from_flashed),
+        );
+        assert!(
+            moved > 0.5,
+            "the unflashed control did not move either, so this measures nothing: {moved:.2} m",
+        );
+        assert!(
+            stood < moved * 0.25,
+            "a flashed unit covered {stood:.2} m in a second against {moved:.2} m unflashed",
+        );
+    }
+
     #[test]
     fn a_blinded_unit_stops_seeing_the_player() {
         let (level, player, _) = worst_case();

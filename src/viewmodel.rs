@@ -41,6 +41,23 @@ const STANCE_RATE: f32 = 5.5;
 const WALK_BOB: f32 = 0.50;
 /// Length of the grenade throw motion, in seconds.
 const GRENADE_TIME: f32 = 0.50;
+/// Length of a melee swing, in seconds: the draw back, the cut across, and the
+/// arm coming home. Short — a knife that is still moving when the next swing
+/// starts reads as a knife that is stuck — but long enough that the three parts
+/// do not run together into one twitch.
+const MELEE_TIME: f32 = 0.36;
+/// The swing's own clock, as shares of `MELEE_TIME`: back over the first of
+/// these, across on the second, home over what is left.
+const SLASH_WINDUP: f32 = 0.26;
+const SLASH_CUT: f32 = 0.26;
+/// The arc the point travels, in radians to each side of the rest pose, and how
+/// much of that is a downward cut rather than a flat sweep.
+const SLASH_YAW: f32 = 0.72;
+const SLASH_DIP: f32 = 0.18;
+/// How far the wrist rolls the blade as the arm crosses, and how far the blade
+/// reaches forward at the end of it, in metres.
+const SLASH_ROLL: f32 = 0.50;
+const SLASH_REACH: f32 = 0.035;
 
 /// How fast the weapon leaves the eye when a throwable comes to hand, and comes
 /// back when it goes.
@@ -80,17 +97,21 @@ const HAND_FALL: f32 = 0.45;
 /// the time the weapon waits for it. See `arm_falling`.
 const THROW_CLEAR: f32 = 0.45;
 
-/// How far the sights have to be up before the sniper's scope tube is left out
-/// of the in-hand model, as a share of the ADS weight. Halfway is where the eye
-/// reaches the eyepiece; past it the tube can only block the view the scope
-/// exists to provide, and `hud::draw_scope_overlay` is drawing the aperture
+/// How far the sights have to be up before the rifle is left out of the
+/// in-hand model, as a share of the ADS weight. Halfway is where the eye
+/// reaches the eyepiece; past it the rifle can only block the view the sight
+/// exists to provide, and `hud::draw_scope_overlay` is drawing that view
 /// instead. The HUD reads this too, so the two swap on the same frame.
 pub const SCOPE_HIDE_ADS: f32 = 0.55;
-/// The sniper's aperture, as a share of screen height, at the moment the tube
-/// drops and again once the sight is fully up. Opening between the two reads as
-/// the scope settling rather than as a cut.
+/// The aperture, as a share of screen height, at the moment the rifle drops and
+/// again once the sights are settled. From the first to the second it opens:
+/// `hud::scope_radius` is where, and the ring around it is what used to be black.
 pub const SCOPE_RADIUS_MIN: f32 = 0.29;
 pub const SCOPE_RADIUS_MAX: f32 = 0.40;
+/// How much of the aim the aperture takes to open, as a share of the travel
+/// after `SCOPE_HIDE_ADS`. Halfway: the tube is gone by the time the sights are
+/// up, and the last of an aim is for settling.
+pub const SCOPE_OPEN: f32 = 0.55;
 
 /// How a crouch carries the weapon: a little lower, a little closer in.
 const CROUCH_CARRY: Vec3 = vec3(0.0, -0.035, -0.030);
@@ -110,6 +131,20 @@ const STEEL_DARK: Color = Color::new(0.13, 0.14, 0.16, 1.0);
 const POLY: Color = Color::new(0.15, 0.16, 0.17, 1.0);
 const RAIL: Color = Color::new(0.30, 0.31, 0.34, 1.0);
 const BLACK: Color = Color::new(0.07, 0.07, 0.08, 1.0);
+/// Where a laser's beam leaves its module: the front face, in the weapon's own
+/// frame. Written down once because two things have to agree about it — the module
+/// that `kit_into` draws and the beam that `assemble` draws from it.
+const LASER_BORE: Vec3 = vec3(0.0, 0.0, 0.034);
+/// The light itself. Bright and saturated, because it is drawn unlit: a beam that
+/// went through the key light is a beam at 0.26 brightness, which is a black one.
+const LASER_RED: Color = Color::new(0.95, 0.12, 0.12, 1.0);
+/// How far a beam is drawn. Far enough that the projection does the work: the two
+/// ends are what is drawn and perspective draws the line between them.
+const LASER_REACH: f32 = 26.0;
+
+/// Sight glass, in the sights that have a window rather than a tube: dark, cold
+/// and green enough that a holo's pane does not read as a hole in the housing.
+const GLASS: Color = Color::new(0.10, 0.21, 0.19, 1.0);
 const WOOD: Color = Color::new(0.45, 0.28, 0.14, 1.0);
 const WOOD_DARK: Color = Color::new(0.31, 0.19, 0.10, 1.0);
 const OLIVE: Color = Color::new(0.28, 0.30, 0.22, 1.0);
@@ -373,20 +408,37 @@ struct Tri {
     b: Vec3,
     c: Vec3,
     color: Color,
+    /// Whether `shaded` bakes the key light into the face.
+    ///
+    /// On for everything that is a *surface*, which is everything a weapon and a
+    /// hand are made of. Off for the two faces in the view that are light rather
+    /// than lit — a laser's beam and a torch's cone — for the same reason the
+    /// world's flames are unlit (`mesh::MeshBuilder::plain`): a light multiplied
+    /// by a key it has nothing to do with is a light that goes out, and a red
+    /// beam at 0.26 brightness is a black one. That is exactly what the first
+    /// version of the beam was.
+    lit: bool,
 }
 
 impl Tri {
     fn new(a: Vec3, b: Vec3, c: Vec3, color: Color) -> Self {
-        Self { a, b, c, color }
+        Self {
+            a,
+            b,
+            c,
+            color,
+            lit: true,
+        }
     }
 
     fn map(&self, m: Mat4) -> Self {
-        Self::new(
-            m.transform_point3(self.a),
-            m.transform_point3(self.b),
-            m.transform_point3(self.c),
-            self.color,
-        )
+        Self {
+            a: m.transform_point3(self.a),
+            b: m.transform_point3(self.b),
+            c: m.transform_point3(self.c),
+            color: self.color,
+            lit: self.lit,
+        }
     }
 
     fn finite(&self) -> bool {
@@ -400,6 +452,9 @@ impl Tri {
     /// Two-sided shading: the face normal is flipped towards the eye, so a panel
     /// is lit by whichever of its sides the player can actually see.
     fn shaded(&self) -> Color {
+        if !self.lit {
+            return self.color;
+        }
         let n = (self.b - self.a).cross(self.c - self.a).normalize_or_zero();
         let middle = (self.a + self.b + self.c) / 3.0;
         let n = if n.dot(middle) < 0.0 { -n } else { n };
@@ -413,6 +468,17 @@ impl Tri {
             self.color.b * f,
             self.color.a,
         )
+    }
+}
+
+/// Everything added to `out` since `from` is light rather than a lit surface —
+/// see `Tri::lit`, and `kit_into`'s laser and torch arms, which are the only
+/// callers. Written as a range rather than as a flag on every primitive because
+/// the primitives are shared: a `tube` is a barrel one place and a beam the
+/// next.
+fn unlit_from(out: &mut [Tri], from: usize) {
+    for t in out[from..].iter_mut() {
+        t.lit = false;
     }
 }
 
@@ -2079,10 +2145,91 @@ fn ports(out: &mut Vec<Tri>, at: Vec3, half: f32, wall: f32, y: f32) {
     }
 }
 
+/// A laser's beam, in the *view's* own space: from the module's face to a point on
+/// the view's axis, which is where the crosshair is.
+///
+/// A laser is a sight, and a sight points at what the shooter is aiming at. Drawn
+/// from the weapon's own frame — which is what this was — the beam points wherever
+/// the *barrel* happens to be pointing, and at the hip that is off to the side of
+/// the screen: a red line running past the crosshair and off the edge. The two ends
+/// are the geometry: one at the module, one 26 m along the view axis, and the
+/// perspective draw makes the line between them, so the beam converges on the
+/// crosshair from wherever the weapon is being held.
+///
+/// What that leaves is the *module*: it goes through the pose like the rest of the
+/// weapon, which at the hip tilts it 7° off the line its own light takes, and the
+/// report was the one that comes of looking at it — "但是和发射镭射的配件不平行了".
+/// `fitting_aim` is the other half of this: the module is turned to face down the
+/// beam, so the line leaves the window it is drawn coming out of.
+///
+/// It is drawn unlit, and appended to the weapon's own list, which is in two spaces
+/// already — the weapon through its pose and the hands through theirs.
+fn laser_beam(out: &mut Vec<Tri>, from: Vec3) {
+    let n = out.len();
+    tube(
+        out,
+        from,
+        0.0018,
+        vec3(0.0, 0.0, LASER_REACH),
+        0.0018,
+        LASER_RED,
+    );
+    unlit_from(out, n);
+}
+
+/// The rotation that turns a rail fitting — the laser's module, the torch's cone —
+/// to face the way its own light goes, given the pose it is being drawn through.
+///
+/// Zeroing, in other words, and it is real: a laser is *adjusted* until its beam
+/// meets the sight line, which is why the fittings on a real rail have screws in
+/// them. It is only visible at the hip, where the weapon is canted for the eye's
+/// sake — 7.3° for the rifle, 5.9° for the submachine gun, 5.3° for the pistol, and
+/// under half a degree once the sights are up, which is a number
+/// (`a_rail_fitting_faces_its_own_light`) rather than an impression.
+///
+/// The pivot is the *mouth*, the point the light leaves from, so the two things
+/// this exists to keep together stay together: the module's window is where the
+/// beam starts, and the module is what the beam is parallel to. The cost is that
+/// the back of the module lifts off the rail by about 8 mm at the hip, which is
+/// what an adjusted fitting does and is not visible at an arm's length.
+///
+/// A rigid matrix carries the metre step `+z` without shrinking it, so neither
+/// vector here is ever zero.
+fn fitting_aim(mat: &Mat4, kind: WeaponKind) -> Mat4 {
+    let mouth = def(kind).rail() + LASER_BORE;
+    let at = mat.transform_point3(mouth);
+    let axis = (mat.transform_point3(mouth + Vec3::Z) - at).normalize_or_zero();
+    let light = (vec3(0.0, 0.0, LASER_REACH) - at).normalize_or_zero();
+    Mat4::from_translation(at)
+        * Mat4::from_quat(Quat::from_rotation_arc(axis, light))
+        * Mat4::from_translation(-at)
+}
+
 /// Eased 0..1 ramp, flat at both ends.
 fn smooth(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+/// Where a knife is in its arc at `t` (0..1 through the swing): -1 drawn back,
+/// 0 at rest, +1 at the end of the cut.
+///
+/// Three parts rather than one out-and-back ramp, because those are the three
+/// parts of a swing and a single ramp has none of them: it is fastest at the
+/// start, which on the screen is a weapon flung at the target and then floated
+/// home. This eases back, crosses in the shortest of the three windows, and
+/// settles. What it is *not* is symmetric — a swing is a draw and a cut and a
+/// return, and only the middle one is the attack.
+fn slash_arc(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    let across = SLASH_WINDUP + SLASH_CUT;
+    if t < SLASH_WINDUP {
+        -smooth(t / SLASH_WINDUP)
+    } else if t < across {
+        -1.0 + 2.0 * smooth((t - SLASH_WINDUP) / SLASH_CUT)
+    } else {
+        1.0 - smooth((t - across) / (1.0 - across))
+    }
 }
 
 /// Resting and aimed poses for one weapon. `aim` lies on the sight line, so its
@@ -2123,6 +2270,35 @@ struct Def {
     drum: Vec3,
     /// Where the drum's radius comes from, in metres.
     drum_r: f32,
+}
+
+impl Def {
+    /// Where an underbarrel fitting hangs: on the fore-end, ahead of the hand.
+    ///
+    /// Derived rather than authored per weapon, and off the *support hand*, which
+    /// is the one anchor every weapon that can take a fitting already has — the
+    /// hand is closed on the fore-end, so the rail under the fore-end is just
+    /// below it and the module further forward than the fingers reach, which is
+    /// what an underbarrel rail is: a length of it in front of the hand, not a
+    /// point under the palm.
+    ///
+    /// The first version of this put the module 6.2 cm *below* the hand's centre,
+    /// which is below the bottom of the fist's own box: a light hanging in the air
+    /// under a hand that is not touching it. "应该装在护木或导轨上，你看看你装在哪了."
+    /// The offset below is now the fore-end's own thickness — the hand closes on
+    /// the fore-end, so its centre is on the surface — and the offset forward is
+    /// past the hand's box (half of 0.044, plus the module's own 0.036 half).
+    ///
+    /// A weapon with no foregrip is held in one hand and has nothing to hang
+    /// anything from, so its rail is measured off the barrel instead: past halfway
+    /// from the sight to the muzzle, just under the barrel, which is where a
+    /// pistol's own rail is.
+    fn rail(&self) -> Vec3 {
+        match self.support {
+            Some(at) => at + vec3(0.0, -0.018, 0.086),
+            None => self.optic.lerp(self.muzzle, 0.58) + vec3(0.0, -0.016, 0.0),
+        }
+    }
 }
 
 fn def(kind: WeaponKind) -> Def {
@@ -2533,8 +2709,13 @@ fn magazine_fit_length(kind: WeaponKind, build: &WeaponBuild) -> f32 {
 /// in-hand draw read. A part the match has never heard of still draws — see its
 /// last arm, which is there because six magazines once reached the catalogue
 /// without geometry and nothing in the game could tell.
-fn kit_into(out: &mut Vec<Tri>, kind: WeaponKind, build: &WeaponBuild) {
+fn kit_into(
+    out: &mut Vec<Tri>,
+    kind: WeaponKind,
+    build: &WeaponBuild,
+) -> Option<std::ops::Range<usize>> {
     let d = def(kind);
+    let mut aimed = None;
     for entry in &build.entries {
         match entry.part.0 {
             "micro_dot" => {
@@ -2547,17 +2728,126 @@ fn kit_into(out: &mut Vec<Tri>, kind: WeaponKind, build: &WeaponBuild) {
                 );
             }
             "marksman_scope" => {
-                kit_box(out, d.optic, vec3(0.017, 0.018, 0.080), RAIL);
+                kit_box(out, d.optic, vec3(0.011, 0.011, 0.030), RAIL);
                 kit_box(
                     out,
-                    d.optic + vec3(0.0, 0.0, 0.082),
-                    vec3(0.019, 0.019, 0.006),
+                    d.optic + vec3(0.0, 0.0, 0.032),
+                    vec3(0.013, 0.013, 0.004),
+                    BLACK,
+                );
+            }
+            // A holographic sight: a square pane standing on a low base, which is
+            // what makes it the fast one of the five — its dot is for finding a
+            // target in, not for measuring one with.
+            "holo_sight" => {
+                kit_box(out, d.optic, vec3(0.014, 0.010, 0.020), RAIL);
+                kit_box(
+                    out,
+                    d.optic + vec3(0.0, 0.016, 0.017),
+                    vec3(0.013, 0.012, 0.003),
+                    STEEL_DARK,
+                );
+                kit_box(
+                    out,
+                    d.optic + vec3(0.0, 0.016, 0.019),
+                    vec3(0.010, 0.009, 0.001),
+                    GLASS,
+                );
+            }
+            // A prism: four power in a block the length of a pack of cards, with
+            // an eyepiece behind it and an objective in front, which is what a
+            // prism sight is — the tube folded up inside the block.
+            "prism_4x" => {
+                kit_box(out, d.optic, vec3(0.012, 0.011, 0.026), RAIL);
+                kit_box(
+                    out,
+                    d.optic + vec3(0.0, 0.0, -0.029),
+                    vec3(0.009, 0.009, 0.003),
+                    STEEL_DARK,
+                );
+                kit_box(
+                    out,
+                    d.optic + vec3(0.0, 0.0, 0.028),
+                    vec3(0.011, 0.011, 0.003),
+                    BLACK,
+                );
+            }
+            // The long one: a tube with a bell on the far end and an eyepiece on
+            // the near one, drawn the way the .50's own scope is. The length is
+            // the whole of what it is.
+            "long_scope" => {
+                kit_box(out, d.optic, vec3(0.011, 0.012, 0.038), RAIL);
+                kit_box(
+                    out,
+                    d.optic + vec3(0.0, 0.0, 0.041),
+                    vec3(0.014, 0.015, 0.006),
+                    BLACK,
+                );
+                kit_box(
+                    out,
+                    d.optic + vec3(0.0, 0.0, -0.042),
+                    vec3(0.009, 0.010, 0.004),
                     BLACK,
                 );
             }
             "compensator" => muzzle_kit(out, d.muzzle, 0.065, 0.020),
             "flash_hider" => muzzle_kit(out, d.muzzle, 0.048, 0.017),
             "heavy_barrel" => muzzle_kit(out, d.muzzle, 0.130, 0.012),
+            // The can: the longest thing that goes on a muzzle and the fattest,
+            // because that is what it is. Its flash is not drawn because there is
+            // none to draw — see `Weapon::suppressed`.
+            "suppressor" => muzzle_kit(out, d.muzzle, 0.150, 0.026),
+            // The rail fittings, both of them a small module with a window in the
+            // front. The *module* is the fitting and it is drawn here, with the
+            // weapon, because that is what was bolted on; what the laser and the
+            // torch *do* is light, and light is aimed — the beam at the crosshair
+            // (`laser_beam`) and the torch's pool at the middle of the view
+            // (`hud::draw_torch`).
+            "laser" => {
+                let at = d.rail();
+                let module = out.len();
+                kit_box(out, at, vec3(0.016, 0.014, 0.030), RAIL);
+                kit_box(
+                    out,
+                    at + vec3(0.0, 0.0, 0.031),
+                    vec3(0.009, 0.009, 0.002),
+                    Color::new(0.85, 0.10, 0.10, 1.0),
+                );
+                // The module and nothing else: its beam is drawn by `assemble`,
+                // which is also what turns the module to face down its own beam
+                // (see `fitting_aim`) — the window in the front of this box is
+                // where the light has to come out, and a beam that left it at an
+                // angle is what "和发射镭射的配件不平行了" was about.
+                aimed = Some(module..out.len());
+            }
+            "flashlight" => {
+                let at = d.rail();
+                let module = out.len();
+                kit_box(out, at, vec3(0.018, 0.017, 0.036), STEEL);
+                kit_box(
+                    out,
+                    at + vec3(0.0, 0.0, 0.037),
+                    vec3(0.013, 0.013, 0.003),
+                    Color::new(0.92, 0.90, 0.78, 1.0),
+                );
+                // The cone rather than a beam: a torch throws a widening wedge,
+                // and the taper is what says which of the two fittings this is.
+                // It is aimed with the module, because where a torch is pointed is
+                // the middle of the view — the pool and the dazzle are both screen
+                // effects of the crosshair (`hud::draw_torch`, `dazzled_by_torch`)
+                // and a cone welded to the barrel would disagree with both.
+                let cone = out.len();
+                tube(
+                    out,
+                    at + vec3(0.0, 0.0, 0.040),
+                    0.011,
+                    at + vec3(0.0, 0.010, 0.190),
+                    0.030,
+                    Color::new(0.90, 0.88, 0.74, 1.0),
+                );
+                unlit_from(out, cone);
+                aimed = Some(module..out.len());
+            }
             // Magazines. The issued one is part of the weapon; a capacity part
             // is that same magazine continued past the well, drawn from the
             // def's own anchor so each gun keeps its proportions. Four of them
@@ -2659,6 +2949,7 @@ fn kit_into(out: &mut Vec<Tri>, kind: WeaponKind, build: &WeaponBuild) {
             _ => {}
         }
     }
+    aimed
 }
 
 /// The weapon as the armory shows it: the model with its attachments, painted
@@ -2701,6 +2992,12 @@ pub fn preview_mesh(kind: WeaponKind, fitted: &WeaponBuild, paint: Paint) -> Mes
     let mid = (lo + hi) * 0.5;
     let tris: Vec<Tri> = tris
         .into_iter()
+        // Light is not part of the weapon. The portrait frames itself on what it
+        // is handed (`hud::portrait_fit`), and a laser's beam is twenty-six metres
+        // of geometry: the rifle came out at a twentieth of its size with the beam
+        // running off the panel — "加上镭射之后枪突然变小了，差点找不到了". The module
+        // is lit and stays, so the bench still shows what was fitted.
+        .filter(|t| t.lit)
         .map(|t| t.map(pose))
         .map(|t| Tri::new(t.a - mid, t.b - mid, t.c - mid, t.color))
         .collect();
@@ -2774,6 +3071,9 @@ pub struct ViewModel {
     prone: f32,
     /// Countdown for the grenade throw motion; zero when idle.
     grenade_t: f32,
+    /// And for the melee swing, which is the one motion here that turns about the
+    /// grip rather than about the weapon: see `ViewModel::trigger_melee`.
+    melee_t: f32,
     /// How much of the "something is in my other hand" pose is on, eased so the
     /// weapon comes back up rather than being cut back.
     hold_t: f32,
@@ -2819,6 +3119,7 @@ impl ViewModel {
             crouch: 0.0,
             prone: 0.0,
             grenade_t: 0.0,
+            melee_t: 0.0,
             hold_t: 0.0,
             grabbed: None,
             // One entry per kind, in `WeaponKind::index` order.
@@ -2864,6 +3165,7 @@ impl ViewModel {
         self.prone = approach(self.prone, prone, dt * STANCE_RATE);
 
         self.grenade_t = (self.grenade_t - dt).max(0.0);
+        self.melee_t = (self.melee_t - dt).max(0.0);
         // The weapon is away while the throwing hand is out, and the hand is out
         // until the throw has carried it off the bottom of the frame — see
         // `arm_falling`. The weapon waits for the arm rather than rising through
@@ -2925,6 +3227,21 @@ impl ViewModel {
         self.grenade_t = GRENADE_TIME;
     }
 
+    /// Plays a melee swing. Called when a blade is what the trigger fired.
+    ///
+    /// A knife went through the firing path and got what every gun gets out of it,
+    /// which is a kick: the weapon shoves *back* into the player's shoulder and
+    /// tips muzzle-up. For a rifle that is the round leaving; for a blade it is
+    /// nothing at all — there is no round and nothing leaves — so a knife read as a
+    /// gun that hits, with no swing in it: "近战武器没有攻击动画".
+    ///
+    /// What the swing is, and why it is a rotation about the grip rather than a
+    /// movement of the weapon, is in `pose` and `slash_arc`; the difference is the
+    /// one the second report was about — "不应该是戳，而应该是挥刀".
+    pub fn trigger_melee(&mut self) {
+        self.melee_t = MELEE_TIME;
+    }
+
     /// Call in the 2D pass, after `set_default_camera()`. `paints` is the
     /// armory's finish per weapon kind.
     pub fn draw(
@@ -2944,10 +3261,15 @@ impl ViewModel {
         let weapon = arsenal.active_weapon();
         let paint = paints[weapon.kind.index()];
         let mat = self.assemble(player, weapon, paint);
-        // Painter's algorithm: farthest faces first, nearer ones cover them.
+        // Painter's algorithm: farthest faces first, nearer ones cover them. Each
+        // face is cut at the near plane on the way out — see `screen_face`.
         for t in self.body.iter() {
-            if let Some(p) = project(t, viewport, f) {
-                draw_triangle(p[0], p[1], p[2], t.shaded());
+            let Some((p, n)) = screen_face(t, viewport, f) else {
+                continue;
+            };
+            draw_triangle(p[0], p[1], p[2], t.shaded());
+            if n == 4 {
+                draw_triangle(p[0], p[2], p[3], t.shaded());
             }
         }
 
@@ -2958,8 +3280,12 @@ impl ViewModel {
             flash.clear();
             flash_shape(flash, def(weapon.kind).muzzle, weapon.flash, weapon.shots);
             for t in flash.iter().map(|t| t.map(mat)).filter(Tri::finite) {
-                if let Some(p) = project(&t, viewport, f) {
-                    draw_triangle(p[0], p[1], p[2], t.color);
+                let Some((p, n)) = screen_face(&t, viewport, f) else {
+                    continue;
+                };
+                draw_triangle(p[0], p[1], p[2], t.color);
+                if n == 4 {
+                    draw_triangle(p[0], p[2], p[3], t.color);
                 }
             }
         }
@@ -2977,7 +3303,15 @@ impl ViewModel {
     /// Returns the weapon's own matrix, which the flash needs and which casting
     /// from the body would be guesswork about.
     fn assemble(&mut self, player: &Player, weapon: &Weapon, paint: Paint) -> Mat4 {
-        let mat = self.weapon_into(player, weapon, paint);
+        // A magnified sight with the eye on it draws no rifle at all, and no hands
+        // either: the eye is against the eyepiece, so what the rifle looks like
+        // from behind its own stock is not something anyone has ever seen — and
+        // with the eye box now opening past the corners of the window
+        // (`hud::scope_aperture`), a receiver left in the frame would be sitting in
+        // the middle of the view the sight exists to provide. The hands go with
+        // it: they are holding a rifle that is not there.
+        let scoped = weapon.scoped() && player.ads >= SCOPE_HIDE_ADS;
+        let mat = self.weapon_into(player, weapon, paint, scoped);
         let kind = weapon.kind;
         // The hands, which are the weapon's only while they are on it.
         //
@@ -3006,7 +3340,7 @@ impl ViewModel {
             }
             let body = &mut self.body;
             body.extend(held.iter().map(|t| t.map(hand_mat)).filter(Tri::finite));
-        } else {
+        } else if !scoped {
             let grip = &self.grip[kind.index()];
             let support = &self.support[kind.index()];
             let body = &mut self.body;
@@ -3016,6 +3350,13 @@ impl ViewModel {
                     .map(|t| t.map(lag))
                     .filter(Tri::finite),
             );
+        }
+        // The laser, if there is one, and only while the weapon is being drawn at
+        // all: a beam from a rifle that is stowed or behind an eyepiece is light
+        // from nowhere.
+        if weapon.laser() && !scoped && self.hold_t <= 0.0 {
+            let from = mat.transform_point3(def(kind).rail() + LASER_BORE);
+            laser_beam(&mut self.body, from);
         }
         // Painter's algorithm: farthest faces first, nearer ones cover them.
         self.body.sort_by(|x, y| y.depth().total_cmp(&x.depth()));
@@ -3029,14 +3370,27 @@ impl ViewModel {
     /// away" is a claim about the gun, and the hand holding the throwable is
     /// supposed to be on the screen at the same moment — so a test that measured
     /// the whole list would be measuring the wrong thing.
-    fn weapon_into(&mut self, player: &Player, weapon: &Weapon, paint: Paint) -> Mat4 {
+    ///
+    /// `scoped` is the sight settled with the eye on it, and it draws nothing at
+    /// all — see `assemble`, which is where the frame's own copy of that flag is
+    /// worked out.
+    fn weapon_into(
+        &mut self,
+        player: &Player,
+        weapon: &Weapon,
+        paint: Paint,
+        scoped: bool,
+    ) -> Mat4 {
         let kind = weapon.kind;
         let mat = self.pose(player, weapon).matrix();
-        let kit = &mut self.kit;
-        kit.clear();
-        kit_into(kit, kind, weapon.build());
         let body = &mut self.body;
         body.clear();
+        if scoped {
+            return mat;
+        }
+        let kit = &mut self.kit;
+        kit.clear();
+        let aimed = kit_into(kit, kind, weapon.build());
         // The finish is applied in local space, before the pose: the wear
         // pattern hashes to the weapon, not to the world it is moving through.
         let parts = if fits_a_magazine(weapon.build()) {
@@ -3044,20 +3398,29 @@ impl ViewModel {
         } else {
             &self.parts[kind.index()]
         };
+        // A rail fitting is drawn through its own matrix — the pose, then the turn
+        // that lines it up with the light it emits (`fitting_aim`) — because a
+        // module pointing one way and shining the other is what the last report was
+        // about. One matrix per triangle, and everything else shares the pose's.
+        let aimed_mat = aimed.as_ref().map(|_| fitting_aim(&mat, kind) * mat);
+        let matrix_of = |i: usize| match (&aimed, aimed_mat) {
+            (Some(range), Some(m)) if range.contains(&i) => m,
+            _ => mat,
+        };
         body.extend(
             parts
                 .iter()
-                .chain(kit.iter())
-                .map(|t| painted_tri(*t, paint))
-                .map(|t| t.map(mat))
+                .map(|t| (t, mat))
+                .chain(kit.iter().enumerate().map(|(i, t)| (t, matrix_of(i))))
+                .map(|(t, m)| painted_tri(*t, paint).map(m))
                 .filter(Tri::finite),
         );
         // The sniper's scope belongs to the rifle everywhere except at the
         // eyepiece. Once the eye is inside the tube the only thing the tube can
         // do is block the view the scope exists to provide, so it is left out
-        // and `hud::draw_scope_overlay` draws a round aperture in its place —
-        // the two swap on the same frame, off the same constant.
-        if kind == WeaponKind::Sniper && player.ads < SCOPE_HIDE_ADS {
+        // and `hud::draw_scope_overlay` draws that view in its place — the two
+        // swap on the same frame, off the same constant.
+        if weapon.scoped() && player.ads < SCOPE_HIDE_ADS {
             let scope = &self.scope;
             body.extend(
                 scope
@@ -3138,6 +3501,26 @@ impl ViewModel {
         offset.z -= drop * 0.060;
         rotation.y += drop * 0.300;
         rotation.z += drop * 0.450;
+
+        // A blade is *swung*, not thrust. The hand is where the hand is and the
+        // point travels, which is the whole difference between a knife and a
+        // spear: the motion is `arm` — a rotation about the grip — and the
+        // knife's point is 29 cm up the blade from its grip, so a radian of yaw
+        // at the grip is 29 cm of point on the screen. It is drawn back to the
+        // right and up, whipped across to the left and down, and brought home
+        // over the second half of the swing.
+        //
+        // `z` is depth, so the blade crosses the body rather than pushing at it:
+        // yaw turning the point sideways *takes* reach away at the same time
+        // (cosine), and `SLASH_REACH` gives back a little of it at the end of
+        // the cut, where a swing with a step behind it ends up.
+        if self.melee_t > 0.0 {
+            let arc = slash_arc(1.0 - (self.melee_t / MELEE_TIME).clamp(0.0, 1.0));
+            arm.x -= SLASH_YAW * arc;
+            arm.y += SLASH_DIP * arc;
+            arm.z -= SLASH_ROLL * arc;
+            offset.z += SLASH_REACH * arc;
+        }
 
         // A throwable in hand puts the weapon away — not lowered to the hip, but
         // *away*, out of the frame, because the hand that was holding it is the
@@ -3467,12 +3850,49 @@ fn flash_shape(out: &mut Vec<Tri>, at: Vec3, amount: f32, shots: u32) {
     }
 }
 
-fn project(t: &Tri, viewport: Vec2, f: f32) -> Option<[Vec2; 3]> {
-    Some([
-        project_point(t.a, viewport, f)?,
-        project_point(t.b, viewport, f)?,
-        project_point(t.c, viewport, f)?,
-    ])
+/// One face as screen points, **cut** at the near plane rather than dropped by
+/// it: three or four points, and how many of them are live.
+///
+/// Refusing a triangle with a corner behind the eye is not the same as cutting it:
+/// the near plane is a plane, so what happens to a face
+/// that crosses it should be that the part in front is drawn and the part behind is not.
+/// Dropping the whole face removes the *front* of whatever box it belonged to and
+/// leaves the player looking into the back of it — a rifle held at the hip has its
+/// stock a hand's width from the eye, so the box that is a stock was being cut open
+/// every frame, and what that looks like is a hollow black frame with the arena
+/// visible through it: "这对吗？"
+///
+/// Sutherland–Hodgman against one plane, so at most one cut and at most two
+/// triangles out. The caller fans the polygon: `(0,1,2)` always, and `(0,2,3)` when
+/// there are four points.
+fn screen_face(t: &Tri, viewport: Vec2, f: f32) -> Option<([Vec2; 4], usize)> {
+    // Which of the three corners are in front of the eye, and where the crossed
+    // edges meet the plane.
+    let corners = [t.a, t.b, t.c];
+    let mut cut = [Vec3::ZERO; 4];
+    let mut n = 0;
+    for i in 0..3 {
+        let (a, b) = (corners[i], corners[(i + 1) % 3]);
+        let (da, db) = (a.z - NEAR, b.z - NEAR);
+        if da >= 0.0 {
+            cut[n] = a;
+            n += 1;
+        }
+        if (da >= 0.0) != (db >= 0.0) {
+            // The edge crosses: `da / (da - db)` is where, and it cannot divide by
+            // zero because the two straddle the plane.
+            cut[n] = a + (b - a) * (da / (da - db));
+            n += 1;
+        }
+    }
+    if n < 3 {
+        return None;
+    }
+    let mut out = [Vec2::ZERO; 4];
+    for i in 0..n {
+        out[i] = project_point(cut[i], viewport, f)?;
+    }
+    Some((out, n))
 }
 
 /// Same projection the 3D camera applies, minus everything behind the eye.
@@ -3713,6 +4133,447 @@ mod tests {
         }
     }
 
+    /// One sheet per weapon for the rail fittings: bare, then a laser, then a
+    /// torch.
+    ///
+    /// The rail is the one anchor in the whole bench that is *derived* rather than
+    /// authored per weapon (`Def::rail`), and a derivation is exactly the kind of
+    /// thing that looks right in the arithmetic and hangs in the wrong place on
+    /// the weapon — under the fingers instead of under the handguard, or through
+    /// the magazine. So the one thing to do with it is look: three columns, the
+    /// same weapon, on the armory's own preview projection.
+    ///
+    /// `cargo test -- --ignored --nocapture render_the_rail`
+    #[test]
+    #[ignore = "writes a sheet of PNGs under target/rail; run with --ignored"]
+    fn render_the_rail_fittings() {
+        let dir = std::path::Path::new("target/rail");
+        std::fs::create_dir_all(dir).unwrap();
+        // Three columns: bare, laser, torch. The laser's beam is twenty-six metres
+        // of geometry and this sheet used to drop its column because of it — the
+        // sheet fits its own box to the mesh, so the weapon landed in one corner of
+        // a 26 m frame. `preview_mesh` leaves light out as of the round that found
+        // the same thing in the armory's portrait, so the column is back and the
+        // module is what it shows.
+        let cases: [(&str, Option<PartId>); 3] = [
+            ("bare", None),
+            ("laser", Some(crate::weapon::PartId("laser"))),
+            ("torch", Some(crate::weapon::PartId("flashlight"))),
+        ];
+        for kind in [
+            WeaponKind::Rifle,
+            WeaponKind::Shotgun,
+            WeaponKind::Sniper,
+            WeaponKind::Pistol,
+            WeaponKind::Lmg,
+        ] {
+            let mut sheet = crate::mesh::empty_mesh();
+            for (i, (name, part)) in cases.iter().enumerate() {
+                let fitted = match part {
+                    Some(part) => WeaponBuild {
+                        entries: vec![BuildEntry {
+                            slot: SlotId("underbarrel"),
+                            part: *part,
+                            roll: 0.5,
+                        }],
+                        load: crate::weapon::AmmoKind::Fmj,
+                    },
+                    None => WeaponBuild::empty(),
+                };
+                // Side by side, a weapon's own width apart, so the three columns
+                // are the same gun and not three guns overlapping.
+                let mut mesh = preview_mesh(kind, &fitted, Paint::factory());
+                crate::mesh::transform_in_place(
+                    &mut mesh,
+                    Mat4::from_translation(vec3(i as f32 * 0.55, 0.0, 0.0)),
+                );
+                append(&mut sheet, &mesh);
+                println!("{}: {}", name, kind.key());
+            }
+            let file = dir.join(format!("{kind:?}.png"));
+            render_png(&sheet, 900, 320, &file);
+            println!("{}", file.display());
+        }
+    }
+
+    /// One picture per weapon and sight, the weapon at a readable scale.
+    ///
+    /// The sights are the fittings whose *size* is a judgement and not a number:
+    /// they sit on the rail and their length is whatever they are drawn at. Two
+    /// rounds of "装在枪上看起来体积很大" went by before anyone looked at them — the
+    /// first drawn at the size of the real thing, the second shrunk on paper — and
+    /// a row of six whole weapons in one frame is a strip a few pixels tall, which
+    /// is no better. So: one file per pair, the same weapon at the same scale in
+    /// every one of them, so two files can be held side by side. What to look at
+    /// is the proportion: a sight is a lump on a rifle, not a length of pipe lying
+    /// along it.
+    ///
+    /// `cargo test -- --ignored --nocapture render_the_optics`
+    #[test]
+    #[ignore = "writes a sheet of PNGs under target/optics; run with --ignored"]
+    fn render_the_optics() {
+        let dir = std::path::Path::new("target/optics");
+        std::fs::create_dir_all(dir).unwrap();
+        let cases: [(&str, Option<PartId>); 6] = [
+            ("none", None),
+            ("micro_dot", Some(crate::weapon::PartId("micro_dot"))),
+            ("holo_sight", Some(crate::weapon::PartId("holo_sight"))),
+            (
+                "marksman_scope",
+                Some(crate::weapon::PartId("marksman_scope")),
+            ),
+            ("prism_4x", Some(crate::weapon::PartId("prism_4x"))),
+            ("long_scope", Some(crate::weapon::PartId("long_scope"))),
+        ];
+        for kind in [WeaponKind::Rifle, WeaponKind::M4a1, WeaponKind::Sniper] {
+            for (name, part) in cases {
+                let fitted = match part {
+                    Some(part) => WeaponBuild {
+                        entries: vec![BuildEntry {
+                            slot: SlotId("optic"),
+                            part,
+                            roll: 0.5,
+                        }],
+                        load: crate::weapon::AmmoKind::Fmj,
+                    },
+                    None => WeaponBuild::empty(),
+                };
+                let mesh = preview_mesh(kind, &fitted, Paint::factory());
+                let file = dir.join(format!("{:?}-{name}.png", kind));
+                render_png(&mesh, 760, 300, &file);
+                println!("{}", file.display());
+            }
+        }
+    }
+
+    /// How much of the screen a sight takes in the hand, per sight.
+    ///
+    /// The armory's portrait is orthographic and the game is not, which is the
+    /// difference the player put their finger on: "改枪界面没问题，局内看着瞄准镜很大".
+    /// A sight sits at the back of the receiver, a third of a metre from the eye,
+    /// where perspective magnifies it — so the size that matters is not the
+    /// millimetres of the model, it is the share of the *screen* it covers when the
+    /// weapon is in the hands.
+    ///
+    /// Measured through the pose the game draws with and the projection it draws
+    /// through, and printed as well as asserted, because the number to tune against
+    /// is the one in the message.
+    #[test]
+    fn a_sight_in_the_hand_takes_a_small_share_of_the_screen() {
+        let (w, h) = (1280.0f32, 720.0f32);
+        let viewport = vec2(w, h);
+        let player = Player::new(Vec3::ZERO);
+        let f = (h * 0.5) / (player.fovy() * 0.5).tan();
+        let mut worst = 0.0f32;
+        for kind in [WeaponKind::Rifle, WeaponKind::M4a1, WeaponKind::Sniper] {
+            for (name, part) in [
+                ("micro_dot", "micro_dot"),
+                ("holo_sight", "holo_sight"),
+                ("marksman_scope", "marksman_scope"),
+                ("prism_4x", "prism_4x"),
+                ("long_scope", "long_scope"),
+            ] {
+                let build = WeaponBuild {
+                    entries: vec![BuildEntry {
+                        slot: SlotId("optic"),
+                        part: PartId(part),
+                        roll: 0.5,
+                    }],
+                    load: crate::weapon::AmmoKind::Fmj,
+                };
+                let weapon = Weapon::with_build(kind, build.clone());
+                let vm = ViewModel::new();
+                let mat = vm.pose(&player, &weapon).matrix();
+                let mut kit = Vec::new();
+                kit_into(&mut kit, kind, &build);
+                let (mut lo, mut hi) = (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY));
+                for t in &kit {
+                    for p in [t.a, t.b, t.c] {
+                        let Some(s) = project_point(mat.transform_point3(p), viewport, f) else {
+                            continue;
+                        };
+                        lo = lo.min(s);
+                        hi = hi.max(s);
+                    }
+                }
+                let share = (hi - lo) / vec2(w, h);
+                println!(
+                    "{kind:?} {name}: {:.0}x{:.0} px = {:.0}% of the height",
+                    hi.x - lo.x,
+                    hi.y - lo.y,
+                    share.y * 100.0
+                );
+                worst = worst.max(share.y);
+            }
+        }
+        // What "很大" was, in one number: a sight that covers a third of the screen's
+        // height with the weapon at the hip is a box in front of the player's eye. A
+        // red dot sits around a tenth; nothing the bench sells should be past a
+        // fifth.
+        assert!(
+            worst <= 0.09,
+            "the bench's biggest sight covers {:.0}% of the screen height in the hand",
+            worst * 100.0,
+        );
+    }
+
+    /// A face that crosses the near plane is cut, not dropped.
+    ///
+    /// What "这对吗？" was, with a screenshot: the bottom right of the screen held a
+    /// hollow black frame with the arena visible through it. Nothing was hollow. The
+    /// rifle's stock is a box a hand's width from the eye, and `project` refused
+    /// every face of it with a corner behind the near plane — which removes the
+    /// *front* faces and leaves the player looking into the back of the box. Cutting
+    /// is what a near plane is for; dropping is what this did.
+    #[test]
+    fn a_face_across_the_near_plane_is_cut_and_not_dropped() {
+        let viewport = vec2(1280.0, 720.0);
+        let f = (viewport.y * 0.5) / (62f32.to_radians() * 0.5).tan();
+        // Two corners in front of the eye, one well behind it.
+        let crossing = Tri::new(
+            vec3(-0.2, 0.2, 0.30),
+            vec3(0.2, 0.2, 0.30),
+            vec3(0.0, -0.2, -0.40),
+            STEEL,
+        );
+        let (p, n) = screen_face(&crossing, viewport, f)
+            .unwrap_or_else(|| panic!("the face in front of the eye was dropped"));
+        assert_eq!(n, 4, "a triangle cut by one plane comes back as a quad");
+        assert!(p.iter().all(|q| q.is_finite()), "{p:?}");
+        // And the cut face still covers something: it is a face, not a sliver.
+        let area = (p[1] - p[0]).perp_dot(p[2] - p[0]).abs() * 0.5;
+        assert!(
+            area > 100.0,
+            "the cut face covers {area:.0} px² of the screen"
+        );
+
+        // A face entirely behind the eye is still nothing at all, and one entirely
+        // in front is still one triangle.
+        let behind = Tri::new(
+            vec3(-0.2, 0.2, -0.30),
+            vec3(0.2, 0.2, -0.30),
+            vec3(0.0, -0.2, -0.40),
+            STEEL,
+        );
+        assert!(screen_face(&behind, viewport, f).is_none());
+        let front = Tri::new(
+            vec3(-0.2, 0.2, 0.30),
+            vec3(0.2, 0.2, 0.30),
+            vec3(0.0, -0.2, 0.40),
+            STEEL,
+        );
+        assert_eq!(screen_face(&front, viewport, f).unwrap().1, 3);
+    }
+
+    /// The sights as the *player* sees them: the viewmodel's own projection, at
+    /// the hip, at the game's own logical resolution.
+    ///
+    /// The armory's portrait is orthographic, and that difference is the whole of
+    /// the complaint this answers — "改枪界面没问题，局内看着瞄准镜很大". A sight sits at
+    /// the back of the receiver, a third of a metre from the eye, where perspective
+    /// magnifies it; a portrait that fits the weapon into a box cannot show that,
+    /// and neither could the sheets the last three revisions were tuned on. So this
+    /// rasterises `assemble`'s own triangles through `project`, which is the
+    /// function the game draws them with, at the resolution the game runs at.
+    ///
+    /// `cargo test -- --ignored --nocapture render_the_optics_in_hand`
+    #[test]
+    #[ignore = "writes PNGs under target/inhand; run with --ignored"]
+    fn render_the_optics_in_hand() {
+        let dir = std::path::Path::new("target/inhand");
+        std::fs::create_dir_all(dir).unwrap();
+        let (w, h) = (1280usize, 720usize);
+        let viewport = vec2(w as f32, h as f32);
+        let player = Player::new(Vec3::ZERO);
+        let f = (h as f32 * 0.5) / (player.fovy() * 0.5).tan();
+        // , so the laser can be photographed on its
+        // own: its beam is the one thing in the view whose *direction* is the
+        // subject, and the crosshair is drawn in the picture to check it against.
+        let cases: [(&str, Option<&str>, Option<&str>); 7] = [
+            ("none", None, None),
+            ("micro_dot", Some("micro_dot"), None),
+            ("holo_sight", Some("holo_sight"), None),
+            ("marksman_scope", Some("marksman_scope"), None),
+            ("prism_4x", Some("prism_4x"), None),
+            ("long_scope", Some("long_scope"), None),
+            ("laser", None, Some("laser")),
+        ];
+        for (name, part, under) in cases {
+            let mut entries = Vec::new();
+            if let Some(part) = part {
+                entries.push(BuildEntry {
+                    slot: SlotId("optic"),
+                    part: PartId(part),
+                    roll: 0.5,
+                });
+            }
+            if let Some(part) = under {
+                entries.push(BuildEntry {
+                    slot: SlotId("underbarrel"),
+                    part: PartId(part),
+                    roll: 0.5,
+                });
+            }
+            let build = if entries.is_empty() {
+                WeaponBuild::empty()
+            } else {
+                WeaponBuild {
+                    entries,
+                    load: crate::weapon::AmmoKind::Fmj,
+                }
+            };
+            let weapon = Weapon::with_build(WeaponKind::Rifle, build.clone());
+            let mut vm = ViewModel::new();
+            vm.assemble(&player, &weapon, Paint::factory());
+            let mut buf = vec![18u8; w * h * 3];
+            // The crosshair, so the sight line is in the picture: four pixels of
+            // light grey either side of the middle.
+            for d in -8i32..=8 {
+                for (x, y) in [
+                    (w as i32 / 2 + d, h as i32 / 2),
+                    (w as i32 / 2, h as i32 / 2 + d),
+                ] {
+                    let o = (y as usize * w + x as usize) * 3;
+                    buf[o..o + 3].copy_from_slice(&[120, 122, 118]);
+                }
+            }
+            for t in &vm.body {
+                let Some((p, n)) = screen_face(t, viewport, f) else {
+                    continue;
+                };
+                let c: [u8; 4] = t.shaded().into();
+                // Lifted, because this is a sheet for judging *shape*: the
+                // viewmodel's own shading is a dark weapon at arm's length and a
+                // dark sight on it, which is right in the game and invisible in a
+                // picture.
+                let lift = |v: u8| (v as u32 * 3).min(255) as u8;
+                let rgb = [lift(c[0]), lift(c[1]), lift(c[2])];
+                fill(&mut buf, w, h, [p[0], p[1], p[2]], rgb);
+                if n == 4 {
+                    fill(&mut buf, w, h, [p[0], p[2], p[3]], rgb);
+                }
+            }
+            let file = dir.join(format!("{name}.png"));
+            write_png(&buf, w, h, &file);
+            println!("{}", file.display());
+        }
+    }
+
+    /// Eight frames of a knife swing on one sheet, left to right and top to
+    /// bottom, at the game's own projection and its own resolution.
+    ///
+    /// A swing is a motion and a still picture of a motion is a frame of it, but
+    /// the question two reports have been about is a *shape* — whether the point
+    /// travels across the screen or away from it — and that a frame answers. The
+    /// numbers behind the shape are `a_knife_is_swung_across_and_comes_back`; this
+    /// is what those numbers look like.
+    ///
+    /// `cargo test -- --ignored --nocapture render_the_knife_swing`
+    #[test]
+    #[ignore = "writes a sheet under target/swingsheet; run with --ignored"]
+    fn render_the_knife_swing() {
+        const COLS: usize = 4;
+        const FRAMES: usize = 8;
+        let (cw, ch) = (640usize, 360usize);
+        let (w, h) = (cw * COLS, ch * (FRAMES / COLS));
+        let viewport = vec2(cw as f32, ch as f32);
+        let player = Player::new(Vec3::ZERO);
+        let f = (ch as f32 * 0.5) / (player.fovy() * 0.5).tan();
+        let arsenal = arsenal_with(WeaponKind::Knife);
+        let mut vm = ViewModel::new();
+        vm.trigger_melee();
+        let mut buf = vec![18u8; w * h * 3];
+        for frame in 0..FRAMES {
+            let (cx, cy) = ((frame % COLS) * cw, (frame / COLS) * ch);
+            // The cell's own crosshair, so the point's road across the screen is
+            // in the picture rather than only in the numbers.
+            for d in -6i32..=6 {
+                for (x, y) in [
+                    (cx as i32 + cw as i32 / 2 + d, cy as i32 + ch as i32 / 2),
+                    (cx as i32 + cw as i32 / 2, cy as i32 + ch as i32 / 2 + d),
+                ] {
+                    let o = (y as usize * w + x as usize) * 3;
+                    buf[o..o + 3].copy_from_slice(&[120, 122, 118]);
+                }
+            }
+            vm.assemble(&player, arsenal.active_weapon(), Paint::factory());
+            for t in &vm.body {
+                let Some((p, n)) = screen_face(t, viewport, f) else {
+                    continue;
+                };
+                let c: [u8; 4] = t.shaded().into();
+                let lift = |v: u8| (v as u32 * 3).min(255) as u8;
+                let rgb = [lift(c[0]), lift(c[1]), lift(c[2])];
+                let shift = |v: Vec2| vec2(v.x + cx as f32, v.y + cy as f32);
+                fill(&mut buf, w, h, [shift(p[0]), shift(p[1]), shift(p[2])], rgb);
+                if n == 4 {
+                    fill(&mut buf, w, h, [shift(p[0]), shift(p[2]), shift(p[3])], rgb);
+                }
+            }
+            vm.update(MELEE_TIME / FRAMES as f32, Vec2::ZERO, &player, &arsenal);
+        }
+        let dir = std::path::Path::new("target/swingsheet");
+        std::fs::create_dir_all(dir).unwrap();
+        let file = dir.join("swing.png");
+        write_png(&buf, w, h, &file);
+        println!("{}", file.display());
+    }
+
+    /// Fills one screen triangle into an RGB buffer. `raster` does this for a
+    /// mesh in its own space; this one takes the points already projected.
+    fn fill(buf: &mut [u8], w: usize, h: usize, p: [Vec2; 3], rgb: [u8; 3]) {
+        let (lo_x, hi_x) = (
+            p[0].x.min(p[1].x).min(p[2].x).floor().max(0.0) as usize,
+            (p[0].x.max(p[1].x).max(p[2].x).ceil().max(0.0) as usize).min(w),
+        );
+        let (lo_y, hi_y) = (
+            p[0].y.min(p[1].y).min(p[2].y).floor().max(0.0) as usize,
+            (p[0].y.max(p[1].y).max(p[2].y).ceil().max(0.0) as usize).min(h),
+        );
+        for y in lo_y..hi_y {
+            for x in lo_x..hi_x {
+                let q = vec2(x as f32 + 0.5, y as f32 + 0.5);
+                let e = |a: Vec2, b: Vec2| (b.x - a.x) * (q.y - a.y) - (b.y - a.y) * (q.x - a.x);
+                let (e0, e1, e2) = (e(p[0], p[1]), e(p[1], p[2]), e(p[2], p[0]));
+                let inside =
+                    (e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0) || (e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0);
+                if inside {
+                    let o = (y * w + x) * 3;
+                    buf[o..o + 3].copy_from_slice(&rgb);
+                }
+            }
+        }
+    }
+
+    /// An RGB buffer as a PNG, the way `render_png` does it for a mesh: the buffer
+    /// counts screen rows from the top, `export_png` flips what it is given
+    /// (`macroquad`'s `texture.rs` does it in the name of GL's own row order), and
+    /// the copy below is what flips it back.
+    ///
+    /// The copy *is* the flip, and for as long as this function existed it was not
+    /// one: the rows went straight across, so every sheet written through it — the
+    /// in-hand one — came out mirrored, with the weapon drawn above a crosshair it
+    /// is held under. Nothing judged on those sheets was about up and down, which
+    /// is what left it there until a knife swing, where the whole of the report is
+    /// that the point crosses *and drops*.
+    fn write_png(rgb: &[u8], w: usize, h: usize, path: &std::path::Path) {
+        let mut bytes = vec![0u8; w * h * 4];
+        for y in 0..h {
+            let (src, dst) = ((h - y - 1) * w * 3, y * w * 4);
+            for x in 0..w {
+                bytes[dst + x * 4..dst + x * 4 + 3]
+                    .copy_from_slice(&rgb[src + x * 3..src + x * 3 + 3]);
+                bytes[dst + x * 4 + 3] = 255;
+            }
+        }
+        let image = Image {
+            bytes,
+            width: w as u16,
+            height: h as u16,
+        };
+        image.export_png(&path.to_string_lossy());
+    }
+
     /// Appends `src` to `dst`, keeping what is already in it.
     ///
     /// `copy_into` is the overwrite — it clears the destination — and a sheet is
@@ -3810,6 +4671,406 @@ mod tests {
                 bulk_of(&tris) > 0.0,
                 "{kind:?} draws no magazine for a magazine it does not know"
             );
+        }
+    }
+
+    /// A sight is a lump on a rifle, not a length of pipe lying along it.
+    ///
+    /// It is the one fitting whose size is a judgement and not a number: it sits
+    /// on the rail and its length is whatever it is drawn at. Three rounds of
+    /// "装在枪上看起来体积很大" went by — the first authored at the size of the real
+    /// thing (a 22 cm tube of scope on a metre of rifle), the second shrunk on
+    /// paper without anybody looking, the third shrunk again past the point where a
+    /// long scope read as anything but a bigger red dot — and `render_the_optics`
+    /// is the looking. This is the bound that keeps the next one authored to life
+    /// size out.
+    ///
+    /// Fifteen centimetres of tube, on any weapon, and no taller than the receiver
+    /// it sits on. Absolute rather than proportional because the eye reads the
+    /// optic and not the ratio: the same 9 cm scope hangs over a submachine gun
+    /// more than over a rifle, and that is what a scope on a submachine gun looks
+    /// like. What the bound has to catch is the 22 cm tube this started life as.
+    #[test]
+    fn every_optic_is_small_against_the_weapon_it_sits_on() {
+        let optics: Vec<_> = crate::weapon::catalogue()
+            .iter()
+            .filter(|p| p.slot == SlotId("optic"))
+            .copied()
+            .collect();
+        assert!(optics.len() >= 5, "the catalogue lost its sights");
+        for kind in ALL_KINDS {
+            let (_, lo, hi) = extent(kind, &WeaponBuild::empty());
+            let height = (hi - lo).y.max(1e-4);
+            for part in optics.iter().filter(|p| {
+                crate::weapon::def(kind)
+                    .slots
+                    .iter()
+                    .any(|s| s.id == p.slot && s.accepts == p.interface)
+            }) {
+                let fitted = WeaponBuild {
+                    entries: vec![BuildEntry {
+                        slot: SlotId("optic"),
+                        part: part.id,
+                        roll: 0.5,
+                    }],
+                    load: crate::weapon::AmmoKind::Fmj,
+                };
+                let mut kit = Vec::new();
+                kit_into(&mut kit, kind, &fitted);
+                let mut klo = Vec3::splat(f32::INFINITY);
+                let mut khi = Vec3::splat(f32::NEG_INFINITY);
+                for t in &kit {
+                    for p in [t.a, t.b, t.c] {
+                        klo = klo.min(p);
+                        khi = khi.max(p);
+                    }
+                }
+                let box_ = khi - klo;
+                assert!(
+                    box_.z <= 0.15,
+                    "{kind:?}'s {} is {:.3} m of tube: a sight is not 22 cm of pipe",
+                    part.id.0,
+                    box_.z,
+                );
+                assert!(
+                    box_.y <= height * 0.45,
+                    "{kind:?}'s {} stands {:.3} m tall on a {height:.2} m weapon",
+                    part.id.0,
+                    box_.y,
+                );
+            }
+        }
+    }
+
+    /// A knife is swung across, not thrust, and comes back.
+    ///
+    /// Two reports, and the second is the one this test is shaped by. The motion
+    /// the viewmodel did not have: a melee attack travelled the same path as a
+    /// shot and got the same answer out of it, which is a kick — the weapon
+    /// shoved back into the shoulder and tipped up. That is the round leaving a
+    /// rifle; a blade has no round, so the knife read as a gun that hits
+    /// ("近战武器没有攻击动画"). What replaced it *lunged*, and a lunge is a stab:
+    /// "近战武器动画不应该是戳，而应该是挥刀".
+    ///
+    /// So what is measured here is the shape of the path, not its size: the point
+    /// of the blade has to cross the body by a wide margin to each side — back to
+    /// the right, over to the left — and the travel *away from the eye* has to be
+    /// the small part of it. Both ends matter too: a knife that is still out when
+    /// the next swing begins is a knife that never comes back.
+    #[test]
+    fn a_knife_is_swung_across_and_comes_back() {
+        let player = Player::new(Vec3::ZERO);
+        let arsenal = arsenal_with(WeaponKind::Knife);
+        let mut vm = ViewModel::new();
+        let tip = |vm: &ViewModel| {
+            vm.pose(&player, arsenal.active_weapon())
+                .matrix()
+                .transform_point3(def(WeaponKind::Knife).muzzle)
+        };
+        let rest = tip(&vm);
+        vm.trigger_melee();
+        // A whole swing at 60 Hz, plus the frames it takes to settle.
+        let mut path = Vec::new();
+        for _ in 0..40 {
+            vm.update(1.0 / 60.0, Vec2::ZERO, &player, &arsenal);
+            path.push(tip(&vm));
+        }
+        // The two extremes of the crossing, as positive distances: how far the
+        // point went sideways, right of where it rests and left of it.
+        let sideways = |sign: f32| {
+            path.iter()
+                .fold(0.0f32, |m, p| m.max(sign * (p.x - rest.x)))
+        };
+        let (right, left) = (sideways(1.0), sideways(-1.0));
+        // And how far it reached *at* the eye at any point, which is what a
+        // thrust is made of. The draw carries the point back and around, so the
+        // question is only ever asked of the forward half of the motion.
+        let forward = path.iter().fold(0.0f32, |m, p| m.max(p.z - rest.z));
+        // The cut is a diagonal rather than a flat sweep: the point rises as it
+        // is drawn back and drops as it comes across.
+        let rise = path.iter().fold(0.0f32, |m, p| m.max(p.y - rest.y));
+        let fall = path.iter().fold(0.0f32, |m, p| m.max(rest.y - p.y));
+        assert!(
+            right > 0.10 && left > 0.10,
+            "the point crossed {right:.3} m right and {left:.3} m left, which is not a swing",
+        );
+        assert!(
+            forward < 0.05 && forward < right.min(left) * 0.5,
+            "the point travelled {forward:.3} m at the eye against {right:.3} m \
+             across: that is a thrust",
+        );
+        assert!(
+            rise > 0.01 && fall > 0.01,
+            "the point rose {rise:.3} m and fell {fall:.3} m: that is a flat sweep",
+        );
+        let back = tip(&vm);
+        assert!(
+            back.distance(rest) < 0.005,
+            "the knife did not come back: {back:?} against {rest:?}",
+        );
+        // And a knife that is only *held* does not swing at all.
+        let idle = ViewModel::new();
+        assert!(tip(&idle).distance(rest) < 1e-4);
+    }
+
+    /// A laser is a sight, so its beam converges on the crosshair.
+    ///
+    /// It used to be built in the weapon's own frame, which means it pointed
+    /// wherever the *barrel* happened to point: at the hip that is off to the side
+    /// of the screen, so the line ran past the crosshair and off the edge — "镭射的
+    /// 光线应该指向准心". The far end of the beam is on the view's own axis now and
+    /// this holds it there at both ends of the aim, where the weapon's pose is as
+    /// different as it gets.
+    #[test]
+    fn the_laser_beam_converges_on_the_crosshair() {
+        let viewport = vec2(1280.0, 720.0);
+        let f = (viewport.y * 0.5) / (62f32.to_radians() * 0.5).tan();
+        let build = WeaponBuild {
+            entries: vec![BuildEntry {
+                slot: SlotId("underbarrel"),
+                part: PartId("laser"),
+                roll: 0.5,
+            }],
+            load: crate::weapon::AmmoKind::Fmj,
+        };
+        for ads in [0.0f32, 1.0] {
+            let mut player = Player::new(Vec3::ZERO);
+            player.ads = ads;
+            let weapon = Weapon::with_build(WeaponKind::Rifle, build.clone());
+            assert!(weapon.laser(), "the fitting is not being seen");
+            let vm = ViewModel::new();
+            let mat = vm.pose(&player, &weapon).matrix();
+            let from = mat.transform_point3(def(WeaponKind::Rifle).rail() + LASER_BORE);
+
+            let mut beam = Vec::new();
+            laser_beam(&mut beam, from);
+            assert!(!beam.is_empty(), "the beam drew nothing at all");
+            let points: Vec<Vec3> = beam.iter().flat_map(|t| [t.a, t.b, t.c]).collect();
+            // Its near end is the module's face, which is where the light leaves.
+            assert!(
+                points.iter().any(|p| p.distance(from) < 0.01),
+                "the beam does not start at the module at {from:?}",
+            );
+            // And its far end is on the view's own axis — the crosshair — whatever
+            // the weapon is doing. The *geometry* is asked, not the formula: a beam
+            // built in the weapon's frame lands wherever the rail points, which at
+            // the hip is 20 cm off the axis and a screen-width to the side.
+            let far = points
+                .iter()
+                .copied()
+                .filter(|p| p.z > LASER_REACH - 0.01)
+                .collect::<Vec<_>>();
+            assert!(
+                !far.is_empty(),
+                "the beam does not reach {LASER_REACH:.0} m"
+            );
+            for p in far {
+                let on_screen =
+                    project_point(p, viewport, f).expect("the far end is behind the eye");
+                assert!(
+                    (on_screen - viewport * 0.5).length() < 1.0,
+                    "at ads {ads} the beam ends {:.0} px from the crosshair",
+                    (on_screen - viewport * 0.5).length(),
+                );
+            }
+        }
+    }
+
+    /// A rail fitting faces the way its own light goes.
+    ///
+    /// The other half of the laser work, and the half that needed the beam to be
+    /// right first: with the light converging on the crosshair, the module it came
+    /// out of was still going through the weapon's pose, so at the hip the beam and
+    /// the box it left were 7° apart and the light came out of the window sideways
+    /// — "镭射的光线确实指向准心了，但是和发射镭射的配件不平行了".
+    ///
+    /// Three claims, measured three ways, for both rail fittings and three weapons
+    /// at three aims. The angle, on the matrix the fitting is drawn through — and
+    /// the *same* angle on the pose alone, so the test says what it was fixing
+    /// rather than only what the answer is. The mouth, which has to be a fixed point
+    /// of the turn: it is where the light starts, and a module aimed by moving its
+    /// window off the beam would be the same complaint from the other side. And the
+    /// geometry, out of `assemble`'s own output — the far corner of the module is
+    /// looked for where the turned matrix puts it rather than where the pose does,
+    /// which is the one assertion that fails when the wiring is taken back out of
+    /// `assemble`, the way it was checked.
+    #[test]
+    fn a_rail_fitting_faces_its_own_light() {
+        // Both fittings, and each one's own box: the corner that swings furthest
+        // when the turn happens is the back of the module, because the front is
+        // the pivot. The torch is not the same fitting with a different light:
+        // its cone is 19 cm of geometry pointing the same way, which is why the
+        // same few degrees were visible on it sooner.
+        for (part, half) in [
+            ("laser", vec3(0.016, 0.014, 0.030)),
+            ("flashlight", vec3(0.018, 0.017, 0.036)),
+        ] {
+            let build = WeaponBuild {
+                entries: vec![BuildEntry {
+                    slot: SlotId("underbarrel"),
+                    part: PartId(part),
+                    roll: 0.5,
+                }],
+                load: crate::weapon::AmmoKind::Fmj,
+            };
+            for kind in [WeaponKind::Rifle, WeaponKind::Smg, WeaponKind::Pistol] {
+                let d = def(kind);
+                let mouth = d.rail() + LASER_BORE;
+                let corner = d.rail() - half;
+                for ads in [0.0f32, 0.5, 1.0] {
+                    let mut player = Player::new(Vec3::ZERO);
+                    player.ads = ads;
+                    let weapon = Weapon::with_build(kind, build.clone());
+                    assert!(
+                        weapon.laser() || weapon.torch(),
+                        "{kind:?} is not wearing the {part}"
+                    );
+                    let mut vm = ViewModel::new();
+                    let mat = vm.assemble(&player, &weapon, Paint::factory());
+                    let at = mat.transform_point3(mouth);
+                    let light = (vec3(0.0, 0.0, LASER_REACH) - at).normalize_or_zero();
+                    let off_axis = |m: &Mat4| {
+                        let axis = (m.transform_point3(mouth + Vec3::Z)
+                            - m.transform_point3(mouth))
+                        .normalize_or_zero();
+                        axis.dot(light).clamp(-1.0, 1.0).acos().to_degrees()
+                    };
+                    let turned = fitting_aim(&mat, kind) * mat;
+                    assert!(
+                        off_axis(&turned) < 0.5,
+                        "{part} on {kind:?} at ads {ads} leaves its light {:.2}° off its own axis",
+                        off_axis(&turned),
+                    );
+                    // And what it was: the pose on its own, canted for the eye's
+                    // sake, which is a few degrees at the hip and nothing with the
+                    // sights up.
+                    if ads == 0.0 {
+                        assert!(
+                            off_axis(&mat) > 4.0,
+                            "{part} on {kind:?} at the hip is only {:.2}° off, so there \
+                             is nothing here to fix",
+                            off_axis(&mat),
+                        );
+                    }
+                    // The window does not move: the light leaves where it left.
+                    assert!(
+                        turned.transform_point3(mouth).distance(at) < 1e-4,
+                        "{part} on {kind:?} at ads {ads} moved its own window off the beam",
+                    );
+                    // And the module that is *drawn* is the turned one. Its back
+                    // corner is in `assemble`'s output at one of these two places,
+                    // and which one it is at is the whole of whether the wiring is
+                    // still in `assemble`.
+                    let drawn = |p: Vec3| {
+                        vm.body
+                            .iter()
+                            .flat_map(|t| [t.a, t.b, t.c])
+                            .any(|v| v.distance(p) < 1e-4)
+                    };
+                    assert!(
+                        drawn(turned.transform_point3(corner)),
+                        "{part} on {kind:?} at ads {ads} draws its module through the pose alone",
+                    );
+                    assert!(
+                        !drawn(mat.transform_point3(corner)),
+                        "{part} on {kind:?} at ads {ads} draws its module twice",
+                    );
+                }
+            }
+        }
+    }
+
+    /// Light does not resize the armory's portrait.
+    ///
+    /// `preview_mesh` is framed by the *issued* weapon, which is deliberate — the
+    /// picture must not jump when a magazine changes length — but it draws whatever
+    /// is bolted on, and `hud::portrait_fit` then fits the panel to the drawing. A
+    /// laser's beam is 26 m of it, so the rifle was drawn at a twentieth of its
+    /// size: "加上镭射之后枪突然变小了，差点找不到了". The filter is in `preview_mesh`
+    /// and this is the number it holds: a lit weapon is not wider than the rifle.
+    #[test]
+    fn a_laser_does_not_shrink_the_armory_portrait() {
+        let span = |fitted: &WeaponBuild| {
+            let mesh = preview_mesh(WeaponKind::Rifle, fitted, Paint::factory());
+            let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+            for v in &mesh.vertices {
+                lo = lo.min(v.position);
+                hi = hi.max(v.position);
+            }
+            hi - lo
+        };
+        let bare = span(&WeaponBuild::empty());
+        let lit = span(&WeaponBuild {
+            entries: vec![BuildEntry {
+                slot: SlotId("underbarrel"),
+                part: PartId("laser"),
+                roll: 0.5,
+            }],
+            load: crate::weapon::AmmoKind::Fmj,
+        });
+        assert!(
+            lit.x < 3.0,
+            "the portrait is {:.1} m wide, which is a beam rather than a rifle",
+            lit.x,
+        );
+        assert!(
+            (lit.x - bare.x).abs() < bare.x * 0.12 && (lit.y - bare.y).abs() < bare.y * 0.12,
+            "the laser changed the portrait's size: {bare:?} against {lit:?}",
+        );
+    }
+
+    /// Every fitting the game sells draws on a weapon that takes it.
+    ///
+    /// This is the other half of the net under `kit_into`'s last arm. That arm is
+    /// right to do nothing for a part it has never heard of — a saved build may
+    /// name anything, and `a_magazine_no_arm_knows_still_draws` is what keeps a
+    /// forgotten *magazine* drawing anyway — but for a part in the catalogue it is
+    /// a silence: the bench offers it, its numbers move the weapon, and the weapon
+    /// it is bolted to looks exactly the same. Magazines have had a test for that
+    /// since six of them arrived without geometry; optics and muzzle devices had
+    /// none, so every one of them was a single missing line of `match` away from
+    /// being invisible, with nothing in the game or in these tests able to say so.
+    #[test]
+    fn every_shipped_fitting_draws_on_a_weapon_that_takes_it() {
+        let fittings: Vec<_> = crate::weapon::catalogue()
+            .iter()
+            .filter(|p| p.slot != SlotId("magazine"))
+            .copied()
+            .collect();
+        assert!(fittings.len() >= 6, "the catalogue lost its fittings");
+        for part in fittings {
+            let fits: Vec<WeaponKind> = ALL_KINDS
+                .iter()
+                .copied()
+                .filter(|k| {
+                    crate::weapon::def(*k)
+                        .slots
+                        .iter()
+                        .any(|s| s.id == part.slot && s.accepts == part.interface)
+                })
+                .collect();
+            assert!(
+                !fits.is_empty(),
+                "{} is sold and no weapon has a slot for it",
+                part.id.0,
+            );
+            for kind in fits {
+                let fitted = WeaponBuild {
+                    entries: vec![BuildEntry {
+                        slot: part.slot,
+                        part: part.id,
+                        roll: 0.5,
+                    }],
+                    load: crate::weapon::AmmoKind::Fmj,
+                };
+                let mut tris = Vec::new();
+                kit_into(&mut tris, kind, &fitted);
+                assert!(
+                    bulk_of(&tris) > 0.0,
+                    "{} draws nothing on {kind:?}, which takes it",
+                    part.id.0,
+                );
+            }
         }
     }
 
@@ -4337,7 +5598,7 @@ mod tests {
             for _ in 0..80 {
                 vm.update(1.0 / 60.0, Vec2::ZERO, &player, &arsenal);
             }
-            vm.weapon_into(&player, arsenal.active_weapon(), Paint::factory());
+            vm.weapon_into(&player, arsenal.active_weapon(), Paint::factory(), false);
             assert!(!vm.body.is_empty(), "{kind:?} drew no weapon at all");
             for t in &vm.body {
                 for p in sight_samples(t) {
@@ -4357,6 +5618,45 @@ mod tests {
             }
         }
     }
+
+    /// Nothing of the rifle is in the frame with the eye on the eyepiece.
+    ///
+    /// The scope's eye box opens past the corners of the window now
+    /// (`hud::scope_aperture`), so it no longer *covers* anything up: whatever
+    /// the viewmodel draws at full aim is sitting in the middle of the magnified
+    /// image. What the black used to hide, the rifle has to be hidden by not
+    /// being drawn — and the hands with it, since they are on a rifle that is not
+    /// there.
+    ///
+    /// The other half of the same claim: a weapon that is *not* scoped still
+    /// draws. Without that this test passes on a viewmodel that draws nothing at
+    /// all.
+    #[test]
+    fn the_rifle_is_out_of_the_frame_behind_a_settled_sight() {
+        for kind in ALL_KINDS {
+            let arsenal = arsenal_with(kind);
+            let mut player = Player::new(Vec3::ZERO);
+            // Full aim, held there. `Player` eases this towards its own input;
+            // what the pose reads is the field, and this is it settled.
+            player.ads = 1.0;
+            let mut vm = ViewModel::new();
+            vm.assemble(&player, arsenal.active_weapon(), Paint::factory());
+            if arsenal.active_weapon().scoped() {
+                assert!(
+                    vm.body.is_empty(),
+                    "{kind:?} has its eye on the eyepiece and its rifle still in the frame: \
+                     {} triangles of it",
+                    vm.body.len(),
+                );
+            } else {
+                assert!(
+                    !vm.body.is_empty(),
+                    "{kind:?} is not scoped and drew nothing at all",
+                );
+            }
+        }
+    }
+
     /// The throwable in the hand is on the screen, and where the hand is.
     ///
     /// "拿到手上" is exactly this and nothing else: the thing is drawn, in front

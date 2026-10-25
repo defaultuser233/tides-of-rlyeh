@@ -1892,6 +1892,24 @@ const TRACER_NEAR: f32 = 0.55;
 /// that the player holding it keeps being told.
 const DRY_REPORT: f32 = 0.55;
 
+/// What share of a weapon's report survives a suppressor, as a gain on the same
+/// recording. A third: at arm's length a suppressed rifle is the action and the
+/// round going downrange rather than the crack, and the point of the number is
+/// that a player who fires four times does not need a meter to hear the
+/// difference — nor to hear it as a different weapon.
+const SUPPRESSED_GAIN: f32 = 0.32;
+
+/// How far a torch dazzles, in metres, and how long one frame of it leaves a
+/// hostile blind.
+///
+/// The range is the light's, not the player's: a weapon light throws a beam that
+/// reads at 20 m on a dark night and is a glint at 40. The time is short on
+/// purpose — it is topped up every frame the beam is held on a target, so what a
+/// hostile gets is "blind while lit, and a blink after", rather than a window that
+/// can be banked by sweeping the light across a room.
+const TORCH_RANGE: f32 = 20.0;
+const TORCH_DAZZLE: f32 = 0.35;
+
 /// Whether the player is sprinting this frame.
 ///
 /// Sprint is a mode rather than a held key: Shift latches it on and it drops
@@ -2955,6 +2973,59 @@ mod tests {
             "the hand is drawn on the crosshair, where the arc already is"
         );
     }
+
+    /// A torch leaves what it is pointed at blind, and nothing else.
+    ///
+    /// Three questions decide it — how far, is there a wall, are their eyes on it
+    /// — and this holds the two that are about *direction*: a hostile the player
+    /// has turned away from keeps its eyes, and so does one beyond the light. The
+    /// wall is `line_of_sight`, which the arena's own tests cover; what matters
+    /// here is that a torch is a beam and not a room-wide off switch.
+    #[test]
+    fn a_torch_dazzles_what_it_is_pointed_at() {
+        let level = Level::from_layout(&maps::arena());
+        let mut rng = Rng::new(0x7A11);
+        let eye = vec3(0.0, 1.6, 0.0);
+        // Three metres ahead along -Z, which is where yaw 0 faces, and three
+        // behind it. Close in, because the point is the cone and not the range.
+        let enemies = vec![
+            Enemy::spawn(EnemyKind::Grunt, eye + vec3(0.0, 0.0, -3.0), 0, &mut rng),
+            Enemy::spawn(EnemyKind::Grunt, eye + vec3(0.0, 0.0, 3.0), 0, &mut rng),
+        ];
+        let index = |lit: Vec<usize>, which: usize| lit.contains(&which);
+        let ahead = enemies[0].pos.z < eye.z;
+        assert!(ahead, "the spawn moved the subjects of this test");
+
+        let lit = dazzled_by_torch(&level, &enemies, eye, 0.0);
+        assert!(
+            index(lit.clone(), 0),
+            "the torch did not light what it was pointed at: {lit:?}",
+        );
+        assert!(
+            !index(lit, 1),
+            "the torch lit what it was turned away from, which is a lamp",
+        );
+
+        let lit = dazzled_by_torch(&level, &enemies, eye, std::f32::consts::PI);
+        assert!(
+            index(lit.clone(), 1),
+            "turned around, the torch is not on the one behind: {lit:?}",
+        );
+        assert!(!index(lit, 0), "the torch is on both at once");
+
+        // And out of reach is out of it, whatever the direction.
+        let far = vec![Enemy::spawn(
+            EnemyKind::Grunt,
+            eye + vec3(0.0, 0.0, -(TORCH_RANGE + 6.0)),
+            0,
+            &mut rng,
+        )];
+        assert!(
+            dazzled_by_torch(&level, &far, eye, 0.0).is_empty(),
+            "the torch dazzled something {:.0} m away",
+            TORCH_RANGE + 6.0,
+        );
+    }
 }
 
 /// The window's opening state, read from the settings file.
@@ -3107,6 +3178,36 @@ fn looking_at(from: Vec3, yaw: f32, at: Vec3) -> bool {
     let forward = vec3(-yaw.sin(), 0.0, -yaw.cos());
     let to = vec3(at.x - from.x, 0.0, at.z - from.z).normalize_or_zero();
     forward.dot(to) > 0.35
+}
+
+/// The hostiles a torch held from `from` and facing `yaw` leaves blind.
+///
+/// Three questions, and they are the three a flashbang asks: how far, is there a
+/// wall in the way, and are their eyes on it. Written as a list of indices rather
+/// than as a loop that blinds, because "does a torch dazzle what it is pointed at"
+/// is a question about those three tests and a caller's loop is not a place to
+/// answer it — see `a_torch_dazzles_what_it_is_pointed_at`.
+///
+/// A hostile already blind is included like any other, which is what makes the
+/// effect sustain: the caller tops the timer up every frame the beam is held on a
+/// target, so a light left on somebody keeps them out of the fight, and one swept
+/// across a room buys a blink rather than a window.
+fn dazzled_by_torch(level: &Level, enemies: &[Enemy], from: Vec3, yaw: f32) -> Vec<usize> {
+    let mut out = Vec::new();
+    for (i, e) in enemies.iter().enumerate() {
+        if e.dead {
+            continue;
+        }
+        let centre = e.pos + vec3(0.0, e.height * 0.5, 0.0);
+        if centre.distance(from) > TORCH_RANGE
+            || !level.line_of_sight(from, centre)
+            || !looking_at(from, yaw, centre)
+        {
+            continue;
+        }
+        out.push(i);
+    }
+    out
 }
 
 /// The bang a pressure wave gets, by how far off it went.
@@ -3268,6 +3369,9 @@ fn fire_player_shot(game: &mut Game, audio: &audio::Audio, pressed: bool, held: 
     game.shots_fired += if s.melee { 1 } else { s.pellets };
     if s.melee {
         game.swing_marks.begin(game.enemies.len());
+        // The arm, which is the half of this the player sees. Without it a melee
+        // attack was a hit registration and a shove backwards.
+        game.viewmodel.trigger_melee();
     }
 
     // What a round makes of a lane rather than of a body (reference §23, axis 3).
@@ -5377,13 +5481,21 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
             // the shots come twice as fast as the weapon fires, and keep coming
             // all through a reload.
             if fire_player_shot(game, audio, pressed, held) {
-                audio.play(match kind {
+                let sfx = match kind {
                     WeaponKind::Rifle => Sfx::ShotRifle,
                     WeaponKind::Smg => Sfx::ShotSmg,
                     WeaponKind::Sniper => Sfx::ShotSniper,
                     WeaponKind::Lmg => Sfx::ShotLmg,
                     _ => Sfx::ShotShotgun,
-                });
+                };
+                // A suppressed barrel fires the same round out of the same
+                // weapon, so it is the same recording — the crack is what is
+                // missing, and there is one asset per weapon kind rather than two.
+                if game.arsenal.active_weapon().suppressed() {
+                    audio.play_quiet(sfx, SUPPRESSED_GAIN);
+                } else {
+                    audio.play(sfx);
+                }
             }
         } else {
             // The trigger is down with nothing in the magazine. That is a level
@@ -5462,6 +5574,22 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
     // `tick_waves`.
     let mission = game.mission;
     game.tick_waves(dt, audio);
+
+    // --- the torch ----------------------------------------------------------
+    // A light held on a hostile is a hostile that cannot see, which is what the
+    // fitting is *for*: the flashbang's own blindness, sustained instead of
+    // thrown — the same `Enemy::blind` and the same look-at test, topped up every
+    // frame so it lasts exactly as long as the beam is on them, and a moment
+    // after. Nothing else about a torch is simulated: it does not light the room
+    // (there is no dynamic lighting to light it with) and it does not make the
+    // player easier to see.
+    if alive && game.arsenal.active_weapon().torch() {
+        let from = game.player.eye();
+        let yaw = game.player.cam_yaw();
+        for i in dazzled_by_torch(&game.level, &game.enemies, from, yaw) {
+            game.enemies[i].blind(TORCH_DAZZLE);
+        }
+    }
 
     // --- enemy AI -----------------------------------------------------------
     let positions: Vec<Vec3> = game.enemies.iter().map(|e| e.pos).collect();
@@ -5664,6 +5792,10 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
                 // The loudest, shortest thing in the game — and it is not the
                 // noise that takes your eyes.
                 audio.play_at(Sfx::Explosion, far);
+                // And it is a light: visible in the room for a fifth of a second,
+                // whoever is looking. Without this the only thing a flashbang did
+                // was take one screen away, which is a mechanic with no event in it.
+                game.effects.flash_burst(pos, radius * 0.6);
                 // Nobody is hurt by it, which is the whole trade: a flash is
                 // worth carrying because it takes an enemy out of the fight for
                 // a window without killing them, and worth fearing because it
@@ -5694,8 +5826,14 @@ fn simulate(game: &mut Game, audio: &mut audio::Audio, dt: f32) {
                     let look = game.player.look_dir();
                     let facing = to.dot(look).clamp(0.0, 1.0);
                     let near = 1.0 - (d / radius).clamp(0.0, 1.0);
+                    // Half the screen even at the far edge of the light, and all
+                    // of it in the face: a flash thrown across a room and *looked
+                    // at* is still a flash, which is the whole reason the defence
+                    // is to turn away rather than to stand further off. The
+                    // `facing` term is squared, so the edge of the cone is where it
+                    // stops being worth looking.
                     game.effects.flash_bang = (game.effects.flash_bang
-                        + (facing * facing) * (0.35 + 0.65 * near))
+                        + (facing * facing) * (0.50 + 0.50 * near))
                         .min(1.0);
                 }
             }
@@ -6301,6 +6439,12 @@ fn render_world(game: &mut Game, fonts: &hud::Fonts) {
     // when health or sanity is nearly gone. The world grade above crosses the
     // same thresholds, so the two always agree about when "nearly" is.
     let madness = (1.0 - game.player.sanity_ratio()) * 0.7;
+    // The torch, before the vignette darkens the edges over it: the pool of light
+    // belongs to the world the player is looking at, and the edge of the screen is
+    // not where it lands.
+    if game.player.alive && game.arsenal.active_weapon().torch() {
+        hud::draw_torch(1.0);
+    }
     hud::draw_vignette(madness, desat > 0.0);
     hud::draw_kill_flash(game.effects.kill_flash);
     // Over the kill flash and under the bearing arcs: a flashbang is the last
@@ -6323,11 +6467,11 @@ fn render_world(game: &mut Game, fonts: &hud::Fonts) {
         game.viewmodel
             .draw(&game.player, &game.arsenal, &game.kit.paints);
     }
-    // The sight goes over the weapon, because by this point the weapon's own
-    // scope is the thing it is replacing. `draw_scope_overlay` ignores anything
-    // short of a sniper with the sights up, so this is cheap for every other
-    // gun in the game.
-    if game.player.alive && game.arsenal.active_weapon().kind == WeaponKind::Sniper {
+    // The sight goes over the weapon, because by this point the rifle itself is
+    // out of the frame (`viewmodel` leaves it out from the same constant this
+    // needs to draw at all). `draw_scope_overlay` returns at once for anything
+    // short of a sight that is up, so this is cheap for every other gun.
+    if game.player.alive && game.arsenal.active_weapon().scoped() {
         hud::draw_scope_overlay(game.player.ads);
     }
     draw_damage_numbers(game, fonts, &view_proj);
@@ -6451,7 +6595,7 @@ fn draw_hud_state(game: &Game, fonts: &hud::Fonts) {
             game.player.ads,
             game.player.spread_scale(),
         ),
-        scoped: weapon.kind == WeaponKind::Sniper && game.player.ads >= viewmodel::SCOPE_HIDE_ADS,
+        scoped: weapon.scoped() && game.player.ads >= viewmodel::SCOPE_HIDE_ADS,
         hit_marker: game.effects.hit_marker,
         headshot_marker: game.effects.head_marker,
         hurt: game.player.hurt_flash,

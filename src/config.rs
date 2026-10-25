@@ -148,7 +148,7 @@ pub struct Config {
     /// number the HUD counts is forgotten the moment the mission ends.
     pub best: [u32; crate::campaign::COUNT],
     /// The armory: the build each weapon kind carries and the finish it
-    /// wears, one settings spelling per entry of `weapon::ALL_KINDS`, held as
+    /// wears, one settings spelling per entry of `crate::weapon::ALL_KINDS`, held as
     /// the text the file holds. Parsing is `weapon`'s job and is lossy in the
     /// kind way settings are: a line this build cannot read is repaired, the
     /// way one bad setting costs its own line and no more.
@@ -509,22 +509,28 @@ fn parse(text: &str) -> Config {
             }
             "unlocked" => set_progress(&mut config.unlocked, value),
             "last_mission" => set_progress(&mut config.last_mission, value),
-            // The armory, one key per weapon kind. The same names `render`
-            // writes; `weapon::ALL_KINDS` order is the array order.
-            "build_rifle" => set_text(&mut config.builds[0], value),
-            "build_shotgun" => set_text(&mut config.builds[1], value),
-            "build_smg" => set_text(&mut config.builds[2], value),
-            "build_sniper" => set_text(&mut config.builds[3], value),
-            "build_lmg" => set_text(&mut config.builds[4], value),
-            "build_pistol" => set_text(&mut config.builds[5], value),
-            "build_knife" => set_text(&mut config.builds[6], value),
-            "paint_rifle" => set_text(&mut config.paints[0], value),
-            "paint_shotgun" => set_text(&mut config.paints[1], value),
-            "paint_smg" => set_text(&mut config.paints[2], value),
-            "paint_sniper" => set_text(&mut config.paints[3], value),
-            "paint_lmg" => set_text(&mut config.paints[4], value),
-            "paint_pistol" => set_text(&mut config.paints[5], value),
-            "paint_knife" => set_text(&mut config.paints[6], value),
+            // The armory, one key per weapon kind. Derived from `ALL_KINDS`
+            // rather than listed, which is what this table used to be: it named
+            // the first seven kinds by hand, and every weapon added after them
+            // went on being *written* — the save side walks the kinds — and never
+            // read. A build the armory had just fitted came back empty on the next
+            // start, which is how a laser on the M4A1 disappeared.
+            key if build_kind(key).is_some() => {
+                let kind = build_kind(key).expect("just matched");
+                let i = crate::weapon::ALL_KINDS
+                    .iter()
+                    .position(|k| *k == kind)
+                    .expect("a kind is in ALL_KINDS");
+                set_text(&mut config.builds[i], value);
+            }
+            key if paint_kind(key).is_some() => {
+                let kind = paint_kind(key).expect("just matched");
+                let i = crate::weapon::ALL_KINDS
+                    .iter()
+                    .position(|k| *k == kind)
+                    .expect("a kind is in ALL_KINDS");
+                set_text(&mut config.paints[i], value);
+            }
             // The loadout. The kinds are validated by `Kit` against the weapon
             // table; the counts are clamped here, so a typo costs its own line.
             "primary" => set_text(&mut config.primary, value),
@@ -606,6 +612,32 @@ fn set_best(slot: &mut u32, value: &str) {
 fn set_text(slot: &mut String, value: &str) {
     slot.clear();
     slot.push_str(value.trim());
+}
+
+/// The weapon kind a `build_<key>` line names, if it names one.
+///
+/// Derived from `ALL_KINDS` rather than written out, because the written-out
+/// version is what this is replacing: seven kinds by hand, and the seven weapons
+/// added after them saved but never read. `weapon::kind_named`'s shape, applied
+/// to the key rather than to the loadout, for the same reason — one list, so a
+/// kind cannot exist in one place and not the other.
+fn build_kind(key: &str) -> Option<crate::weapon::WeaponKind> {
+    let name = key.strip_prefix("build_")?;
+    crate::weapon::ALL_KINDS
+        .iter()
+        .copied()
+        .find(|k| k.key() == name)
+}
+
+/// And the same for a `paint_<key>` line. The two are separate functions and not
+/// one with a prefix argument because the arrays they index are separate, and a
+/// mixed-up prefix is exactly the mistake a single function would allow.
+fn paint_kind(key: &str) -> Option<crate::weapon::WeaponKind> {
+    let name = key.strip_prefix("paint_")?;
+    crate::weapon::ALL_KINDS
+        .iter()
+        .copied()
+        .find(|k| k.key() == name)
 }
 
 /// Assigns `slot` a whole count inside `range`; a value outside it is a typo
@@ -1019,5 +1051,39 @@ mod tests {
                       unlocked = 1\n\
                       last_mission = 0\n";
         assert_eq!(render(&Config::default()), sample);
+    }
+
+    /// Every weapon kind keeps its build and its paint through the file.
+    ///
+    /// Both directions used to be separate lists: the writer walked `ALL_KINDS`
+    /// and the reader was a hand-written table of the first seven kinds, so a
+    /// build for any weapon added after the seventh was written to the file and
+    /// never read back — silently, with nothing in the game or in these tests able
+    /// to see it. A laser fitted to the M4A1 came back missing on the next start
+    /// that way, and the player's report was that it was there when they fitted it
+    /// and gone the next time they looked.
+    ///
+    /// Round-tripped through the *file text* rather than checked against the
+    /// table, because the table is not the thing that was wrong: the two ends
+    /// disagreeing about what the keys are was.
+    #[test]
+    fn every_weapon_kind_keeps_its_build_and_paint_through_the_file() {
+        let mut config = Config::default();
+        for (i, kind) in crate::weapon::ALL_KINDS.iter().enumerate() {
+            config.builds[i] = format!("optic=micro_dot@0.5{:?}", i % 10);
+            config.paints[i] = format!("abyss@0.{:?}:7", i % 10);
+            let _ = kind;
+        }
+        let back = parse(&render(&config));
+        for (i, kind) in crate::weapon::ALL_KINDS.iter().enumerate() {
+            assert_eq!(
+                back.builds[i], config.builds[i],
+                "{kind:?} lost its build on the way through the file",
+            );
+            assert_eq!(
+                back.paints[i], config.paints[i],
+                "{kind:?} lost its paint on the way through the file",
+            );
+        }
     }
 }
