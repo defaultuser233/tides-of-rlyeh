@@ -2215,7 +2215,7 @@ fn ports(out: &mut Vec<Tri>, at: Vec3, half: f32, wall: f32, y: f32) {
 ///
 /// It is drawn unlit, and appended to the weapon's own list, which is in two spaces
 /// already — the weapon through its pose and the hands through theirs.
-fn laser_beam(out: &mut Vec<Tri>, dots: &mut Vec<Tri>, from: Vec3, dir: Vec3, stop: Option<f32>) {
+fn laser_beam(out: &mut Vec<Tri>, dots: &mut Vec<Tri>, from: Vec3, stop: Option<f32>) {
     let n = out.len();
     let m = dots.len();
     // Clamped as well as drawn: the caller promises the number is already inside
@@ -2223,13 +2223,17 @@ fn laser_beam(out: &mut Vec<Tri>, dots: &mut Vec<Tri>, from: Vec3, dir: Vec3, st
     // longer than the one the caller cast for. `min` costs nothing and makes the
     // promise one this function keeps on its own.
     let reach = stop.unwrap_or(LASER_REACH).min(LASER_REACH);
-    let end = from + dir * reach;
+    // The eye is the origin of view space, so the crosshair at that distance is
+    // on the view axis. The beam runs from the module to it: a sight points at
+    // what the shooter is aiming at, and the dot has to sit under the crosshair
+    // or the laser is marking a line the round does not take.
+    let end = vec3(0.0, 0.0, reach);
     // A wall a player is standing against is a `stop` of nearly nothing, and a
     // reach of zero is a tube with both ends in the same place — no beam to draw.
     // The dot is still drawn: it is on the wall, an arm's length in front of the
     // module, and it is the part of this that answers to the world rather than to
     // the gun.
-    if reach > 0.0 {
+    if end.z > from.z {
         // Thick at the module and never thinner than a hairline on the screen: the
         // taper is what keeps a beam that reaches twenty-six metres a line rather
         // than a stub with a dot floating past the end of it. Measured against the
@@ -2427,7 +2431,7 @@ fn def(kind: WeaponKind) -> Def {
     match kind {
         WeaponKind::Rifle => Def {
             hip: vec3(0.150, -0.092, 0.400),
-            rotation: vec3(-0.120, 0.045, 0.060),
+            rotation: vec3(0.0, 0.0, 0.060),
             aim: vec3(0.0, 0.0, 0.340),
             muzzle: vec3(0.0, -0.074, 0.872),
             grip: vec3(0.0, -0.166, -0.114),
@@ -2451,7 +2455,7 @@ fn def(kind: WeaponKind) -> Def {
         },
         WeaponKind::Shotgun => Def {
             hip: vec3(0.165, -0.112, 0.420),
-            rotation: vec3(-0.140, 0.060, 0.090),
+            rotation: vec3(0.0, 0.0, 0.090),
             aim: vec3(0.0, 0.0, 0.365),
             muzzle: vec3(0.0, -0.094, 0.746),
             grip: vec3(0.0, -0.176, -0.076),
@@ -2472,7 +2476,7 @@ fn def(kind: WeaponKind) -> Def {
         },
         WeaponKind::Smg => Def {
             hip: vec3(0.130, -0.077, 0.360),
-            rotation: vec3(-0.100, 0.030, 0.040),
+            rotation: vec3(0.0, 0.0, 0.040),
             aim: vec3(0.0, 0.0, 0.305),
             muzzle: vec3(0.0, -0.076, 0.406),
             grip: vec3(0.0, -0.155, -0.096),
@@ -2496,7 +2500,7 @@ fn def(kind: WeaponKind) -> Def {
         },
         WeaponKind::Sniper => Def {
             hip: vec3(0.170, -0.102, 0.440),
-            rotation: vec3(-0.150, 0.050, 0.100),
+            rotation: vec3(0.0, 0.0, 0.100),
             aim: vec3(0.0, 0.0, 0.340),
             muzzle: vec3(0.0, -0.085, 1.006),
             grip: vec3(0.0, -0.158, -0.130),
@@ -2516,7 +2520,7 @@ fn def(kind: WeaponKind) -> Def {
         },
         WeaponKind::Lmg => Def {
             hip: vec3(0.175, -0.117, 0.430),
-            rotation: vec3(-0.130, 0.070, 0.070),
+            rotation: vec3(0.0, 0.0, 0.070),
             aim: vec3(0.0, 0.0, 0.360),
             muzzle: vec3(0.0, -0.095, 0.891),
             grip: vec3(0.0, -0.190, -0.138),
@@ -2533,7 +2537,7 @@ fn def(kind: WeaponKind) -> Def {
         },
         WeaponKind::Pistol => Def {
             hip: vec3(0.140, -0.047, 0.355),
-            rotation: vec3(-0.090, 0.035, 0.055),
+            rotation: vec3(0.0, 0.0, 0.055),
             aim: vec3(0.0, 0.0, 0.300),
             muzzle: vec3(0.0, -0.036, 0.132),
             grip: vec3(0.0, -0.118, -0.066),
@@ -2550,7 +2554,7 @@ fn def(kind: WeaponKind) -> Def {
         },
         WeaponKind::M4a1 => Def {
             hip: vec3(0.148, -0.090, 0.396),
-            rotation: vec3(-0.118, 0.044, 0.058),
+            rotation: vec3(0.0, 0.0, 0.058),
             aim: vec3(0.0, 0.0, 0.336),
             muzzle: vec3(0.0, -0.081, 0.672),
             grip: vec3(0.0, -0.162, -0.082),
@@ -2567,7 +2571,7 @@ fn def(kind: WeaponKind) -> Def {
         },
         WeaponKind::Scar => Def {
             hip: vec3(0.154, -0.096, 0.410),
-            rotation: vec3(-0.124, 0.046, 0.062),
+            rotation: vec3(0.0, 0.0, 0.062),
             aim: vec3(0.0, 0.0, 0.344),
             muzzle: vec3(0.0, -0.081, 0.762),
             grip: vec3(0.0, -0.168, -0.080),
@@ -2584,7 +2588,7 @@ fn def(kind: WeaponKind) -> Def {
         },
         WeaponKind::Fal => Def {
             hip: vec3(0.158, -0.100, 0.424),
-            rotation: vec3(-0.128, 0.048, 0.066),
+            rotation: vec3(0.0, 0.0, 0.066),
             aim: vec3(0.0, 0.0, 0.348),
             muzzle: vec3(0.0, -0.084, 0.856),
             grip: vec3(0.0, -0.172, -0.088),
@@ -2602,7 +2606,7 @@ fn def(kind: WeaponKind) -> Def {
         },
         WeaponKind::Mp5 => Def {
             hip: vec3(0.130, -0.079, 0.364),
-            rotation: vec3(-0.102, 0.030, 0.042),
+            rotation: vec3(0.0, 0.0, 0.042),
             aim: vec3(0.0, 0.0, 0.308),
             muzzle: vec3(0.0, -0.081, 0.446),
             grip: vec3(0.0, -0.158, -0.064),
@@ -2619,7 +2623,7 @@ fn def(kind: WeaponKind) -> Def {
         },
         WeaponKind::Mpx => Def {
             hip: vec3(0.134, -0.081, 0.372),
-            rotation: vec3(-0.104, 0.032, 0.044),
+            rotation: vec3(0.0, 0.0, 0.044),
             aim: vec3(0.0, 0.0, 0.312),
             muzzle: vec3(0.0, -0.081, 0.470),
             grip: vec3(0.0, -0.160, -0.068),
@@ -2636,7 +2640,7 @@ fn def(kind: WeaponKind) -> Def {
         },
         WeaponKind::M110 => Def {
             hip: vec3(0.166, -0.100, 0.436),
-            rotation: vec3(-0.146, 0.050, 0.096),
+            rotation: vec3(0.0, 0.0, 0.096),
             aim: vec3(0.0, 0.0, 0.342),
             muzzle: vec3(0.0, -0.085, 0.980),
             grip: vec3(0.0, -0.166, -0.104),
@@ -2653,7 +2657,7 @@ fn def(kind: WeaponKind) -> Def {
         },
         WeaponKind::Mosin => Def {
             hip: vec3(0.172, -0.104, 0.448),
-            rotation: vec3(-0.152, 0.052, 0.102),
+            rotation: vec3(0.0, 0.0, 0.102),
             aim: vec3(0.0, 0.0, 0.344),
             muzzle: vec3(0.0, -0.081, 1.092),
             grip: vec3(0.0, -0.170, -0.096),
@@ -2671,7 +2675,7 @@ fn def(kind: WeaponKind) -> Def {
         },
         WeaponKind::Knife => Def {
             hip: vec3(0.150, -0.057, 0.350),
-            rotation: vec3(-0.105, 0.045, 0.085),
+            rotation: vec3(0.0, 0.0, 0.085),
             aim: vec3(0.0, 0.0, 0.330),
             muzzle: vec3(0.0, 0.0, 0.212),
             grip: vec3(0.0, -0.072, -0.074),
@@ -3432,15 +3436,12 @@ impl ViewModel {
     /// `kit_into` draws emits from. Both it and the metre step that gives the
     /// direction go through the pose, so the beam moves with the weapon and leaves
     /// the box it is drawn coming out of.
-    pub fn laser_ray(&self, player: &Player, weapon: &Weapon) -> Option<(Vec3, Vec3)> {
+    pub fn laser_ray(&self, player: &Player, weapon: &Weapon) -> Option<Vec3> {
         if !weapon.laser() {
             return None;
         }
         let mat = self.pose(player, weapon).matrix();
-        let mouth = def(weapon.kind).rail() + LASER_BORE;
-        let from = mat.transform_point3(mouth);
-        let dir = (mat.transform_point3(mouth + Vec3::Z) - from).normalize_or_zero();
-        Some((from, dir))
+        Some(mat.transform_point3(def(weapon.kind).rail() + LASER_BORE))
     }
 
     /// Call in the 2D pass, after `set_default_camera()`. `paints` is the
@@ -3575,8 +3576,8 @@ impl ViewModel {
         // `laser_stop` is measured from that start, so the beam and the dot on the
         // end of it land exactly where the caller's ray did.
         if !scoped && self.hold_t <= 0.0 {
-            if let Some((from, dir)) = self.laser_ray(player, weapon) {
-                laser_beam(&mut self.body, &mut self.laser, from, dir, laser_stop);
+            if let Some(from) = self.laser_ray(player, weapon) {
+                laser_beam(&mut self.body, &mut self.laser, from, laser_stop);
             }
         }
         // The muzzle flash is built here, in the same list as the weapon, and
@@ -5056,26 +5057,18 @@ mod tests {
         assert!(tip(&idle).distance(rest) < 1e-4);
     }
 
-    /// A laser is bolted to a rail, so its beam leaves along the weapon's own bore
-    /// and stays there.
+    /// A laser points where the shooter is aiming: its dot is on the crosshair.
     ///
-    /// The report this answers is the mirror image of the one before it. The beam
-    /// used to converge on the crosshair — wherever the wall was, at whatever angle
-    /// the weapon was canted — so with a wall a metre and a half away it could leave
-    /// its own module up to eleven degrees off the barrel, and the module had to be
-    /// turned separately to hide the join. A laser on a rail cannot do that: the
-    /// light is the fitting's own bore line, and the dot is wherever that line meets
-    /// the world. What that costs is the dot off the crosshair, which is what the
-    /// sight of a canted weapon does and is the number measured here.
-    ///
-    /// Three claims, at the hip and with the sights up: the ray starts at the
-    /// module's window; its direction is the pose's own `+z`, so the beam is exactly
-    /// parallel to the barrel; and the drawn beam follows that ray rather than the
-    /// view axis, which is where the old one bent to. `None`, so this is the
-    /// open-sky beam; the beam that stops on a wall is
-    /// `the_laser_beam_stops_on_the_first_surface`.
+    /// The reports that shaped this are both in the test. A beam down the bore is
+    /// parallel by construction, but its dot sits under the crosshair by the
+    /// height of the rail — the green dot below the window in the report. A beam
+    /// bent to the crosshair from a canted *pose* was the eleven-degree line that
+    /// "镭射与枪管不平行" was about. The pose's yaw is gone now: the gun points
+    /// where the eye looks at the hip, so the only bend left is the rail's own
+    /// height, one or two degrees at fighting range, and the dot is on the
+    /// crosshair at every range.
     #[test]
-    fn the_laser_beam_runs_parallel_to_the_barrel() {
+    fn the_laser_beam_ends_on_the_crosshair() {
         let viewport = vec2(1280.0, 720.0);
         let f = (viewport.y * 0.5) / (62f32.to_radians() * 0.5).tan();
         let build = build_with("laser");
@@ -5087,129 +5080,65 @@ mod tests {
             let vm = ViewModel::new();
             let mat = vm.pose(&player, &weapon).matrix();
             let mouth = def(WeaponKind::Rifle).rail() + LASER_BORE;
-            let (from, dir) = vm
+            let from = vm
                 .laser_ray(&player, &weapon)
                 .expect("a weapon with a laser has no ray");
-            // Its near end is the module's face, which is where the light leaves.
             assert!(
                 from.distance(mat.transform_point3(mouth)) < 1e-5,
-                "the ray does not start at the module's window",
-            );
-            // And it is parallel to the barrel, which is the whole of the fix: the
-            // pose's own `+z` is the line the bore lies on.
-            let axis = (mat.transform_point3(mouth + Vec3::Z) - from).normalize_or_zero();
-            assert!(
-                dir.dot(axis) > 1.0 - 1e-5,
-                "the beam leaves {:.2}° off the barrel",
-                dir.dot(axis).clamp(-1.0, 1.0).acos().to_degrees(),
+                "the beam does not start at the module's window",
             );
 
             let mut beam = Vec::new();
-            laser_beam(&mut beam, &mut Vec::new(), from, dir, None);
+            let mut dots = Vec::new();
+            laser_beam(&mut beam, &mut dots, from, Some(6.0));
             assert!(!beam.is_empty(), "the beam drew nothing at all");
-            // Nothing in it has turned towards the view axis: the far end lies on
-            // the ray through the module, not on the line the crosshair sits on.
-            let far: Vec<Vec3> = beam
-                .iter()
-                .flat_map(|t| [t.a, t.b, t.c])
-                .filter(|p| (*p - from).dot(dir) > LASER_REACH - 0.05)
-                .collect();
             assert!(
-                !far.is_empty(),
-                "the beam does not reach {LASER_REACH:.0} m"
+                beam.iter()
+                    .flat_map(|t| [t.a, t.b, t.c])
+                    .all(|p| p.z <= 6.01),
+                "the beam drew past the surface it stopped on",
             );
-            for p in &far {
-                // The distance from the ray. The tube's own far radius is a shade
-                // over three centimetres at this reach, so anything inside that is
-                // the taper and not a bend.
-                let off = (*p - from).cross(dir).length();
-                assert!(
-                    off < 0.04,
-                    "a vertex of the far end is {off:.3} m off the ray it was cast along",
-                );
-            }
-            if ads == 0.0 {
-                // At the hip the weapon is canted for the eye's sake and the beam
-                // goes with it: this is the 7.3° the module used to be turned
-                // through to hide the difference, now out in the open as the dot
-                // off the crosshair.
-                let cant = dir.dot(Vec3::Z).clamp(-1.0, 1.0).acos().to_degrees();
-                assert!(
-                    cant > 4.0,
-                    "the beam is only {cant:.2}° off the view axis at the hip, so there \
-                     is nothing here that could have bent",
-                );
-                // And the dot pays for it. A wall a metre and a half along the beam
-                // gets a mark well off the crosshair, because the light is parallel
-                // to a canted barrel rather than bent to the sight. That is the
-                // price of the parallelism, and a test that fails here is a beam
-                // bent back to the crosshair rather than one cast down the bore.
-                let landing = from + dir * 1.5;
-                let on_screen = project_point(landing, viewport, f)
-                    .expect("the near landing is behind the eye");
-                let away = (on_screen - viewport * 0.5).length();
-                assert!(
-                    away > 40.0,
-                    "the hip-fired beam ends {away:.0} px from the crosshair: it has been \
-                     bent back to the sight",
-                );
-            } else {
-                // With the sights up the barrel *is* the view axis, and the module
-                // is back on the under rail — so the dot sits below the crosshair
-                // by the rail's height. That is the price of the beam coming out
-                // parallel to the bore instead of bending up to the sight; a dot on
-                // the crosshair here would mean the beam had been bent again.
-                assert!(
-                    (dir - Vec3::Z).length() < 1e-4,
-                    "the aimed beam is not parallel to the view axis: {dir:?}",
-                );
-                let landing = from + dir * 1.5;
-                let on_screen = project_point(landing, viewport, f)
-                    .expect("the near landing is behind the eye");
-                assert!(
-                    on_screen.y > viewport.y * 0.5 + 30.0,
-                    "a wall at 1.5 m puts the aimed beam's dot at {on_screen:?}: the \
-                     beam has been bent up to the sight",
-                );
+            let landing = project_point(vec3(0.0, 0.0, 6.0), viewport, f)
+                .expect("the landing is behind the eye");
+            assert!(
+                (landing - viewport * 0.5).length() < 1.0,
+                "at ads {ads} the beam ends {:.0} px from the crosshair",
+                (landing - viewport * 0.5).length(),
+            );
+            for t in dots.iter().filter(|t| t.color == LASER_HOT) {
+                for p in [t.a, t.b, t.c] {
+                    let at = project_point(p, viewport, f).expect("the dot is behind the eye");
+                    assert!(
+                        (at - viewport * 0.5).length() < 4.0,
+                        "the dot is {:.0} px from the crosshair",
+                        (at - viewport * 0.5).length(),
+                    );
+                }
             }
         }
     }
 
     /// The beam stops where the world does, and leaves a dot there.
     ///
-    /// Until this, the beam was a fixed twenty-six metres: it went through walls and
-    /// ended on the crosshair whether or not anything was behind it, which is light
-    /// a player can see and a wall cannot. The caller casts now — `Some(d)` the first
-    /// surface `d` metres from the module along the beam, `None` open sky — and what
-    /// this holds is the drawing half of that contract: nothing past the number, a
-    /// dot at the number, no dot when there was nothing to land on, and a beam that
-    /// neither runs backwards through the weapon when the wall is close nor draws
-    /// past the reach it promised.
+    /// `Some(d)` is the first surface `d` metres from the eye along the view
+    /// axis, `None` open sky. The drawing half of that contract: nothing past the
+    /// number, the dot on the crosshair, no dot when nothing was hit, no tube
+    /// running backwards through the gun when the wall is closer than the module,
+    /// and a clamp at the reach.
     #[test]
     fn the_laser_beam_stops_on_the_first_surface() {
-        // Roughly where a rifle's module sits at the hip, pointing where that
-        // weapon's barrel points: off the view axis to the right and below it, and a
-        // few degrees to the left, which is the case that tells a beam along its own
-        // bore from one bent back to the crosshair.
         let from = vec3(0.124, -0.274, 0.70);
-        let dir = vec3(-0.1196, -0.045, 0.9918).normalize();
         let beam = |stop: Option<f32>| {
             let mut out = Vec::new();
             let mut dots = Vec::new();
-            laser_beam(&mut out, &mut dots, from, dir, stop);
-            // The test measures the light as one list; the app splits them only so
-            // the dot can be drawn over the weapon.
+            laser_beam(&mut out, &mut dots, from, stop);
+            // The app splits the two lists only so the dot can be drawn over the
+            // weapon; the test measures the light as one.
             out.extend(dots);
             out
         };
         let points =
             |tris: &[Tri]| -> Vec<Vec3> { tris.iter().flat_map(|t| [t.a, t.b, t.c]).collect() };
-        // The dot is the only light in a beam that is bright at the middle: the beam
-        // itself is one flat green, so the hot core is the mark. Found by its colour
-        // and then measured by *where on the screen* it is — the dot is drawn a
-        // share of the way back along its own ray so the painter's sort puts it
-        // behind the beam, so its depth is not the landing's while its projection
-        // is.
         let hot = |tris: &[Tri]| -> Option<Vec3> {
             let (mut sum, mut n) = (Vec3::ZERO, 0);
             for t in tris.iter().filter(|t| t.color == LASER_HOT) {
@@ -5222,65 +5151,55 @@ mod tests {
         };
         let viewport = vec2(1280.0, 720.0);
         let f = (viewport.y * 0.5) / (62f32.to_radians() * 0.5).tan();
-        // How far along the beam a point lies, which is the distance `stop` is in.
-        let along = |p: Vec3| (p - from).dot(dir);
         let screen = |p: Vec3| project_point(p, viewport, f).expect("the point is behind the eye");
+        let landing = |stop: f32| vec3(0.0, 0.0, stop);
 
-        // A wall four metres along the beam: the light is on it and nowhere past it.
+        // A wall four metres from the eye: the light is on the crosshair and
+        // nowhere past it.
         let stopped = beam(Some(4.0));
         let pts = points(&stopped);
         assert!(!pts.is_empty(), "the beam drew nothing at all");
-        let past = pts.iter().filter(|p| along(**p) > 4.05).count();
+        let past = pts.iter().filter(|p| p.z > 4.05).count();
         assert_eq!(past, 0, "{past} vertices of beam are past the wall at 4 m");
         let dot = hot(&stopped).expect("the beam stops on the wall but leaves no dot on it");
-        let landing = from + dir * 4.0;
         assert!(
-            (screen(dot) - screen(landing)).length() < 1.0,
-            "the dot is {:.0} px from where the ray met the wall",
-            (screen(dot) - screen(landing)).length(),
+            (screen(dot) - screen(landing(4.0))).length() < 1.0,
+            "the dot is {:.0} px from the crosshair",
+            (screen(dot) - screen(landing(4.0))).length(),
         );
-        // Green, which is the one thing about it that is not geometry.
         let greenest = stopped
             .iter()
             .map(|t| t.color.g - t.color.r.max(t.color.b))
             .fold(f32::MIN, f32::max);
         assert!(greenest > 0.2, "the beam is not green: {greenest:.2}");
 
-        // Nothing to stop it: the light runs to its longest, and a beam into the sky
-        // leaves nothing on the sky.
+        // Nothing to stop it: the light runs to its longest, and a beam into the
+        // sky leaves nothing on it.
         let open = beam(None);
         let far = points(&open)
             .iter()
-            .filter(|p| along(**p) > LASER_REACH - 0.05)
+            .filter(|p| p.z > LASER_REACH - 0.05)
             .count();
         assert!(far > 0, "the beam does not reach {LASER_REACH:.0} m");
         assert!(hot(&open).is_none(), "a beam into the sky left a dot on it");
 
-        // A wall an arm's length from the module — a player with their face
-        // against one: the beam is a stub and the dot is still on the wall, in front
-        // of the gun, because the dot is the one part of this that answers to the
-        // world rather than to the barrel.
+        // A wall an arm's length from the eye: the tube would run backwards
+        // through the gun, so only the dot is drawn — on the wall, in front.
         let touching = beam(Some(0.2));
         let dot = hot(&touching).expect("a wall at 0.2 m left no dot on it");
-        let landing = from + dir * 0.2;
         assert!(
-            (screen(dot) - screen(landing)).length() < 1.0,
-            "a wall at 0.2 m: the dot is {:.0} px from the ray",
-            (screen(dot) - screen(landing)).length(),
+            (screen(dot) - screen(landing(0.2))).length() < 1.0,
+            "a wall at 0.2 m: the dot is {:.0} px from the crosshair",
+            (screen(dot) - screen(landing(0.2))).length(),
         );
         assert!(
-            points(&touching).iter().all(|p| along(*p) < 0.25),
-            "a beam at a wall 0.2 m away was drawn longer than 0.25 m",
+            points(&touching).iter().all(|p| p.z < 0.25),
+            "the beam at a wall 0.2 m away was drawn past it",
         );
 
-        // And a number past the reach is clamped to it rather than believed: the
-        // beam is drawn to twenty-six metres and no further, whatever the caller
-        // says.
+        // And a number past the reach is clamped to it rather than believed.
         let overshot = points(&beam(Some(100.0)));
-        assert!(
-            overshot.iter().all(|p| along(*p) < LASER_REACH + 0.05),
-            "the beam drew past its own reach",
-        );
+        assert!(overshot.iter().all(|p| p.z < LASER_REACH + 0.05));
     }
 
     /// A build with one underbarrel fitting on it, for the rail tests.
@@ -5353,20 +5272,10 @@ mod tests {
                     "the torch on {kind:?} at ads {ads} leaves its light {off:.2}° off its \
                      own cone",
                 );
-                // And what the pose alone was, canted for the eye's sake: a few
-                // degrees at the hip and nothing with the sights up.
-                if ads == 0.0 {
-                    let pose_off = axis_of(&mat)
-                        .dot(light)
-                        .clamp(-1.0, 1.0)
-                        .acos()
-                        .to_degrees();
-                    assert!(
-                        pose_off > 4.0,
-                        "the torch on {kind:?} at the hip is only {pose_off:.2}° off, so \
-                         there is nothing here to fix",
-                    );
-                }
+                // The pose is square with the eye at the hip now — the yaw that
+                // canted it is gone — so what is left for the turn is the mount's
+                // own offset, under a degree. It still has to be *right*: a cone
+                // welded to the barrel would disagree with the pool it lights.
                 // The mouth does not move: the cone leaves where it left.
                 assert!(
                     turned.transform_point3(mouth).distance(at) < 1e-4,
@@ -5386,8 +5295,8 @@ mod tests {
                 );
 
                 // The laser: the module sits flush on the rail, so its back corner
-                // is where the pose puts it and nowhere else, and its beam runs down
-                // that module's own axis.
+                // is where the pose puts it and nowhere else, and its beam starts
+                // at that module's mouth and ends on the crosshair.
                 let laser = Weapon::with_build(kind, build_with("laser"));
                 assert!(laser.laser(), "{kind:?} is not wearing the laser");
                 let mut vm = ViewModel::new();
@@ -5398,14 +5307,12 @@ mod tests {
                     drawn(&vm, mat.transform_point3(corner)),
                     "the laser on {kind:?} at ads {ads} is not drawn flush on the rail",
                 );
-                let (from, dir) = vm
+                let from = vm
                     .laser_ray(&player, &laser)
                     .expect("a weapon with a laser has no ray");
-                let axis = (mat.transform_point3(l_mouth + Vec3::Z) - from).normalize_or_zero();
                 assert!(
-                    dir.dot(axis) > 1.0 - 1e-5,
-                    "the laser on {kind:?} at ads {ads} leaves {:.2}° off its own module",
-                    dir.dot(axis).clamp(-1.0, 1.0).acos().to_degrees(),
+                    from.distance(mat.transform_point3(l_mouth)) < 1e-5,
+                    "the laser on {kind:?} at ads {ads} does not start at its module",
                 );
             }
         }
