@@ -37,7 +37,7 @@ use pickup::{Pickup, PickupKind};
 use player::{MoveInput, Player, Stance};
 use util::{Rng, ray_aabb};
 use viewmodel::ViewModel;
-use weapon::{Arsenal, SlotClass, WeaponKind};
+use weapon::{Arsenal, SlotClass, Weapon, WeaponKind};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -3024,6 +3024,211 @@ mod tests {
             dazzled_by_torch(&level, &far, eye, 0.0).is_empty(),
             "the torch dazzled something {:.0} m away",
             TORCH_RANGE + 6.0,
+        );
+    }
+
+    /// A room for the laser tests: a floor, no roof, and one wall six metres
+    /// down `-z`, which is where yaw zero looks. Every distance below is one of
+    /// these two boxes' own numbers.
+    fn laser_room() -> Level {
+        let stone = surface::skin(0.30, 0.30, 0.32, surface::Surface::Concrete);
+        let block = |min: Vec3, max: Vec3| level::Block {
+            min,
+            max,
+            skin: stone,
+        };
+        let layout = level::Layout {
+            name_en: "laser",
+            name_zh: "laser",
+            boxes: vec![
+                block(vec3(-20.0, -0.2, -20.0), vec3(20.0, 0.0, 20.0)),
+                block(vec3(-20.0, 0.0, -6.4), vec3(20.0, 4.0, -6.0)),
+            ],
+            player_start: Vec3::ZERO,
+            spawns: vec![Vec3::ZERO],
+            extraction: None,
+            half: 20.0,
+            sky: Color::new(0.02, 0.03, 0.05, 1.0),
+            sunken: false,
+            accent: WHITE,
+            voids: Vec::new(),
+        };
+        Level::from_layout(&layout)
+    }
+
+    /// The rifle with a laser on its rail, which is the weapon every test below
+    /// needs: the fitting has to be real enough for `weapon.laser()` and for
+    /// the module's place in the pose.
+    fn laser_rifle() -> Weapon {
+        use crate::weapon::{AmmoKind, BuildEntry, PartId, SlotId, WeaponBuild};
+
+        Weapon::with_build(
+            WeaponKind::Rifle,
+            WeaponBuild {
+                entries: vec![BuildEntry {
+                    slot: SlotId("underbarrel"),
+                    part: PartId("laser"),
+                    roll: 0.5,
+                }],
+                load: AmmoKind::Fmj,
+            },
+        )
+    }
+
+    /// The beam's world ray stops on the first face it meets: a wall, or a body
+    /// in front of one, and it runs to nothing at all in open sky.
+    ///
+    /// The drawing has its own half of this (`viewmodel`), which stops the tube
+    /// it paints at the number this returns. This is the cast that produces the
+    /// number: a beam is a line in the room, not a point on the crosshair, so it
+    /// is walked from the module out rather than asked where the sight line ends.
+    /// The old beam was 26 m of green drawn through every wall it crossed; these
+    /// are the three answers that replaced it.
+    #[test]
+    fn the_laser_stops_on_the_first_surface_it_meets() {
+        let level = laser_room();
+        let player = Player::new(Vec3::ZERO);
+        let eye = player.eye();
+        let dir = player.look_dir();
+
+        // Nothing in the way: the beam stops on the wall's near face.
+        let wall = beam_stop(&level, &[], eye, dir).expect("the wall is in the way");
+        assert!(
+            (wall - 6.0).abs() < 1.0e-3,
+            "the beam stopped at {wall} m instead of on the wall"
+        );
+
+        // A body three metres out takes the dot, and takes it on the face the
+        // ray meets — one radius short of where the body stands.
+        let mut rng = Rng::new(0x1A5E);
+        let mut front = Enemy::spawn(EnemyKind::Grunt, Vec3::ZERO, 0, &mut rng);
+        front.pos = vec3(0.0, 0.0, -3.0);
+        let want = 3.0 - front.radius;
+        let body = beam_stop(&level, &[front], eye, dir).expect("a body is in the way");
+        assert!(
+            (body - want).abs() < 1.0e-3,
+            "the dot landed at {body} m, not on the body at {want} m"
+        );
+        assert!(
+            body < wall,
+            "the body did not take the dot from the wall behind it"
+        );
+
+        // Behind the wall it changes nothing: the wall is still the first
+        // surface, and a dot drawn through it would be light a wall cannot stop.
+        let mut behind = Enemy::spawn(EnemyKind::Grunt, Vec3::ZERO, 0, &mut rng);
+        behind.pos = vec3(0.0, 0.0, -8.0);
+        let blocked = beam_stop(&level, &[behind], eye, dir).expect("the wall is in the way");
+        assert!(
+            (blocked - 6.0).abs() < 1.0e-3,
+            "a body behind the wall moved the dot to {blocked} m"
+        );
+
+        // Turned into the empty half of the room, there is nothing within reach
+        // and no dot: `None` rather than a beam parked at its own length.
+        let mut open = player;
+        open.yaw = -std::f32::consts::FRAC_PI_2;
+        assert_eq!(
+            beam_stop(&level, &[], open.eye(), open.look_dir()),
+            None,
+            "the beam found a surface in an empty direction"
+        );
+    }
+
+    /// The cast is the beam's, not the sight line's: at the hip the light leaves
+    /// the module down the barrel's own axis, so its dot is off the crosshair by
+    /// the pose's cant, and the number handed to the drawing is the distance to
+    /// the wall *along that line*.
+    ///
+    /// The viewmodel owns the claim that the ray is parallel to the barrel
+    /// (`the_laser_beam_runs_parallel_to_the_barrel`). What main.rs owes that
+    /// claim is a cast down exactly the line it is handed and a distance
+    /// measured from its origin — the drawing starts the beam at the module, so
+    /// a number from the eye would end it past the wall by the depth of the gun.
+    #[test]
+    fn the_laser_is_cast_down_the_barrel() {
+        let level = laser_room();
+        let weapon = laser_rifle();
+        assert!(weapon.laser(), "the fitting is not being seen");
+
+        // At the hip, where the weapon is canted for the eye's sake and the
+        // beam goes with it instead of bending back to the crosshair.
+        let player = Player::new(Vec3::ZERO);
+        let view = ViewModel::new();
+        let cam = player.eye();
+        let up = Vec3::Y;
+        let (from, dir) = laser_ray_world(&player, &view, &weapon, cam, up)
+            .expect("a weapon with a laser has no world ray");
+        let stop = laser_stop(&level, &[], &player, &view, &weapon, cam, up)
+            .expect("the wall is in the way");
+        let hit = from + dir * stop;
+        assert!(
+            (hit.z + 6.0).abs() < 1.0e-2,
+            "the beam stopped at {hit:?}, not on the wall at z -6"
+        );
+
+        // And that is the barrel's line, which is not the line the crosshair
+        // sits on: the hip pose's cant puts the dot most of a metre off it at
+        // six metres. A cast down the view axis would leave a gap of nothing.
+        let sight = player.eye() + player.look_dir() * stop;
+        let gap = hit.distance(sight);
+        assert!(
+            gap > 0.05,
+            "the dot sits on the crosshair at the hip ({gap:.3} m off), so the \
+             cast is following the sight rather than the barrel"
+        );
+    }
+
+    /// The dot drawn in the view and the point cast in the world are the same
+    /// place on the screen, with the camera rolled as a lean rolls it.
+    ///
+    /// The viewmodel draws the dot in view space, which knows nothing of the
+    /// camera's roll; the cast is in the world, where the camera's own basis
+    /// does. Mapping the ray through the unrolled axes instead would land the
+    /// cast most of a metre from the point under the dot at a wall six metres
+    /// out — the dot would sit on a part of the wall it was not drawn on, which
+    /// is the same class of lie as the beam that bent to the crosshair. Leaned to
+    /// the stop, where the difference is largest, and checked in pixels rather
+    /// than in metres, because pixels are where a dot on a wall has to be true.
+    #[test]
+    fn the_lasers_dot_and_its_cast_share_a_pixel() {
+        let level = laser_room();
+        let weapon = laser_rifle();
+        let mut player = Player::new(Vec3::ZERO);
+        player.lean = 1.0;
+        let view = ViewModel::new();
+
+        // The frame's camera, built the way `render_world` builds it.
+        let dir = player.look_dir();
+        let right = vec3(dir.z, 0.0, -dir.x).normalize_or_zero();
+        let up = dir.cross(right).normalize_or_zero();
+        let roll = player.lean_roll();
+        let up_tilted = (up * roll.cos() + right * roll.sin()).normalize_or_zero();
+        let cam = player.eye();
+
+        let (from, beam) = laser_ray_world(&player, &view, &weapon, cam, up_tilted)
+            .expect("a weapon with a laser has no world ray");
+        let stop = laser_stop(&level, &[], &player, &view, &weapon, cam, up_tilted)
+            .expect("the wall is in the way");
+        let hit = from + beam * stop;
+
+        // Where the viewmodel draws the dot: the same ray, in view space.
+        let (mouth, along) = view
+            .laser_ray(&player, &weapon)
+            .expect("a weapon with a laser has no ray");
+        let dot = mouth + along * stop;
+
+        let (w, h) = (1280.0f32, 720.0f32);
+        let fovy = player.fovy();
+        let f = (h * 0.5) / (fovy * 0.5).tan();
+        let drawn = vec2(w * 0.5 + (dot.x / dot.z) * f, h * 0.5 - (dot.y / dot.z) * f);
+        let vp = view_projection(cam, cam + dir, up_tilted, fovy, w, h);
+        let cast = project_to_screen(&vp, hit, w, h).expect("the hit is behind the camera");
+        let gap = (drawn - cast).length();
+        assert!(
+            gap < 1.0,
+            "the dot is drawn {gap:.0} px away from the point it was cast on: \
+             {drawn:?} against {cast:?}"
         );
     }
 }
@@ -6345,6 +6550,107 @@ fn arc_mesh(path: &[Vec3], accent: Color, out: &mut Mesh) {
     *out = mb.finish();
 }
 
+/// The laser's beam as a world-space ray: the viewmodel's own ray, carried out
+/// through the frame's camera.
+///
+/// `ViewModel::laser_ray` answers in the view's space — right, up and forward
+/// from the eye, the space the weapon is posed in — and the camera is what turns
+/// that space into the world. The axes are rebuilt the way `Camera3D` builds
+/// them (`look_at_rh`): right is forward across the up hint, and up is right
+/// across forward. The up hint is the frame's tilted up, so leaning rolls the
+/// beam with the camera the way it rolls everything else on the screen; mapping
+/// through an unrolled basis would put the dot a whole lean away from the pixel
+/// it is drawn on.
+///
+/// The origin is `cam` rather than the eye because that is where the camera
+/// really is this frame: shake moves it, and a ray from the eye would let the
+/// dot slide off the surface while the world around it shook.
+///
+/// A beam leaves the module down the weapon's own `+z`; carrying that line out
+/// here does not bend it towards anything. It is the line the player sees,
+/// extended into the room — not the sight line.
+fn laser_ray_world(
+    player: &Player,
+    view: &ViewModel,
+    weapon: &Weapon,
+    cam: Vec3,
+    up: Vec3,
+) -> Option<(Vec3, Vec3)> {
+    let (from, dir) = view.laser_ray(player, weapon)?;
+    let fwd = player.look_dir();
+    let right = fwd.cross(up).normalize_or_zero();
+    let up = right.cross(fwd).normalize_or_zero();
+    let at = cam + right * from.x + up * from.y + fwd * from.z;
+    let along = (right * dir.x + up * dir.y + fwd * dir.z).normalize_or_zero();
+    Some((at, along))
+}
+
+/// The distance along a beam from `from` to the first surface it meets, or
+/// `None` when the line runs out of the world and into the sky.
+///
+/// This is the same walk a shot makes — the arena's solids and the bodies a
+/// round can be put into, nearest first — and `combat::hitscan_through` walks
+/// exactly those two tables for a shot. This is that walk asked for a single
+/// number instead: the beam stops on the first face it meets and carries through
+/// nothing, so there is no lane to build and nothing to sort.
+///
+/// Nothing here knows about the crosshair. A laser is a light on a rail, not a
+/// sight that bends: the line is whatever line it was handed, and the number
+/// says how far that line gets. `dir` has to be a unit vector for that number to
+/// be metres, which is what `laser_ray_world` hands over.
+fn beam_stop(level: &Level, enemies: &[Enemy], from: Vec3, dir: Vec3) -> Option<f32> {
+    let mut stop = level.ray_world(from, dir, viewmodel::LASER_REACH);
+    for e in enemies {
+        // The same bodies a round can be put into: a corpse is not a surface it
+        // would stop on, so the beam passes through it the way the round does.
+        if !e.targetable() {
+            continue;
+        }
+        // No lower bound on `t`, for the reason the shot path gives: at
+        // point-blank range the module is inside the body's box, the entry reads
+        // as zero, and refusing it would leave the beam passing through the one
+        // hostile it is actually touching.
+        if let Some(t) = e.body_aabb().ray(from, dir)
+            && t < viewmodel::LASER_REACH
+            && stop.is_none_or(|s| t < s)
+        {
+            stop = Some(t);
+        }
+    }
+    stop
+}
+
+/// Where the laser's beam stops, as a distance from the module along the beam;
+/// `None` when it runs into the sky or the weapon carries no laser.
+///
+/// The beam is the weapon's own. `laser_ray` gives the module's mouth and the
+/// barrel's `+z` through the pose, `laser_ray_world` carries both out through the
+/// camera, and `beam_stop` walks the room along that line. The drawing multiplies
+/// the same number by the same ray (`laser_beam`), so the dot is exactly where
+/// the cast stopped and the beam is the line the player sees.
+///
+/// It is not the sight line, and the dot is not on the crosshair: a module bolted
+/// to a rail shines where the rail points, and at the hip that is 7° off the
+/// sight. The cost is the dot, and the fix is the gap — the old beam bent to meet
+/// the crosshair and left its own module up to eleven degrees off the light it
+/// was emitting. Bending the beam back to the crosshair would undo exactly that.
+///
+/// Measured from the module, because that is where the drawing starts the beam
+/// and what `stop` means to `laser_beam`. A distance from the eye would put the
+/// far end past the wall by the depth of the module.
+fn laser_stop(
+    level: &Level,
+    enemies: &[Enemy],
+    player: &Player,
+    view: &ViewModel,
+    weapon: &Weapon,
+    cam: Vec3,
+    up: Vec3,
+) -> Option<f32> {
+    let (from, dir) = laser_ray_world(player, view, weapon, cam, up)?;
+    beam_stop(level, enemies, from, dir)
+}
+
 fn render_world(game: &mut Game, fonts: &hud::Fonts) {
     // The same thresholds the vignette lights up at; the fog pass below greys
     // the world by this much.
@@ -6464,8 +6770,28 @@ fn render_world(game: &mut Game, fonts: &hud::Fonts) {
     }
     draw_sanity_bar(fonts, game.player.sanity_ratio());
     if game.player.alive {
+        // The beam ends where the world says it does. Asked here rather than in
+        // the viewmodel because the viewmodel draws in view space, where there
+        // is no wall to stop on, and asked of the geometry a round is stopped by
+        // so the dot lies on a real surface rather than inside one.
+        // The ray is the beam's own — the module's mouth and the barrel's axis
+        // through the pose — and not the sight line: at the hip the dot sits off
+        // the crosshair, which is what a laser on a rail does. Not gated on a
+        // laser being fitted either: the trace is a handful of box tests against
+        // the draw it feeds, and the rules for when a beam exists at all live in
+        // the viewmodel — repeating them here would be a second copy to keep in
+        // step.
+        let stop = laser_stop(
+            &game.level,
+            &game.enemies,
+            &game.player,
+            &game.viewmodel,
+            game.arsenal.active_weapon(),
+            cam,
+            up_tilted,
+        );
         game.viewmodel
-            .draw(&game.player, &game.arsenal, &game.kit.paints);
+            .draw(&game.player, &game.arsenal, &game.kit.paints, stop);
     }
     // The sight goes over the weapon, because by this point the rifle itself is
     // out of the frame (`viewmodel` leaves it out from the same constant this

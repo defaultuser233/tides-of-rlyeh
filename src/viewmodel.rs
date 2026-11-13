@@ -135,16 +135,60 @@ const BLACK: Color = Color::new(0.07, 0.07, 0.08, 1.0);
 /// frame. Written down once because two things have to agree about it — the module
 /// that `kit_into` draws and the beam that `assemble` draws from it.
 const LASER_BORE: Vec3 = vec3(0.0, 0.0, 0.034);
-/// The light itself. Bright and saturated, because it is drawn unlit: a beam that
-/// went through the key light is a beam at 0.26 brightness, which is a black one.
-const LASER_RED: Color = Color::new(0.95, 0.12, 0.12, 1.0);
-/// How far a beam is drawn. Far enough that the projection does the work: the two
-/// ends are what is drawn and perspective draws the line between them.
-const LASER_REACH: f32 = 26.0;
+/// How wide the beam is drawn at the module, in view metres. Thin enough to be a
+/// line rather than a pipe, thick enough that the end of it nearest the eye is not
+/// a sub-pixel nothing.
+const LASER_BEAM_HALF: f32 = 0.0018;
+/// And a floor under that: the far end is never narrower than this share of the
+/// distance it is seen at, which is the same argument as the dot's — 1.8 mm of
+/// light ten metres away is a tenth of a pixel, and there is no bloom here to put
+/// a tenth of a pixel back. A real beam does not widen, but a line that has stopped
+/// existing is not a beam either, and a beam is the thing that was asked for: two
+/// ends, thick at the emitter and a hairline out where the light lands.
+const LASER_BEAM_ANGLE: f32 = 0.0012;
+/// The light itself: a hard, very slightly yellow green, which is what a green
+/// diode looks like on concrete.
+///
+/// Green rather than red because that is where the eye is: it is several times
+/// more sensitive at 550 nm than at 650, so the same beam reads several times
+/// brighter down a dark corridor — which is the whole reason a laser is fitted.
+/// Bright and saturated besides, because it is drawn unlit: a beam that went
+/// through the key light is a beam at a quarter brightness, which is a black one.
+const LASER_GREEN: Color = Color::new(0.22, 1.0, 0.26, 1.0);
+/// The dot's middle, where the light is dense enough to read as white rather than
+/// as green.
+const LASER_HOT: Color = Color::new(0.55, 1.0, 0.42, 1.0);
+/// How big the dot is, as a share of the distance it is seen at — so it is a
+/// constant angle and therefore a constant width in pixels, four or five of them.
+///
+/// Sized this way because of what the renderer will not do for it. A dot drawn at
+/// a real pointer's size is the honest geometry and invisible: two centimetres of
+/// light twenty metres away is a fifth of a pixel, and there is no bloom here to
+/// put it back. The dot is the whole of what a laser tells the shooter, so it is
+/// drawn as the thing that is meant to be seen — the smallest mark that still
+/// reads as light — rather than at the size the light really is.
+const LASER_DOT_ANGLE: f32 = 0.0036;
+/// How far along the line the dot is drawn, as a share of the distance the light
+/// actually reached. It is a mark on the screen and its depth is only what the
+/// painter's sort reads — see `laser_dot` — so it is placed where it sorts behind
+/// the beam that leads to it.
+const LASER_DOT_DEPTH: f32 = 0.4;
+/// How far a beam is drawn when nothing stops it: the longest a light on this rail
+/// reaches. Far enough that the projection does the work: the two ends are what is
+/// drawn and perspective draws the line between them.
+///
+/// Public because it is the contract between the two halves of a beam: the caller
+/// casts along `laser_ray` and clamps whatever it finds to this distance, and this
+/// file draws a beam that reaches this far when nothing was found. A number that
+/// meant 26 m to one side and 30 m to the other would be a dot past the end of its
+/// own beam.
+pub const LASER_REACH: f32 = 26.0;
 
-/// Sight glass, in the sights that have a window rather than a tube: dark, cold
-/// and green enough that a holo's pane does not read as a hole in the housing.
-const GLASS: Color = Color::new(0.10, 0.21, 0.19, 1.0);
+/// Sight glass, in the sights that have a window rather than a tube: a cold green
+/// tint with almost no body to it. It is drawn *over* the world in the 2D pass,
+/// so its alpha is what makes the sight a window instead of a plate: at 1.0 the
+/// player aims through a dark square at the one thing they are trying to see.
+const GLASS: Color = Color::new(0.55, 0.74, 0.68, 0.10);
 const WOOD: Color = Color::new(0.45, 0.28, 0.14, 1.0);
 const WOOD_DARK: Color = Color::new(0.31, 0.19, 0.10, 1.0);
 const OLIVE: Color = Color::new(0.28, 0.30, 0.22, 1.0);
@@ -411,12 +455,12 @@ struct Tri {
     /// Whether `shaded` bakes the key light into the face.
     ///
     /// On for everything that is a *surface*, which is everything a weapon and a
-    /// hand are made of. Off for the two faces in the view that are light rather
-    /// than lit — a laser's beam and a torch's cone — for the same reason the
-    /// world's flames are unlit (`mesh::MeshBuilder::plain`): a light multiplied
-    /// by a key it has nothing to do with is a light that goes out, and a red
-    /// beam at 0.26 brightness is a black one. That is exactly what the first
-    /// version of the beam was.
+    /// hand are made of. Off for the faces in the view that are light rather than
+    /// lit — a laser's beam, the dot it leaves, a torch's cone — for the same
+    /// reason the world's flames are unlit (`mesh::MeshBuilder::plain`): a light
+    /// multiplied by a key it has nothing to do with is a light that goes out, and
+    /// a beam at a quarter brightness is a black one. That is exactly what the
+    /// first version of the beam was.
     lit: bool,
 }
 
@@ -472,10 +516,10 @@ impl Tri {
 }
 
 /// Everything added to `out` since `from` is light rather than a lit surface —
-/// see `Tri::lit`, and `kit_into`'s laser and torch arms, which are the only
-/// callers. Written as a range rather than as a flag on every primitive because
-/// the primitives are shared: a `tube` is a barrel one place and a beam the
-/// next.
+/// see `Tri::lit`, and its callers, `kit_into`'s torch arm and `laser_beam`, which
+/// are the only two places in the view that draw a light. Written as a range
+/// rather than as a flag on every primitive because the primitives are shared: a
+/// `tube` is a barrel one place and a beam the next.
 fn unlit_from(out: &mut [Tri], from: usize) {
     for t in out[from..].iter_mut() {
         t.lit = false;
@@ -2145,56 +2189,134 @@ fn ports(out: &mut Vec<Tri>, at: Vec3, half: f32, wall: f32, y: f32) {
     }
 }
 
-/// A laser's beam, in the *view's* own space: from the module's face to a point on
-/// the view's axis, which is where the crosshair is.
+/// A laser's beam, in the *view's* own space: from the module's face along the
+/// weapon's own bore, and a dot where that line lands.
 ///
-/// A laser is a sight, and a sight points at what the shooter is aiming at. Drawn
-/// from the weapon's own frame — which is what this was — the beam points wherever
-/// the *barrel* happens to be pointing, and at the hip that is off to the side of
-/// the screen: a red line running past the crosshair and off the edge. The two ends
-/// are the geometry: one at the module, one 26 m along the view axis, and the
-/// perspective draw makes the line between them, so the beam converges on the
-/// crosshair from wherever the weapon is being held.
+/// `dir` is the ray `laser_ray` hands the caller — the weapon's `+z` through the
+/// pose, which is the line a fitting bolted to a rail actually shines down. The
+/// beam used to leave the module for a point on the view axis instead, so that it
+/// met the crosshair wherever the wall was: a light that obeyed the crosshair and a
+/// module that obeyed the weapon, and the two of them up to eleven degrees apart
+/// with a wall a metre and a half away. A laser is not a sight that bends; it is a
+/// light on a rail. The dot sits where the line meets the world, and at the hip
+/// that is off the crosshair — which is what a laser on an unzeroed rail does, and
+/// the price of the beam coming out of the lens it is drawn coming out of.
 ///
-/// What that leaves is the *module*: it goes through the pose like the rest of the
-/// weapon, which at the hip tilts it 7° off the line its own light takes, and the
-/// report was the one that comes of looking at it — "但是和发射镭射的配件不平行了".
-/// `fitting_aim` is the other half of this: the module is turned to face down the
-/// beam, so the line leaves the window it is drawn coming out of.
+/// `stop` is how far the light gets, and it is the one thing this function cannot
+/// work out for itself: a surface belongs to the world, and the viewmodel's
+/// geometry knows nothing about the level it is being drawn in. The caller has cast
+/// the ray — `Some(d)` is the first surface `d` metres from the module along `dir`,
+/// `None` is sky — so all that is left here is the point that far along the beam.
+/// Past that point the beam is simply not there: nothing behind a wall is drawn,
+/// which is the whole of what "stops" means.
+///
+/// The dot exists only when the light stopped on something. A beam into the sky has
+/// no landing, and a mark out beyond the last surface would be a dot on nothing.
 ///
 /// It is drawn unlit, and appended to the weapon's own list, which is in two spaces
 /// already — the weapon through its pose and the hands through theirs.
-fn laser_beam(out: &mut Vec<Tri>, from: Vec3) {
+fn laser_beam(out: &mut Vec<Tri>, dots: &mut Vec<Tri>, from: Vec3, dir: Vec3, stop: Option<f32>) {
     let n = out.len();
-    tube(
-        out,
-        from,
-        0.0018,
-        vec3(0.0, 0.0, LASER_REACH),
-        0.0018,
-        LASER_RED,
-    );
+    let m = dots.len();
+    // Clamped as well as drawn: the caller promises the number is already inside
+    // the reach, and a light that drew past its own zero distance would be a beam
+    // longer than the one the caller cast for. `min` costs nothing and makes the
+    // promise one this function keeps on its own.
+    let reach = stop.unwrap_or(LASER_REACH).min(LASER_REACH);
+    let end = from + dir * reach;
+    // A wall a player is standing against is a `stop` of nearly nothing, and a
+    // reach of zero is a tube with both ends in the same place — no beam to draw.
+    // The dot is still drawn: it is on the wall, an arm's length in front of the
+    // module, and it is the part of this that answers to the world rather than to
+    // the gun.
+    if reach > 0.0 {
+        // Thick at the module and never thinner than a hairline on the screen: the
+        // taper is what keeps a beam that reaches twenty-six metres a line rather
+        // than a stub with a dot floating past the end of it. Measured against the
+        // far end's own depth rather than against the reach, so the beam is the
+        // same angle across the screen however far off the view axis it points.
+        let far = (end.z * LASER_BEAM_ANGLE).max(LASER_BEAM_HALF);
+        tube(out, from, LASER_BEAM_HALF, end, far, LASER_GREEN);
+    }
+    if stop.is_some() {
+        laser_dot(dots, end);
+    }
     unlit_from(out, n);
+    unlit_from(dots, m);
 }
 
-/// The rotation that turns a rail fitting — the laser's module, the torch's cone —
-/// to face the way its own light goes, given the pose it is being drawn through.
+/// The dot a beam leaves where it lands: a small face turned square to the eye,
+/// green at its edge and bright at its middle, so it reads as a patch of light on a
+/// surface rather than as a square stuck to one.
 ///
-/// Zeroing, in other words, and it is real: a laser is *adjusted* until its beam
-/// meets the sight line, which is why the fittings on a real rail have screws in
-/// them. It is only visible at the hip, where the weapon is canted for the eye's
-/// sake — 7.3° for the rifle, 5.9° for the submachine gun, 5.3° for the pistol, and
+/// Square to the *eye* rather than to the surface, because the surface's own angle
+/// is not known here — the caller's ray answered with a distance and nothing else —
+/// and a mark that faces the player is what a dot of light looks like from the one
+/// place anyone ever sees it.
+fn laser_dot(out: &mut Vec<Tri>, at: Vec3) {
+    // A little nearer than the point the beam reaches, because the beam has no one
+    // depth to be sorted by: it is a single face from the module to its landing, so
+    // its middle is nearer the eye than its end and the painter's order would let
+    // the beam paint over the dot it lands with. The mark does not move for it — a
+    // face `z` away that is `z` times this angle across projects to the same dot
+    // wherever along the line it sits — so its size is measured at the landing and
+    // carried along with the dot, which keeps the mark the same width on the screen
+    // whether the wall is an arm's length away or at the end of the beam.
+    let r = at.z * LASER_DOT_ANGLE * LASER_DOT_DEPTH;
+    let at = at * LASER_DOT_DEPTH;
+    // The halo is translucent, so what is behind it still shows through it: light
+    // does not paint over a wall, it sits on it.
+    let halo = Color::new(LASER_GREEN.r, LASER_GREEN.g, LASER_GREEN.b, 0.55);
+    quad(
+        out,
+        at + vec3(-r, -r, 0.0),
+        at + vec3(r, -r, 0.0),
+        at + vec3(r, r, 0.0),
+        at + vec3(-r, r, 0.0),
+        halo,
+    );
+    // The core goes after the halo, which is what puts the light on top of its own
+    // glow. Both are coplanar, so the sort cannot tell them apart by depth — it is
+    // a stable one, and this is the order it is handed.
+    let c = r * 0.5;
+    quad(
+        out,
+        at + vec3(-c, -c, 0.0),
+        at + vec3(c, -c, 0.0),
+        at + vec3(c, c, 0.0),
+        at + vec3(-c, c, 0.0),
+        LASER_HOT,
+    );
+}
+
+/// The rotation that turns the torch's cone to face the way its light goes, given
+/// the pose it is being drawn through.
+///
+/// The torch is the fitting this exists for, and the laser is deliberately not one:
+/// a laser is bolted to the rail and shines down the weapon's own bore
+/// (`laser_ray`), so its module is drawn through the pose and stays flush. The
+/// torch's light is not a line but the middle of the screen — `hud::draw_torch`
+/// draws the pool there and `dazzled_by_torch` measures the dazzle from it — so a
+/// cone welded to the barrel would point away from its own pool by the weapon's
+/// cant: 7.3° for the rifle, 5.9° for the submachine gun, 5.3° for the pistol, and
 /// under half a degree once the sights are up, which is a number
 /// (`a_rail_fitting_faces_its_own_light`) rather than an impression.
 ///
 /// The pivot is the *mouth*, the point the light leaves from, so the two things
-/// this exists to keep together stay together: the module's window is where the
-/// beam starts, and the module is what the beam is parallel to. The cost is that
-/// the back of the module lifts off the rail by about 8 mm at the hip, which is
-/// what an adjusted fitting does and is not visible at an arm's length.
+/// this exists to keep together stay together: the cone leaves where the light
+/// starts, and the cone is what the light is parallel to. The cost is that the back
+/// of the module lifts off the rail by about 8 mm at the hip, which is what an
+/// adjusted fitting does and is not visible at an arm's length.
 ///
 /// A rigid matrix carries the metre step `+z` without shrinking it, so neither
 /// vector here is ever zero.
+///
+/// The light it turns to is the zero at `LASER_REACH`, and deliberately not the
+/// pool's edge on the wall: a fitting is adjusted to a distance and stays there, so
+/// aiming it at whatever the light happens to be standing on would swing the module
+/// every time the shooter took a step towards a wall. The few degrees between the
+/// zero and a nearby pool land inside the cone's own width, so the light still
+/// leaves the lens it is drawn coming out of.
 fn fitting_aim(mat: &Mat4, kind: WeaponKind) -> Mat4 {
     let mouth = def(kind).rail() + LASER_BORE;
     let at = mat.transform_point3(mouth);
@@ -2718,13 +2840,33 @@ fn kit_into(
     let mut aimed = None;
     for entry in &build.entries {
         match entry.part.0 {
+            // A tube with a hole through it, not a box with a dark front: the eye
+            // is behind this, and a solid body would put an opaque wall where the
+            // sight is meant to be looked through. Four walls and a lens, with the
+            // rear left open, is what a dot sight is.
             "micro_dot" => {
-                kit_box(out, d.optic, vec3(0.015, 0.016, 0.028), RAIL);
+                let (hx, hy, hz, t) = (0.015, 0.016, 0.028, 0.002);
+                // The walls go *inside* the old box's outline, so the sight is no
+                // bigger on the gun than it was — the hole is what is new.
+                kit_box(out, d.optic + vec3(0.0, hy - t, 0.0), vec3(hx, t, hz), RAIL);
+                kit_box(out, d.optic - vec3(0.0, hy - t, 0.0), vec3(hx, t, hz), RAIL);
                 kit_box(
                     out,
-                    d.optic + vec3(0.0, 0.0, 0.028),
-                    vec3(0.011, 0.011, 0.002),
-                    BLACK,
+                    d.optic + vec3(-(hx - t), 0.0, 0.0),
+                    vec3(t, hy - t, hz),
+                    RAIL,
+                );
+                kit_box(
+                    out,
+                    d.optic + vec3(hx - t, 0.0, 0.0),
+                    vec3(t, hy - t, hz),
+                    RAIL,
+                );
+                kit_box(
+                    out,
+                    d.optic + vec3(0.0, 0.0, hz),
+                    vec3(hx - t, hy - t, 0.001),
+                    GLASS,
                 );
             }
             "marksman_scope" => {
@@ -2740,19 +2882,28 @@ fn kit_into(
             // what makes it the fast one of the five — its dot is for finding a
             // target in, not for measuring one with.
             "holo_sight" => {
-                kit_box(out, d.optic, vec3(0.014, 0.010, 0.020), RAIL);
+                // The mount, then a *frame* around the pane. The old housing was
+                // one solid box with the glass stuck on its front, so the window
+                // was a dark plate with a slightly less dark centre: it is the
+                // one part of a sight the player looks through, and it has to be
+                // a hole. Four bars and a tinted pane are the hole.
                 kit_box(
                     out,
-                    d.optic + vec3(0.0, 0.016, 0.017),
-                    vec3(0.013, 0.012, 0.003),
-                    STEEL_DARK,
+                    d.optic + vec3(0.0, -0.005, 0.004),
+                    vec3(0.017, 0.005, 0.022),
+                    RAIL,
                 );
-                kit_box(
-                    out,
-                    d.optic + vec3(0.0, 0.016, 0.019),
-                    vec3(0.010, 0.009, 0.001),
-                    GLASS,
-                );
+                // The pane's centre sits on the eye line once the sights are up
+                // (the optic anchor is a centimetre below it), so the crosshair
+                // lands in the middle of the window rather than on its bottom
+                // edge.
+                let w = d.optic + vec3(0.0, 0.012, 0.018);
+                let (hx, hy, t) = (0.017, 0.0125, 0.0025);
+                kit_box(out, w + vec3(-hx, 0.0, 0.0), vec3(t, hy, 0.002), STEEL_DARK);
+                kit_box(out, w + vec3(hx, 0.0, 0.0), vec3(t, hy, 0.002), STEEL_DARK);
+                kit_box(out, w + vec3(0.0, hy, 0.0), vec3(hx, t, 0.002), STEEL_DARK);
+                kit_box(out, w + vec3(0.0, -hy, 0.0), vec3(hx, t, 0.002), STEEL_DARK);
+                kit_box(out, w, vec3(hx - t, hy - t, 0.0005), GLASS);
             }
             // A prism: four power in a block the length of a pack of cards, with
             // an eyepiece behind it and an objective in front, which is what a
@@ -2800,25 +2951,31 @@ fn kit_into(
             // The rail fittings, both of them a small module with a window in the
             // front. The *module* is the fitting and it is drawn here, with the
             // weapon, because that is what was bolted on; what the laser and the
-            // torch *do* is light, and light is aimed — the beam at the crosshair
-            // (`laser_beam`) and the torch's pool at the middle of the view
-            // (`hud::draw_torch`).
+            // torch *do* is light, and each follows its own rule — the beam down the
+            // weapon's own bore through this window (`laser_ray`), and the torch's
+            // pool at the middle of the view (`hud::draw_torch`).
             "laser" => {
                 let at = d.rail();
-                let module = out.len();
                 kit_box(out, at, vec3(0.016, 0.014, 0.030), RAIL);
                 kit_box(
                     out,
                     at + vec3(0.0, 0.0, 0.031),
                     vec3(0.009, 0.009, 0.002),
-                    Color::new(0.85, 0.10, 0.10, 1.0),
+                    // The lens is the colour of what comes out of it: a window in
+                    // the front of the box that emitted a different light from its
+                    // own would be the beam's version of a module pointing the
+                    // wrong way.
+                    LASER_GREEN,
                 );
-                // The module and nothing else: its beam is drawn by `assemble`,
-                // which is also what turns the module to face down its own beam
-                // (see `fitting_aim`) — the window in the front of this box is
-                // where the light has to come out, and a beam that left it at an
-                // angle is what "和发射镭射的配件不平行了" was about.
-                aimed = Some(module..out.len());
+                // The module and nothing else, and it is *not* turned: a laser
+                // fitting sits flush on the rail, and the beam that leaves its
+                // window runs down the weapon's own axis (`laser_ray`). A module
+                // turned to meet the crosshair was the other half of "和发射镭射的
+                // 配件不平行了" — the light and the box it came out of pointing
+                // different ways. At the hip the dot lands off the crosshair
+                // instead, which is what a laser on an unzeroed rail does and the
+                // price of the beam coming out of the lens it is drawn coming out
+                // of.
             }
             "flashlight" => {
                 let at = d.rail();
@@ -2835,7 +2992,9 @@ fn kit_into(
                 // It is aimed with the module, because where a torch is pointed is
                 // the middle of the view — the pool and the dazzle are both screen
                 // effects of the crosshair (`hud::draw_torch`, `dazzled_by_torch`)
-                // and a cone welded to the barrel would disagree with both.
+                // and a cone welded to the barrel would disagree with both. The
+                // turn is `fitting_aim`, and it is the torch's alone: the laser's
+                // light is its own bore.
                 let cone = out.len();
                 tube(
                     out,
@@ -3102,6 +3261,14 @@ pub struct ViewModel {
     /// frame anyway; collecting them into a fresh vector each time was a handful
     /// of allocations a frame for geometry that never changes size.
     body: Vec<Tri>,
+    /// The laser's dot, drawn after the weapon rather than with it.
+    ///
+    /// The beam is drawn with the body, where the gun can stand in front of it as
+    /// it should. The dot cannot be: an underbarrel emitter's line is behind the
+    /// gun from the shooter's eye, so at ADS the one mark the laser is aimed with
+    /// would go out with the beam. The mark is light on a surface, not geometry
+    /// behind the weapon, and it stays visible.
+    laser: Vec<Tri>,
     flash: Vec<Tri>,
     /// Scratch for the attachments of whatever is in hand, rebuilt per frame
     /// like the body and for the same reason.
@@ -3133,6 +3300,7 @@ impl ViewModel {
                 out
             },
             body: Vec::new(),
+            laser: Vec::new(),
             flash: Vec::new(),
             kit: Vec::new(),
             held: Vec::new(),
@@ -3242,13 +3410,53 @@ impl ViewModel {
         self.melee_t = MELEE_TIME;
     }
 
+    /// The laser's ray, in view space: where the light leaves its module and the
+    /// direction it travels in. `None` when the weapon has no laser.
+    ///
+    /// The direction is the weapon's own `+z` through the pose and nothing else, so
+    /// the beam is parallel to the barrel by construction. That is the whole of the
+    /// fix: a fitting bolted to a rail shines down the weapon, and the dot lands
+    /// wherever that line meets the world. It is deliberately not the line from the
+    /// module to the crosshair — bending the beam to meet the sight is what left it
+    /// up to eleven degrees off its own module when a wall stood a metre and a half
+    /// away, and turning the module to follow the beam was the other half of the
+    /// same complaint. At the hip the dot therefore sits off the crosshair, which is
+    /// what a laser on an unzeroed rail does.
+    ///
+    /// `main.rs` maps the point into the world with the camera's own basis and casts
+    /// the direction there; the distance it comes back with is `laser_stop`, and
+    /// `assemble` draws the same ray back in the view. One ray, so the mark on the
+    /// wall is where the light the player sees would really land.
+    ///
+    /// The mouth is the module's front face (`LASER_BORE`), the point the window
+    /// `kit_into` draws emits from. Both it and the metre step that gives the
+    /// direction go through the pose, so the beam moves with the weapon and leaves
+    /// the box it is drawn coming out of.
+    pub fn laser_ray(&self, player: &Player, weapon: &Weapon) -> Option<(Vec3, Vec3)> {
+        if !weapon.laser() {
+            return None;
+        }
+        let mat = self.pose(player, weapon).matrix();
+        let mouth = def(weapon.kind).rail() + LASER_BORE;
+        let from = mat.transform_point3(mouth);
+        let dir = (mat.transform_point3(mouth + Vec3::Z) - from).normalize_or_zero();
+        Some((from, dir))
+    }
+
     /// Call in the 2D pass, after `set_default_camera()`. `paints` is the
     /// armory's finish per weapon kind.
+    ///
+    /// `laser_stop` is where the laser's light meets the world: `Some(d)` the first
+    /// surface `d` metres from the module along its beam, `None` open sky. The ray is
+    /// the caller's to cast — the level is not this file's to know — and it is
+    /// already clamped to `LASER_REACH`, so the beam never has to ask for more than
+    /// it draws.
     pub fn draw(
         &mut self,
         player: &Player,
         arsenal: &Arsenal,
         paints: &[Paint; crate::weapon::KIND_COUNT],
+        laser_stop: Option<f32>,
     ) {
         let viewport = vec2(screen_width(), screen_height());
         let fovy = player.fovy();
@@ -3260,7 +3468,7 @@ impl ViewModel {
 
         let weapon = arsenal.active_weapon();
         let paint = paints[weapon.kind.index()];
-        let mat = self.assemble(player, weapon, paint);
+        self.assemble(player, weapon, paint, laser_stop);
         // Painter's algorithm: farthest faces first, nearer ones cover them. Each
         // face is cut at the near plane on the way out — see `screen_face`.
         for t in self.body.iter() {
@@ -3273,20 +3481,16 @@ impl ViewModel {
             }
         }
 
-        // The flash is light rather than geometry, so it goes over the top —
-        // except for blades, which flash nothing at all.
-        if weapon.flash > 0.0 && !weapon.stats().melee {
-            let flash = &mut self.flash;
-            flash.clear();
-            flash_shape(flash, def(weapon.kind).muzzle, weapon.flash, weapon.shots);
-            for t in flash.iter().map(|t| t.map(mat)).filter(Tri::finite) {
-                let Some((p, n)) = screen_face(&t, viewport, f) else {
-                    continue;
-                };
-                draw_triangle(p[0], p[1], p[2], t.color);
-                if n == 4 {
-                    draw_triangle(p[0], p[2], p[3], t.color);
-                }
+        // Then the dot, over the weapon: the mark is what the laser is for, and at
+        // ADS an underbarrel emitter is behind the handguard. It is only the two
+        // quads of the mark (halo, then core), pushed in that order, so no sort.
+        for t in self.laser.iter() {
+            let Some((p, n)) = screen_face(t, viewport, f) else {
+                continue;
+            };
+            draw_triangle(p[0], p[1], p[2], t.shaded());
+            if n == 4 {
+                draw_triangle(p[0], p[2], p[3], t.shaded());
             }
         }
     }
@@ -3301,8 +3505,15 @@ impl ViewModel {
     /// its own triangles would be measuring a pose that is nearly the drawn one.
     ///
     /// Returns the weapon's own matrix, which the flash needs and which casting
-    /// from the body would be guesswork about.
-    fn assemble(&mut self, player: &Player, weapon: &Weapon, paint: Paint) -> Mat4 {
+    /// from the body would be guesswork about. `laser_stop` is the world's answer
+    /// about how far the laser's light gets, passed straight to `laser_beam`.
+    fn assemble(
+        &mut self,
+        player: &Player,
+        weapon: &Weapon,
+        paint: Paint,
+        laser_stop: Option<f32>,
+    ) -> Mat4 {
         // A magnified sight with the eye on it draws no rifle at all, and no hands
         // either: the eye is against the eyepiece, so what the rifle looks like
         // from behind its own stock is not something anyone has ever seen — and
@@ -3310,6 +3521,7 @@ impl ViewModel {
         // (`hud::scope_aperture`), a receiver left in the frame would be sitting in
         // the middle of the view the sight exists to provide. The hands go with
         // it: they are holding a rifle that is not there.
+        self.laser.clear();
         let scoped = weapon.scoped() && player.ads >= SCOPE_HIDE_ADS;
         let mat = self.weapon_into(player, weapon, paint, scoped);
         let kind = weapon.kind;
@@ -3353,10 +3565,36 @@ impl ViewModel {
         }
         // The laser, if there is one, and only while the weapon is being drawn at
         // all: a beam from a rifle that is stowed or behind an eyepiece is light
-        // from nowhere.
-        if weapon.laser() && !scoped && self.hold_t <= 0.0 {
-            let from = mat.transform_point3(def(kind).rail() + LASER_BORE);
-            laser_beam(&mut self.body, from);
+        // from nowhere. The beam goes into the body and is occluded like anything
+        // else; the dot goes into its own list and is drawn over the weapon, because
+        // at ADS the gun is what stands between the eye and an underbarrel emitter
+        // — see `ViewModel::laser`.
+        //
+        // The ray is `laser_ray`'s, which is the ray the caller cast into the world:
+        // it starts at the module's window and runs down the weapon's own axis, and
+        // `laser_stop` is measured from that start, so the beam and the dot on the
+        // end of it land exactly where the caller's ray did.
+        if !scoped && self.hold_t <= 0.0 {
+            if let Some((from, dir)) = self.laser_ray(player, weapon) {
+                laser_beam(&mut self.body, &mut self.laser, from, dir, laser_stop);
+            }
+        }
+        // The muzzle flash is built here, in the same list as the weapon, and
+        // sorted with it. It used to be a pass of its own after everything else,
+        // which is what a flame painted over the receiver and the sight looked
+        // like: light is not geometry, but the flash lives at the muzzle, and the
+        // optic is between the eye and it. Drawn in depth order the gun covers the
+        // part of the flash that is behind it, and the sight stays readable while
+        // the player is firing.
+        if weapon.flash > 0.0 && !weapon.stats().melee && !scoped {
+            let flash = &mut self.flash;
+            flash.clear();
+            let scale = 1.0 - 0.30 * player.ads.clamp(0.0, 1.0);
+            flash_shape(flash, def(kind).muzzle, weapon.flash, weapon.shots, scale);
+            let n = self.body.len();
+            self.body
+                .extend(flash.iter().map(|t| t.map(mat)).filter(Tri::finite));
+            unlit_from(&mut self.body, n);
         }
         // Painter's algorithm: farthest faces first, nearer ones cover them.
         self.body.sort_by(|x, y| y.depth().total_cmp(&x.depth()));
@@ -3398,10 +3636,13 @@ impl ViewModel {
         } else {
             &self.parts[kind.index()]
         };
-        // A rail fitting is drawn through its own matrix — the pose, then the turn
-        // that lines it up with the light it emits (`fitting_aim`) — because a
-        // module pointing one way and shining the other is what the last report was
-        // about. One matrix per triangle, and everything else shares the pose's.
+        // The torch is drawn through its own matrix — the pose, then the turn that
+        // lines the cone up with the pool it lights (`fitting_aim`) — because a
+        // module pointing one way and lighting another is what the laser report was
+        // about, and the torch kept the turn when the laser lost it. The laser's
+        // module is flush on the rail and its beam follows the weapon (`laser_ray`),
+        // so it needs no matrix of its own. One matrix per triangle, and everything
+        // else shares the pose's.
         let aimed_mat = aimed.as_ref().map(|_| fitting_aim(&mat, kind) * mat);
         let matrix_of = |i: usize| match (&aimed, aimed_mat) {
             (Some(range), Some(m)) if range.contains(&i) => m,
@@ -3806,48 +4047,49 @@ fn inspect_at(t: f32, path: &[InspectKey], scale: f32) -> (Vec3, Vec3) {
 
 /// Muzzle flash: a warm glow, a star of spikes and a short forward cone, all
 /// scaled by how bright `weapon.flash` currently is.
-fn flash_shape(out: &mut Vec<Tri>, at: Vec3, amount: f32, shots: u32) {
+///
+/// A *ring* of petals, not a disc: the first version was a fan whose centre was
+/// the muzzle point itself, so with the sights up the brightest part of the
+/// flash sat exactly on the crosshair and painted the target out. Fire comes out
+/// of the barrel in a crown around it — the barrel tip is the hole — and the
+/// centre of the sight stays a sentence the player can read while firing.
+fn flash_shape(out: &mut Vec<Tri>, at: Vec3, amount: f32, shots: u32, scale: f32) {
     let amount = amount.clamp(0.0, 1.0);
-    // Golden angle: the star lands somewhere new on every shot.
+    // Golden angle: the crown lands somewhere new on every shot.
     let seed = shots as f32 * 2.399_963_2;
-    let radius = 0.050 + 0.055 * amount;
-    let warm = Color::new(1.0, 0.58, 0.20, 0.20 + 0.28 * amount);
-    let hot = Color::new(1.0, 0.93, 0.70, 0.85);
-    let core = at + vec3(0.0, 0.0, 0.012);
+    // Smaller than the first version (which was 10.5 cm at full brightness:
+    // a plate of fire the width of the handguard). A flash has to read as fire
+    // at the muzzle, not as a screen effect over the gun.
+    // `scale` shrinks it when the sights are up: the muzzle sits only a few
+    // pixels below the crosshair once the eye is behind the optic, and a
+    // flash its full size there reaches back over the aiming point.
+    let radius = (0.032 + 0.036 * amount) * scale.clamp(0.0, 1.0);
+    let warm = Color::new(1.0, 0.58, 0.20, 0.16 + 0.24 * amount);
+    let hot = Color::new(1.0, 0.93, 0.70, 0.55 + 0.28 * amount);
+    // A few millimetres ahead of the muzzle face, so the barrel's own tip is the
+    // nearest thing at the centre of the crown and covers the hole.
+    let at = at + vec3(0.0, 0.0, 0.006);
+    let inner = radius * 0.42;
 
-    let spoke = |i: usize, n: usize, r: f32| {
+    let petal = |i: usize, n: usize, r: f32| {
         let a = seed + TAU * i as f32 / n as f32;
         at + vec3(a.cos(), a.sin(), 0.0) * r
     };
-
-    for i in 0..8 {
-        let j = (i + 1) % 8;
-        out.push(Tri::new(
-            core,
-            spoke(i, 8, radius * 1.5),
-            spoke(j, 8, radius * 1.5),
-            warm,
-        ));
-    }
-    for i in 0..7 {
-        let j = (i + 1) % 7;
-        out.push(Tri::new(
-            core,
-            spoke(i, 7, radius),
-            spoke(j, 7, radius),
-            hot,
-        ));
-    }
-    let tip = at + vec3(0.0, 0.0, radius * 1.5);
-    for i in 0..4 {
-        let j = (i + 1) % 4;
-        out.push(Tri::new(
-            spoke(i, 4, radius * 0.35),
-            spoke(j, 4, radius * 0.35),
-            tip,
-            hot,
-        ));
-    }
+    let ring = |out: &mut Vec<Tri>, n: usize, r_in: f32, r_out: f32, colour: Color| {
+        for i in 0..n {
+            let j = (i + 1) % n;
+            quad(
+                out,
+                petal(i, n, r_in),
+                petal(i, n, r_out),
+                petal(j, n, r_out),
+                petal(j, n, r_in),
+                colour,
+            );
+        }
+    };
+    ring(out, 8, inner, radius * 1.5, warm);
+    ring(out, 7, inner, radius, hot);
 }
 
 /// One face as screen points, **cut** at the near plane rather than dropped by
@@ -4386,9 +4628,10 @@ mod tests {
         let viewport = vec2(w as f32, h as f32);
         let player = Player::new(Vec3::ZERO);
         let f = (h as f32 * 0.5) / (player.fovy() * 0.5).tan();
-        // , so the laser can be photographed on its
-        // own: its beam is the one thing in the view whose *direction* is the
-        // subject, and the crosshair is drawn in the picture to check it against.
+        // The laser is in the sheet on its own, because its beam is the one thing
+        // in the view whose *direction* is the subject, and the crosshair is drawn
+        // in the picture so that the beam can be seen lying beside the sight line
+        // rather than on it: it follows the barrel, not the sight.
         let cases: [(&str, Option<&str>, Option<&str>); 7] = [
             ("none", None, None),
             ("micro_dot", Some("micro_dot"), None),
@@ -4424,7 +4667,7 @@ mod tests {
             };
             let weapon = Weapon::with_build(WeaponKind::Rifle, build.clone());
             let mut vm = ViewModel::new();
-            vm.assemble(&player, &weapon, Paint::factory());
+            vm.assemble(&player, &weapon, Paint::factory(), None);
             let mut buf = vec![18u8; w * h * 3];
             // The crosshair, so the sight line is in the picture: four pixels of
             // light grey either side of the middle.
@@ -4496,7 +4739,7 @@ mod tests {
                     buf[o..o + 3].copy_from_slice(&[120, 122, 118]);
                 }
             }
-            vm.assemble(&player, arsenal.active_weapon(), Paint::factory());
+            vm.assemble(&player, arsenal.active_weapon(), Paint::factory(), None);
             for t in &vm.body {
                 let Some((p, n)) = screen_face(t, viewport, f) else {
                     continue;
@@ -4813,26 +5056,29 @@ mod tests {
         assert!(tip(&idle).distance(rest) < 1e-4);
     }
 
-    /// A laser is a sight, so its beam converges on the crosshair.
+    /// A laser is bolted to a rail, so its beam leaves along the weapon's own bore
+    /// and stays there.
     ///
-    /// It used to be built in the weapon's own frame, which means it pointed
-    /// wherever the *barrel* happened to point: at the hip that is off to the side
-    /// of the screen, so the line ran past the crosshair and off the edge — "镭射的
-    /// 光线应该指向准心". The far end of the beam is on the view's own axis now and
-    /// this holds it there at both ends of the aim, where the weapon's pose is as
-    /// different as it gets.
+    /// The report this answers is the mirror image of the one before it. The beam
+    /// used to converge on the crosshair — wherever the wall was, at whatever angle
+    /// the weapon was canted — so with a wall a metre and a half away it could leave
+    /// its own module up to eleven degrees off the barrel, and the module had to be
+    /// turned separately to hide the join. A laser on a rail cannot do that: the
+    /// light is the fitting's own bore line, and the dot is wherever that line meets
+    /// the world. What that costs is the dot off the crosshair, which is what the
+    /// sight of a canted weapon does and is the number measured here.
+    ///
+    /// Three claims, at the hip and with the sights up: the ray starts at the
+    /// module's window; its direction is the pose's own `+z`, so the beam is exactly
+    /// parallel to the barrel; and the drawn beam follows that ray rather than the
+    /// view axis, which is where the old one bent to. `None`, so this is the
+    /// open-sky beam; the beam that stops on a wall is
+    /// `the_laser_beam_stops_on_the_first_surface`.
     #[test]
-    fn the_laser_beam_converges_on_the_crosshair() {
+    fn the_laser_beam_runs_parallel_to_the_barrel() {
         let viewport = vec2(1280.0, 720.0);
         let f = (viewport.y * 0.5) / (62f32.to_radians() * 0.5).tan();
-        let build = WeaponBuild {
-            entries: vec![BuildEntry {
-                slot: SlotId("underbarrel"),
-                part: PartId("laser"),
-                roll: 0.5,
-            }],
-            load: crate::weapon::AmmoKind::Fmj,
-        };
+        let build = build_with("laser");
         for ads in [0.0f32, 1.0] {
             let mut player = Player::new(Vec3::ZERO);
             player.ads = ads;
@@ -4840,142 +5086,327 @@ mod tests {
             assert!(weapon.laser(), "the fitting is not being seen");
             let vm = ViewModel::new();
             let mat = vm.pose(&player, &weapon).matrix();
-            let from = mat.transform_point3(def(WeaponKind::Rifle).rail() + LASER_BORE);
-
-            let mut beam = Vec::new();
-            laser_beam(&mut beam, from);
-            assert!(!beam.is_empty(), "the beam drew nothing at all");
-            let points: Vec<Vec3> = beam.iter().flat_map(|t| [t.a, t.b, t.c]).collect();
+            let mouth = def(WeaponKind::Rifle).rail() + LASER_BORE;
+            let (from, dir) = vm
+                .laser_ray(&player, &weapon)
+                .expect("a weapon with a laser has no ray");
             // Its near end is the module's face, which is where the light leaves.
             assert!(
-                points.iter().any(|p| p.distance(from) < 0.01),
-                "the beam does not start at the module at {from:?}",
+                from.distance(mat.transform_point3(mouth)) < 1e-5,
+                "the ray does not start at the module's window",
             );
-            // And its far end is on the view's own axis — the crosshair — whatever
-            // the weapon is doing. The *geometry* is asked, not the formula: a beam
-            // built in the weapon's frame lands wherever the rail points, which at
-            // the hip is 20 cm off the axis and a screen-width to the side.
-            let far = points
+            // And it is parallel to the barrel, which is the whole of the fix: the
+            // pose's own `+z` is the line the bore lies on.
+            let axis = (mat.transform_point3(mouth + Vec3::Z) - from).normalize_or_zero();
+            assert!(
+                dir.dot(axis) > 1.0 - 1e-5,
+                "the beam leaves {:.2}° off the barrel",
+                dir.dot(axis).clamp(-1.0, 1.0).acos().to_degrees(),
+            );
+
+            let mut beam = Vec::new();
+            laser_beam(&mut beam, &mut Vec::new(), from, dir, None);
+            assert!(!beam.is_empty(), "the beam drew nothing at all");
+            // Nothing in it has turned towards the view axis: the far end lies on
+            // the ray through the module, not on the line the crosshair sits on.
+            let far: Vec<Vec3> = beam
                 .iter()
-                .copied()
-                .filter(|p| p.z > LASER_REACH - 0.01)
-                .collect::<Vec<_>>();
+                .flat_map(|t| [t.a, t.b, t.c])
+                .filter(|p| (*p - from).dot(dir) > LASER_REACH - 0.05)
+                .collect();
             assert!(
                 !far.is_empty(),
                 "the beam does not reach {LASER_REACH:.0} m"
             );
-            for p in far {
-                let on_screen =
-                    project_point(p, viewport, f).expect("the far end is behind the eye");
+            for p in &far {
+                // The distance from the ray. The tube's own far radius is a shade
+                // over three centimetres at this reach, so anything inside that is
+                // the taper and not a bend.
+                let off = (*p - from).cross(dir).length();
                 assert!(
-                    (on_screen - viewport * 0.5).length() < 1.0,
-                    "at ads {ads} the beam ends {:.0} px from the crosshair",
-                    (on_screen - viewport * 0.5).length(),
+                    off < 0.04,
+                    "a vertex of the far end is {off:.3} m off the ray it was cast along",
+                );
+            }
+            if ads == 0.0 {
+                // At the hip the weapon is canted for the eye's sake and the beam
+                // goes with it: this is the 7.3° the module used to be turned
+                // through to hide the difference, now out in the open as the dot
+                // off the crosshair.
+                let cant = dir.dot(Vec3::Z).clamp(-1.0, 1.0).acos().to_degrees();
+                assert!(
+                    cant > 4.0,
+                    "the beam is only {cant:.2}° off the view axis at the hip, so there \
+                     is nothing here that could have bent",
+                );
+                // And the dot pays for it. A wall a metre and a half along the beam
+                // gets a mark well off the crosshair, because the light is parallel
+                // to a canted barrel rather than bent to the sight. That is the
+                // price of the parallelism, and a test that fails here is a beam
+                // bent back to the crosshair rather than one cast down the bore.
+                let landing = from + dir * 1.5;
+                let on_screen = project_point(landing, viewport, f)
+                    .expect("the near landing is behind the eye");
+                let away = (on_screen - viewport * 0.5).length();
+                assert!(
+                    away > 40.0,
+                    "the hip-fired beam ends {away:.0} px from the crosshair: it has been \
+                     bent back to the sight",
+                );
+            } else {
+                // With the sights up the barrel *is* the view axis, and the module
+                // is back on the under rail — so the dot sits below the crosshair
+                // by the rail's height. That is the price of the beam coming out
+                // parallel to the bore instead of bending up to the sight; a dot on
+                // the crosshair here would mean the beam had been bent again.
+                assert!(
+                    (dir - Vec3::Z).length() < 1e-4,
+                    "the aimed beam is not parallel to the view axis: {dir:?}",
+                );
+                let landing = from + dir * 1.5;
+                let on_screen = project_point(landing, viewport, f)
+                    .expect("the near landing is behind the eye");
+                assert!(
+                    on_screen.y > viewport.y * 0.5 + 30.0,
+                    "a wall at 1.5 m puts the aimed beam's dot at {on_screen:?}: the \
+                     beam has been bent up to the sight",
                 );
             }
         }
     }
 
-    /// A rail fitting faces the way its own light goes.
+    /// The beam stops where the world does, and leaves a dot there.
     ///
-    /// The other half of the laser work, and the half that needed the beam to be
-    /// right first: with the light converging on the crosshair, the module it came
-    /// out of was still going through the weapon's pose, so at the hip the beam and
-    /// the box it left were 7° apart and the light came out of the window sideways
-    /// — "镭射的光线确实指向准心了，但是和发射镭射的配件不平行了".
+    /// Until this, the beam was a fixed twenty-six metres: it went through walls and
+    /// ended on the crosshair whether or not anything was behind it, which is light
+    /// a player can see and a wall cannot. The caller casts now — `Some(d)` the first
+    /// surface `d` metres from the module along the beam, `None` open sky — and what
+    /// this holds is the drawing half of that contract: nothing past the number, a
+    /// dot at the number, no dot when there was nothing to land on, and a beam that
+    /// neither runs backwards through the weapon when the wall is close nor draws
+    /// past the reach it promised.
+    #[test]
+    fn the_laser_beam_stops_on_the_first_surface() {
+        // Roughly where a rifle's module sits at the hip, pointing where that
+        // weapon's barrel points: off the view axis to the right and below it, and a
+        // few degrees to the left, which is the case that tells a beam along its own
+        // bore from one bent back to the crosshair.
+        let from = vec3(0.124, -0.274, 0.70);
+        let dir = vec3(-0.1196, -0.045, 0.9918).normalize();
+        let beam = |stop: Option<f32>| {
+            let mut out = Vec::new();
+            let mut dots = Vec::new();
+            laser_beam(&mut out, &mut dots, from, dir, stop);
+            // The test measures the light as one list; the app splits them only so
+            // the dot can be drawn over the weapon.
+            out.extend(dots);
+            out
+        };
+        let points =
+            |tris: &[Tri]| -> Vec<Vec3> { tris.iter().flat_map(|t| [t.a, t.b, t.c]).collect() };
+        // The dot is the only light in a beam that is bright at the middle: the beam
+        // itself is one flat green, so the hot core is the mark. Found by its colour
+        // and then measured by *where on the screen* it is — the dot is drawn a
+        // share of the way back along its own ray so the painter's sort puts it
+        // behind the beam, so its depth is not the landing's while its projection
+        // is.
+        let hot = |tris: &[Tri]| -> Option<Vec3> {
+            let (mut sum, mut n) = (Vec3::ZERO, 0);
+            for t in tris.iter().filter(|t| t.color == LASER_HOT) {
+                for p in [t.a, t.b, t.c] {
+                    sum += p;
+                    n += 1;
+                }
+            }
+            (n > 0).then(|| sum / n as f32)
+        };
+        let viewport = vec2(1280.0, 720.0);
+        let f = (viewport.y * 0.5) / (62f32.to_radians() * 0.5).tan();
+        // How far along the beam a point lies, which is the distance `stop` is in.
+        let along = |p: Vec3| (p - from).dot(dir);
+        let screen = |p: Vec3| project_point(p, viewport, f).expect("the point is behind the eye");
+
+        // A wall four metres along the beam: the light is on it and nowhere past it.
+        let stopped = beam(Some(4.0));
+        let pts = points(&stopped);
+        assert!(!pts.is_empty(), "the beam drew nothing at all");
+        let past = pts.iter().filter(|p| along(**p) > 4.05).count();
+        assert_eq!(past, 0, "{past} vertices of beam are past the wall at 4 m");
+        let dot = hot(&stopped).expect("the beam stops on the wall but leaves no dot on it");
+        let landing = from + dir * 4.0;
+        assert!(
+            (screen(dot) - screen(landing)).length() < 1.0,
+            "the dot is {:.0} px from where the ray met the wall",
+            (screen(dot) - screen(landing)).length(),
+        );
+        // Green, which is the one thing about it that is not geometry.
+        let greenest = stopped
+            .iter()
+            .map(|t| t.color.g - t.color.r.max(t.color.b))
+            .fold(f32::MIN, f32::max);
+        assert!(greenest > 0.2, "the beam is not green: {greenest:.2}");
+
+        // Nothing to stop it: the light runs to its longest, and a beam into the sky
+        // leaves nothing on the sky.
+        let open = beam(None);
+        let far = points(&open)
+            .iter()
+            .filter(|p| along(**p) > LASER_REACH - 0.05)
+            .count();
+        assert!(far > 0, "the beam does not reach {LASER_REACH:.0} m");
+        assert!(hot(&open).is_none(), "a beam into the sky left a dot on it");
+
+        // A wall an arm's length from the module — a player with their face
+        // against one: the beam is a stub and the dot is still on the wall, in front
+        // of the gun, because the dot is the one part of this that answers to the
+        // world rather than to the barrel.
+        let touching = beam(Some(0.2));
+        let dot = hot(&touching).expect("a wall at 0.2 m left no dot on it");
+        let landing = from + dir * 0.2;
+        assert!(
+            (screen(dot) - screen(landing)).length() < 1.0,
+            "a wall at 0.2 m: the dot is {:.0} px from the ray",
+            (screen(dot) - screen(landing)).length(),
+        );
+        assert!(
+            points(&touching).iter().all(|p| along(*p) < 0.25),
+            "a beam at a wall 0.2 m away was drawn longer than 0.25 m",
+        );
+
+        // And a number past the reach is clamped to it rather than believed: the
+        // beam is drawn to twenty-six metres and no further, whatever the caller
+        // says.
+        let overshot = points(&beam(Some(100.0)));
+        assert!(
+            overshot.iter().all(|p| along(*p) < LASER_REACH + 0.05),
+            "the beam drew past its own reach",
+        );
+    }
+
+    /// A build with one underbarrel fitting on it, for the rail tests.
+    fn build_with(part: &'static str) -> WeaponBuild {
+        WeaponBuild {
+            entries: vec![BuildEntry {
+                slot: SlotId("underbarrel"),
+                part: PartId(part),
+                roll: 0.5,
+            }],
+            load: crate::weapon::AmmoKind::Fmj,
+        }
+    }
+
+    /// The torch faces its own light; the laser is bolted down.
     ///
-    /// Three claims, measured three ways, for both rail fittings and three weapons
-    /// at three aims. The angle, on the matrix the fitting is drawn through — and
-    /// the *same* angle on the pose alone, so the test says what it was fixing
-    /// rather than only what the answer is. The mouth, which has to be a fixed point
-    /// of the turn: it is where the light starts, and a module aimed by moving its
-    /// window off the beam would be the same complaint from the other side. And the
-    /// geometry, out of `assemble`'s own output — the far corner of the module is
-    /// looked for where the turned matrix puts it rather than where the pose does,
-    /// which is the one assertion that fails when the wiring is taken back out of
-    /// `assemble`, the way it was checked.
+    /// The two rail fittings look alike and are two different things. The torch's
+    /// business is the middle of the screen — `hud::draw_torch` draws the pool there
+    /// and `dazzled_by_torch` measures the dazzle from it — so its cone is turned to
+    /// follow that light (`fitting_aim`), and the pivot is the mouth so the light
+    /// still leaves the lens it is drawn coming out of. The laser's business is its
+    /// own bore: a fitting on a rail shines down the weapon, so its module is drawn
+    /// through the pose and stays flush, and the beam that leaves it is the axis
+    /// `laser_ray` names.
+    ///
+    /// This is the other half of the laser report, and it is the half that was first
+    /// fixed the wrong way round. Turning the module to follow the beam made the two
+    /// parallel and left the module off the rail — and the beam was still bent to the
+    /// crosshair, so at a wall a metre and a half away it left the lens at up to
+    /// eleven degrees. The turn belongs to the light that answers to the screen; the
+    /// laser answers to its own barrel. What is measured here is that each is drawn
+    /// where its own rule puts it: the torch's module through the turned matrix, the
+    /// laser's through the pose, and the laser's beam down the axis of the module
+    /// that is drawn.
     #[test]
     fn a_rail_fitting_faces_its_own_light() {
-        // Both fittings, and each one's own box: the corner that swings furthest
-        // when the turn happens is the back of the module, because the front is
-        // the pivot. The torch is not the same fitting with a different light:
-        // its cone is 19 cm of geometry pointing the same way, which is why the
-        // same few degrees were visible on it sooner.
-        for (part, half) in [
-            ("laser", vec3(0.016, 0.014, 0.030)),
-            ("flashlight", vec3(0.018, 0.017, 0.036)),
-        ] {
-            let build = WeaponBuild {
-                entries: vec![BuildEntry {
-                    slot: SlotId("underbarrel"),
-                    part: PartId(part),
-                    roll: 0.5,
-                }],
-                load: crate::weapon::AmmoKind::Fmj,
+        for kind in [WeaponKind::Rifle, WeaponKind::Smg, WeaponKind::Pistol] {
+            let d = def(kind);
+            let mouth = d.rail() + LASER_BORE;
+            let axis_of = |m: &Mat4| {
+                (m.transform_point3(mouth + Vec3::Z) - m.transform_point3(mouth))
+                    .normalize_or_zero()
             };
-            for kind in [WeaponKind::Rifle, WeaponKind::Smg, WeaponKind::Pistol] {
-                let d = def(kind);
-                let mouth = d.rail() + LASER_BORE;
-                let corner = d.rail() - half;
-                for ads in [0.0f32, 0.5, 1.0] {
-                    let mut player = Player::new(Vec3::ZERO);
-                    player.ads = ads;
-                    let weapon = Weapon::with_build(kind, build.clone());
+            let drawn = |vm: &ViewModel, p: Vec3| {
+                vm.body
+                    .iter()
+                    .flat_map(|t| [t.a, t.b, t.c])
+                    .any(|v| v.distance(p) < 1e-4)
+            };
+            for ads in [0.0f32, 0.5, 1.0] {
+                let mut player = Player::new(Vec3::ZERO);
+                player.ads = ads;
+
+                // The torch: its cone is turned to the pool at the middle of the
+                // view, and its module with it.
+                let lamp = Weapon::with_build(kind, build_with("flashlight"));
+                assert!(lamp.torch(), "{kind:?} is not wearing the torch");
+                let mut vm = ViewModel::new();
+                let mat = vm.assemble(&player, &lamp, Paint::factory(), None);
+                let at = mat.transform_point3(mouth);
+                let light = (vec3(0.0, 0.0, LASER_REACH) - at).normalize_or_zero();
+                let turned = fitting_aim(&mat, kind) * mat;
+                let off = axis_of(&turned)
+                    .dot(light)
+                    .clamp(-1.0, 1.0)
+                    .acos()
+                    .to_degrees();
+                assert!(
+                    off < 0.5,
+                    "the torch on {kind:?} at ads {ads} leaves its light {off:.2}° off its \
+                     own cone",
+                );
+                // And what the pose alone was, canted for the eye's sake: a few
+                // degrees at the hip and nothing with the sights up.
+                if ads == 0.0 {
+                    let pose_off = axis_of(&mat)
+                        .dot(light)
+                        .clamp(-1.0, 1.0)
+                        .acos()
+                        .to_degrees();
                     assert!(
-                        weapon.laser() || weapon.torch(),
-                        "{kind:?} is not wearing the {part}"
-                    );
-                    let mut vm = ViewModel::new();
-                    let mat = vm.assemble(&player, &weapon, Paint::factory());
-                    let at = mat.transform_point3(mouth);
-                    let light = (vec3(0.0, 0.0, LASER_REACH) - at).normalize_or_zero();
-                    let off_axis = |m: &Mat4| {
-                        let axis = (m.transform_point3(mouth + Vec3::Z)
-                            - m.transform_point3(mouth))
-                        .normalize_or_zero();
-                        axis.dot(light).clamp(-1.0, 1.0).acos().to_degrees()
-                    };
-                    let turned = fitting_aim(&mat, kind) * mat;
-                    assert!(
-                        off_axis(&turned) < 0.5,
-                        "{part} on {kind:?} at ads {ads} leaves its light {:.2}° off its own axis",
-                        off_axis(&turned),
-                    );
-                    // And what it was: the pose on its own, canted for the eye's
-                    // sake, which is a few degrees at the hip and nothing with the
-                    // sights up.
-                    if ads == 0.0 {
-                        assert!(
-                            off_axis(&mat) > 4.0,
-                            "{part} on {kind:?} at the hip is only {:.2}° off, so there \
-                             is nothing here to fix",
-                            off_axis(&mat),
-                        );
-                    }
-                    // The window does not move: the light leaves where it left.
-                    assert!(
-                        turned.transform_point3(mouth).distance(at) < 1e-4,
-                        "{part} on {kind:?} at ads {ads} moved its own window off the beam",
-                    );
-                    // And the module that is *drawn* is the turned one. Its back
-                    // corner is in `assemble`'s output at one of these two places,
-                    // and which one it is at is the whole of whether the wiring is
-                    // still in `assemble`.
-                    let drawn = |p: Vec3| {
-                        vm.body
-                            .iter()
-                            .flat_map(|t| [t.a, t.b, t.c])
-                            .any(|v| v.distance(p) < 1e-4)
-                    };
-                    assert!(
-                        drawn(turned.transform_point3(corner)),
-                        "{part} on {kind:?} at ads {ads} draws its module through the pose alone",
-                    );
-                    assert!(
-                        !drawn(mat.transform_point3(corner)),
-                        "{part} on {kind:?} at ads {ads} draws its module twice",
+                        pose_off > 4.0,
+                        "the torch on {kind:?} at the hip is only {pose_off:.2}° off, so \
+                         there is nothing here to fix",
                     );
                 }
+                // The mouth does not move: the cone leaves where it left.
+                assert!(
+                    turned.transform_point3(mouth).distance(at) < 1e-4,
+                    "the torch on {kind:?} at ads {ads} moved its own mouth off the light",
+                );
+                // And the module that is *drawn* is the turned one. Its back corner
+                // is in `assemble`'s output at one of these two places, and which
+                // one it is at is the whole of whether the turn is still wired in.
+                let corner = d.rail() - vec3(0.018, 0.017, 0.036);
+                assert!(
+                    drawn(&vm, turned.transform_point3(corner)),
+                    "the torch on {kind:?} at ads {ads} is not drawn through its turn",
+                );
+                assert!(
+                    !drawn(&vm, mat.transform_point3(corner)),
+                    "the torch on {kind:?} at ads {ads} is drawn twice",
+                );
+
+                // The laser: the module sits flush on the rail, so its back corner
+                // is where the pose puts it and nowhere else, and its beam runs down
+                // that module's own axis.
+                let laser = Weapon::with_build(kind, build_with("laser"));
+                assert!(laser.laser(), "{kind:?} is not wearing the laser");
+                let mut vm = ViewModel::new();
+                let mat = vm.assemble(&player, &laser, Paint::factory(), None);
+                let l_mouth = d.rail() + LASER_BORE;
+                let corner = d.rail() - vec3(0.016, 0.014, 0.030);
+                assert!(
+                    drawn(&vm, mat.transform_point3(corner)),
+                    "the laser on {kind:?} at ads {ads} is not drawn flush on the rail",
+                );
+                let (from, dir) = vm
+                    .laser_ray(&player, &laser)
+                    .expect("a weapon with a laser has no ray");
+                let axis = (mat.transform_point3(l_mouth + Vec3::Z) - from).normalize_or_zero();
+                assert!(
+                    dir.dot(axis) > 1.0 - 1e-5,
+                    "the laser on {kind:?} at ads {ads} leaves {:.2}° off its own module",
+                    dir.dot(axis).clamp(-1.0, 1.0).acos().to_degrees(),
+                );
             }
         }
     }
@@ -5640,7 +6071,7 @@ mod tests {
             // what the pose reads is the field, and this is it settled.
             player.ads = 1.0;
             let mut vm = ViewModel::new();
-            vm.assemble(&player, arsenal.active_weapon(), Paint::factory());
+            vm.assemble(&player, arsenal.active_weapon(), Paint::factory(), None);
             if arsenal.active_weapon().scoped() {
                 assert!(
                     vm.body.is_empty(),
