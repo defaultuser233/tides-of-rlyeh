@@ -42,7 +42,7 @@
 
 ### ⚠️ 项目现状（2026-10-01 核实，已推翻旧审查报告的多条结论）
 
-[美术审查报告.md](美术审查报告.md) 与 [代码审查报告.md](代码审查报告.md) 的部分内容**已经过期**，以下是逐一读代码核实后的真实状态：
+[美术审查报告.md](archive/美术审查报告.md) 与 [代码审查报告.md](archive/代码审查报告.md) 的部分内容**已经过期**，以下是逐一读代码核实后的真实状态：
 
 | 事项 | 审查报告说的 | 代码里的实际情况 |
 |---|---|---|
@@ -450,7 +450,7 @@ Fabien Sanglard 的系列（**均 ✅ 已确认可访问**）：
 | D2 | **移动模型换成 Source 公式**：投影限速 + 摩擦 + 落地 1 帧无摩擦；参数落成 `accel / air_accel / friction / max_speed` 四个常量 | [adrianb.io](https://adrianb.io/2015/02/14/bunnyhop.html) ✅ | 能做出"空中转向加速"，且参数可调 |
 | D3 | **后坐力升级**：分段骨架（1–3 / 4–7 / 8–10 / 11+ 分段）+ **回落延迟** + 记录玩家下压量做抵消 | [GameRes 数值篇](https://www.gameres.com/915851.html) ⚠️ | 连发 10 发的弹着点形成可背的图案，而不是随机抖动 |
 | D4 | **可读性修复**：玩家曳光与敌人曳光区分（颜色 + 音高）；受击方向指示；命中顿帧 2–4 帧 | README 的 Known limitations + [screenshake 清单](https://github.layabox.com/xuhaodong/awesome-skills/-/blob/7cb809f72f89a918178d602f0544ebf7c8eaa20f/plugins/product-manager/skills/prd-creator/references/patterns/game-feel/screenshake.md) ⚠️ | 录制 30 秒视频，不看 HUD 也能分清"我在打人"和"我被打" |
-| D5 | **贴图接线（第 1 步）**：给 `mesh.rs` 的 `quad()` 加真实 UV；`finish()` 支持 `texture: Option<Handle>`；`level.rs` 的盒子类型从 `(min, max, Color)` 扩成 `(min, max, MaterialId)` | [美术审查报告.md](美术审查报告.md) §3 | 地面/墙/箱子贴图正确平铺，且重复纹理不拉伸 |
+| D5 | **贴图接线（第 1 步）**：给 `mesh.rs` 的 `quad()` 加真实 UV；`finish()` 支持 `texture: Option<Handle>`；`level.rs` 的盒子类型从 `(min, max, Color)` 扩成 `(min, max, MaterialId)` | [美术审查报告.md](archive/美术审查报告.md) §3 | 地面/墙/箱子贴图正确平铺，且重复纹理不拉伸 |
 | D6 | **准星与灵敏度**：换用 [Kenney Crosshair Pack](https://kenney.nl/assets/crosshair-pack) ⚠️ 里与你的散布匹配的准星（动态准星 = 散布的具象化）；设置菜单按 **cm/360** 呈现灵敏度 | [cm/360 解释](https://aimlabs.com/articles/aimlabs/a-quick-explainer-on-cm-360-and-the-common-cm-360-by-game/) ⚠️ | 静止/移动/开镜三种状态下准星大小能反映真实散布 |
 | D7 | **找 5 个陌生人试玩**（不要找朋友），只问两个问题：移动爽不爽、武器有没有打击感 | [Gunstoppable 复盘](https://80.lv/articles/gunstoppable-how-speed-is-damage-defined-a-roguelite-fps) ✅ | 记录原话，不改代码 |
 

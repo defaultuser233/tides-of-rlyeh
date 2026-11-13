@@ -7,6 +7,10 @@
 # Font download cache (the built font itself is committed).
 /tools/font/.cache/
 
+# Local build output. Releases are built by `.github/workflows/release.yml`;
+# a checked-in binary is 8 MB of history that every clone pays for.
+/build-artifacts/
+
 # Screenshots taken while verifying a change, kept out of `target` because
 # `target` is what everything else treats as disposable — a cleaned tree has
 # taken the evidence for a change with it more than once.

@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch replaces the first run rather than queueing
+# behind it: what matters is whether the tip is green.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The four gates from tools/gates.sh, run one per step so a failure names
+  # itself in the Actions summary instead of printing one line.
+  gates:
+    name: Gates (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # macroquad links X11 and GL, and the sound feature links ALSA. None of
+      # these are on a bare runner, and the failure without them is a link
+      # error in a dependency rather than anything this repository owns.
+      - name: Install the libraries the build links against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libx11-dev libgl1-mesa-dev
+
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test
+
+      # The cross-compiled Linux build and the release workflow both depend on
+      # the `sound` feature being optional; this is the guard that it stays so.
+      - name: cargo check --no-default-features
+        run: cargo check --no-default-features
+
+  # Windows is where the game is played, and `src/win32.rs` only compiles there.
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+
+      - name: cargo test
+        run: cargo test
+
+      - name: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings

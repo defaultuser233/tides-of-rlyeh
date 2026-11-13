@@ -21,10 +21,16 @@
 *.obj   text
 *.mtl   text
 
+# Workflow files are read on Linux runners.
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
 # Never touched: normalising these would corrupt them.
 *.png   binary
 *.ogg   binary
 *.wav   binary
 *.ttf   binary
 *.otf   binary
+*.exe   binary
 *.zip   binary
+*.gz    binary
